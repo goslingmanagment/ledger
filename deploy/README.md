@@ -32,6 +32,20 @@ bash deploy/release.sh --bootstrap   # первая установка
 - `bash deploy/restore-drill.sh` — восстановить свежую копию локально и поднять на ней сервис.
 - `bash deploy/replica-drill.sh` на VPS — восстановить базу из реплики Litestream и проверить её.
 
+## Ключи агентов
+
+На VPS, `cd /opt/ledger`; ключ печатается один раз, в базе остаётся только SHA-256:
+
+```
+bash deploy/compose.sh exec -T app ledger keys create bobr --scope read      # decide — только openclaw-main
+bash deploy/compose.sh exec -T app ledger keys list
+bash deploy/compose.sh exec -T app ledger keys revoke bobr                   # действует сразу
+bash deploy/compose.sh exec -T app ledger keys create bobr --scope read --replace   # новый вместо прежнего
+```
+
+Агенту — `~/.config/ledger/credentials` (chmod 600): `LEDGER_URL=https://ledger.gosling-agency.ru` и
+`LEDGER_KEY=<ключ>`. Проверка: `ledger sql "SELECT 1"` отвечает строкой, `ledger sql "DELETE FROM meta"` — 403.
+
 ## Сайт
 
 ```
