@@ -283,6 +283,9 @@ func importBybitState(ctx context.Context, args []string) error {
 	}
 	defer tx.Rollback()
 	rep, err := bybit.ImportState(ctx, tx, source, time.Now())
+	if err == nil {
+		_, err = bybit.PostConverts(ctx, tx, time.Now())
+	}
 	if err != nil {
 		return err
 	}
