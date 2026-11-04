@@ -20,6 +20,9 @@ func init() {
 	Command(Cmd{Name: "journal check", Summary: "строгая проверка ledger.md без базы: формат строк и теги", Run: journalCheck})
 	Command(Cmd{Name: "import ledger-md", Summary: "импорт журнала: bundle.json или ledger.md [--align счёт@дата=сумма] [--overrides]", Run: importLedgerMD})
 	Command(Cmd{Name: "export ledger-md", Summary: "зеркало ledger.md из базы [--out файл]", Run: exportLedgerMD})
+	Command(Cmd{Name: "journal sync", Summary: "тень: толкнуть новые коммиты ledger.md на сервер: --git <репо> [--path] [--worktree]", Run: journalSync})
+	Command(Cmd{Name: "mirror", Summary: "зеркало: записать ledger.md из API, если изменилось: ledger mirror --out <файл>", Run: mirror})
+	Command(Cmd{Name: "mode", Summary: "режим учёта: ledger mode [shadow|live]", Run: modeCmd})
 	Command(Cmd{Name: "balance", Summary: "остаток счёта: ledger balance <счёт> [--at ГГГГ-ММ-ДД] [--recorded-by время]", Run: balance})
 }
 
@@ -180,24 +183,115 @@ func exportLedgerMD(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	var text string
+	if local() {
+		store, err := OpenStore(ctx)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		if text, err = journal.Export(ctx, store.RO); err != nil {
+			return err
+		}
+	} else {
+		c, err := apiClient()
+		if err != nil {
+			return err
+		}
+		if text, err = c.Text(ctx, "/v1/export/ledger-md"); err != nil {
+			return apiError(err)
+		}
+	}
+	if *out == "" {
+		_, err := os.Stdout.WriteString(text)
+		return err
+	}
+	return writeIfChanged(*out, text)
+}
+
+func writeIfChanged(path, text string) error {
+	if cur, err := os.ReadFile(path); err == nil && string(cur) == text {
+		return nil
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(text), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// journalSync pushes the journal's history to the server while /OS is still its canon: the server
+// applies only commits it has not seen.
+func journalSync(ctx context.Context, args []string) error {
+	fs := Flags("journal sync")
+	repo := fs.String("git", "", "репозиторий с журналом")
+	path := fs.String("path", "finance/ledger.md", "путь файла в репозитории")
+	worktree := fs.Bool("worktree", false, "добавить незакоммиченную рабочую копию")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *repo == "" {
+		return fmt.Errorf("нужен --git")
+	}
+	b, err := journal.FromGit(ctx, *repo, *path, *worktree)
+	if err != nil {
+		return err
+	}
+	c, err := apiClient()
+	if err != nil {
+		return err
+	}
+	var out map[string]any
+	if err := c.Do(ctx, "POST", "/v1/import/ledger-md", map[string]any{"bundle": b}, &out); err != nil {
+		return apiError(err)
+	}
+	return printJSON(out)
+}
+
+// mirror writes the journal from the API to a file, atomically and only when it changed: after the
+// switchover the file in /OS is a mirror, its commit is made by the nearest session there.
+func mirror(ctx context.Context, args []string) error {
+	fs := Flags("mirror")
+	out := fs.String("out", "", "файл зеркала")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *out == "" {
+		return fmt.Errorf("нужен --out")
+	}
+	c, err := apiClient()
+	if err != nil {
+		return err
+	}
+	text, err := c.Text(ctx, "/v1/export/ledger-md")
+	if err != nil {
+		return apiError(err)
+	}
+	return writeIfChanged(*out, text)
+}
+
+func modeCmd(ctx context.Context, args []string) error {
 	store, err := OpenStore(ctx)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
-	text, err := journal.Export(ctx, store.RO)
+	if len(args) == 0 {
+		mode := "shadow"
+		_ = store.RO.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'mode'`).Scan(&mode)
+		fmt.Println(mode)
+		return nil
+	}
+	if len(args) != 1 || (args[0] != "shadow" && args[0] != "live") {
+		return fmt.Errorf("режим: shadow или live")
+	}
+	_, err = store.RW.ExecContext(ctx, `INSERT INTO settings(key, value, updated_at) VALUES ('mode', ?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`, args[0], ts.Format(time.Now()))
 	if err != nil {
 		return err
 	}
-	if *out == "" {
-		_, err = os.Stdout.WriteString(text)
-		return err
-	}
-	tmp := *out + ".tmp"
-	if err := os.WriteFile(tmp, []byte(text), 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, *out)
+	fmt.Println(args[0])
+	return nil
 }
 
 func balance(ctx context.Context, args []string) error {

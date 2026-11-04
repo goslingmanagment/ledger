@@ -100,3 +100,26 @@ func errorOf(status int, raw []byte) *Error {
 	}
 	return &Error{Status: status, Message: msg}
 }
+
+// Text fetches a plain text answer.
+func (c *Client) Text(ctx context.Context, path string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.URL+path, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.key)
+	req.Header.Set("User-Agent", "ledger-cli/"+version.Get())
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxAnswer))
+	if err != nil {
+		return "", fmt.Errorf("GET %s: %w", path, err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return "", errorOf(resp.StatusCode, raw)
+	}
+	return string(raw), nil
+}
