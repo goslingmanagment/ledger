@@ -66,9 +66,11 @@ func book(ctx context.Context, q ledger.Querier, account string) (float64, error
 	return money.Micros(v).Float(), err
 }
 
+const cashCheck = "касса Bybit"
+
 // BybitBalance: the `bybit` account against the balance read from the API, ±$1.
 func BybitBalance(ctx context.Context, e Env) Result {
-	const name = "касса Bybit"
+	const name = cashCheck
 	var value int64
 	var at string
 	err := e.Q.QueryRowContext(ctx, `SELECT value, observed_at FROM observations WHERE kind = 'bybit_balance' AND subject = 'bybit'
@@ -90,7 +92,7 @@ func BybitBalance(ctx context.Context, e Env) Result {
 	if err != nil {
 		return fail(name, "urgent", err.Error(), nil)
 	}
-	pending, err := bybit.PendingUSD(ctx, e.Q)
+	pending, err := bybit.PendingUSDAt(ctx, e.Q, at)
 	if err != nil {
 		return fail(name, "urgent", err.Error(), nil)
 	}
@@ -121,8 +123,8 @@ func frozenAccounts(ctx context.Context, q ledger.Querier) map[string]bool {
 // not decided yet are open proposals: they already left the card but not the books.
 func CardAnchors(ctx context.Context, e Env) Result {
 	const name = "карты против бота"
-	rows, err := e.Q.QueryContext(ctx, `SELECT o.subject, o.value, o.observed_at FROM observations o WHERE o.kind = 'card_anchor'
-		AND o.observed_at = (SELECT max(x.observed_at) FROM observations x WHERE x.kind = 'card_anchor' AND x.subject = o.subject)`)
+	rows, err := e.Q.QueryContext(ctx, `SELECT o.subject, o.value, o.observed_at FROM observations o WHERE o.kind IN ('card_anchor', 'wallet_anchor')
+		AND o.observed_at = (SELECT max(x.observed_at) FROM observations x WHERE x.kind = o.kind AND x.subject = o.subject)`)
 	if err != nil {
 		return fail(name, "urgent", err.Error(), nil)
 	}
@@ -143,11 +145,28 @@ func CardAnchors(ctx context.Context, e Env) Result {
 	}
 	rows.Close()
 	frozen := frozenAccounts(ctx, e.Q)
-	var bad []string
+	var bad, wallet []string
 	seen := 0
 	sort.Slice(list, func(i, j int) bool { return list[i].subject < list[j].subject })
 	for _, a := range list {
 		if frozen[a.subject] {
+			continue
+		}
+		if a.subject == "cincin_wallet" {
+			// The bot prints the wallet only when asked, so the anchor may be old: the books at its day, and the
+			// load fees not decided yet. Money on its way through the wallet can show here for a day: a warning.
+			var b, fees float64
+			var micros int64
+			if err := e.Q.QueryRowContext(ctx, `SELECT COALESCE(SUM(l.amount), 0) FROM lines l JOIN entries e ON e.id = l.entry_id
+				WHERE l.account = ? AND substr(e.effective_at, 1, 10) <= ?`, a.subject, a.at[:10]).Scan(&micros); err != nil {
+				return fail(name, "urgent", err.Error(), nil)
+			}
+			b = money.Micros(micros).Float()
+			_ = e.Q.QueryRowContext(ctx, `SELECT COALESCE(SUM(CAST(json_extract(content, '$.fee') AS REAL)), 0) FROM proposals
+				WHERE status = 'open' AND json_extract(content, '$.loaded_card') IS NOT NULL`).Scan(&fees)
+			if d := a.value - (b - fees); math.Abs(d) > 1 {
+				wallet = append(wallet, fmt.Sprintf("кошелёк: по книгам %.2f (комиссии ждут решения %.2f), бот %.2f на %s, Δ %+.2f", b, fees, a.value, a.at, d))
+			}
 			continue
 		}
 		seen++
@@ -164,12 +183,15 @@ func CardAnchors(ctx context.Context, e Env) Result {
 		}
 	}
 	if len(bad) > 0 {
-		return fail(name, "urgent", strings.Join(bad, "; "), nil)
+		return fail(name, "urgent", strings.Join(append(bad, wallet...), "; "), nil)
+	}
+	if len(wallet) > 0 {
+		return fail(name, "warn", strings.Join(wallet, "; "), nil)
 	}
 	if seen == 0 {
 		return fail(name, "warn", "анкоров карт ещё нет", nil)
 	}
-	return pass(name, fmt.Sprintf("%d карт сходятся с ботом ±$1", seen))
+	return pass(name, fmt.Sprintf("%d карт и кошелёк сходятся с ботом ±$1", seen))
 }
 
 // Unlinked: a Bybit movement since the full journal is closed within 3 days (a row or an explicit personal).
@@ -454,6 +476,13 @@ func Sources(ctx context.Context, e Env) Result {
 			if st.Funding != nil && len(st.Funding.ChainGaps) > 0 {
 				problems = append(problems, fmt.Sprintf("Bybit Funding: %d разрывов цепочки остатка", len(st.Funding.ChainGaps)))
 			}
+			if st.Funding != nil {
+				for _, f := range st.Funding.UnmatchedFunding {
+					if t, err := ts.Parse(f.At); err == nil && e.Now.Sub(t) > 48*time.Hour {
+						problems = append(problems, fmt.Sprintf("Bybit Funding: движение %s %s (%s) от %s без операции в выгрузке дольше 48 часов", f.Signed, f.Coin, f.Type, f.At))
+					}
+				}
+			}
 			if st.Key != nil && !st.Key.ReadOnly {
 				problems = append(problems, "ключ Bybit НЕ только на чтение — пересоздать")
 			}
@@ -548,6 +577,18 @@ func Latest(ctx context.Context, q ledger.Querier) ([]Result, string, error) {
 	return out, at, rows.Err()
 }
 
+// WithStale adds a failure when the last run is old: the job stopped, and its old green must not read as green.
+func WithStale(rs []Result, at string, now time.Time) []Result {
+	const staleRun = 2 * time.Hour
+	if at == "" {
+		return append(rs, Result{Name: "проверки идут", Severity: "warn", Summary: "проверки ещё не запускались"})
+	}
+	if t, err := ts.Parse(at); err == nil && now.Sub(t) > staleRun {
+		return append(rs, Result{Name: "проверки идут", Severity: "warn", Summary: "последний прогон проверок " + at + ": задание на сервере стоит, зелёному верить нельзя"})
+	}
+	return rs
+}
+
 // Urgent returns urgent failures to send: new ones and those last sent over `every` ago. It marks them
 // sent and forgets the ones that recovered.
 func Urgent(ctx context.Context, q ledger.Querier, rs []Result, now time.Time, every time.Duration) ([]Result, error) {
@@ -558,6 +599,17 @@ func Urgent(ctx context.Context, q ledger.Querier, rs []Result, now time.Time, e
 			continue
 		}
 		failing[r.Name] = true
+		if r.Name == cashCheck {
+			// The balance and the movements are read at different moments: one run can show a passing difference.
+			var before int
+			err := q.QueryRowContext(ctx, `SELECT ok FROM checks WHERE name = ? ORDER BY id DESC LIMIT 1 OFFSET 1`, r.Name).Scan(&before)
+			if err == sql.ErrNoRows || (err == nil && before == 1) {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+		}
 		var last string
 		err := q.QueryRowContext(ctx, `SELECT last_sent FROM alerts WHERE name = ?`, r.Name).Scan(&last)
 		send := err == sql.ErrNoRows

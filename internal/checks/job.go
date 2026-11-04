@@ -40,10 +40,12 @@ func init() {
 			} else if rs, at, err = Latest(r.Context(), s.Store.RO); err != nil {
 				server.WriteError(w, http.StatusInternalServerError, err.Error())
 				return
+			} else {
+				rs = WithStale(rs, at, time.Now())
 			}
 			server.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "at": at, "checks": rs})
 		})))
-		s.Mux.Handle("POST /v1/health/urgent", auth.Require(s, "read", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.Mux.Handle("POST /v1/health/urgent", auth.Require(s, "decide", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			rs, at, err := Latest(r.Context(), s.Store.RO)
 			if err != nil {
 				server.WriteError(w, http.StatusInternalServerError, err.Error())
