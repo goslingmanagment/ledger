@@ -152,6 +152,9 @@ func patched(c Content, key, text string) ([]bybit.SuggestedDocument, error) {
 	if err != nil {
 		return nil, fmt.Errorf("custom в боевом режиме — JSON-правка строки (category, counterparty, model, note, type, amount, split): %v", err)
 	}
+	if c.AwaitDeposit && p.Amount == nil && len(p.Split) == 0 {
+		return nil, errors.New("custom: пополнение CinCin ждёт депозита от бота, нужна сумма, дошедшая до кошелька: amount")
+	}
 	base := baseDocuments(c)
 	if len(base) == 0 { // nothing suggested: the answer is the whole row, the journal's checks name what is missing
 		base = []bybit.SuggestedDocument{{Date: c.Date, Model: "—", Status: "paid", Note: key}}
@@ -342,6 +345,9 @@ func validate(ctx context.Context, q ledger.Querier, mode string, b *Brief, d De
 	}
 	switch d.Kind {
 	case Confirm:
+		if pl.c.AwaitDeposit { // the row is the amount that reached the wallet: the bot has not said it yet
+			return pl, fmt.Errorf("п.%d: пополнение CinCin ждёт депозита от бота; отложи или custom с суммой, дошедшей до кошелька", d.Num)
+		}
 		if len(pl.c.Documents) == 0 {
 			return pl, fmt.Errorf("п.%d: предложенной строки нет, нужен custom, personal или recorded", d.Num)
 		}

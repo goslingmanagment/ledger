@@ -402,7 +402,8 @@ func LinkNotesAndClose(ctx context.Context, q ledger.Querier, by string, now tim
 }
 
 // PendingUSD sums the dollar movements the books do not know yet: they already changed the balance of the
-// API, and have their own check of being closed within three days.
+// API, and have their own check of being closed within three days. A movement ledger-sync closed before
+// the transfer is not one of them: its row is usually there, only the link is not.
 func PendingUSD(ctx context.Context, q ledger.Querier) (float64, error) {
 	start := ""
 	if err := q.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'full_ledger_from'`).Scan(&start); err != nil && err != sql.ErrNoRows {
@@ -412,7 +413,8 @@ func PendingUSD(ctx context.Context, q ledger.Querier) (float64, error) {
 		start = "2026-08-01"
 	}
 	rows, err := q.QueryContext(ctx, `SELECT u.direction, u.amount, COALESCE(json_extract(e.payload, '$.fee'), '') FROM v_bybit_unlinked u
-		JOIN events e ON e.id = u.event_id WHERE u.occurred_at >= ? AND u.coin IN ('USDT', 'USDC')`, start)
+		JOIN events e ON e.id = u.event_id WHERE u.occurred_at >= ? AND u.coin IN ('USDT', 'USDC')
+		AND COALESCE(u.links, '') NOT LIKE '%seen:%'`, start)
 	if err != nil {
 		return 0, err
 	}
