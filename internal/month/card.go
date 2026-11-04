@@ -32,11 +32,11 @@ func (o *Ordered) Add(k string, v float64) {
 
 // Sum adds the values in insertion order.
 func (o *Ordered) Sum() float64 {
-	s := 0.0
+	xs := make([]float64, 0, len(o.Keys))
 	for _, k := range o.Keys {
-		s += o.Vals[k]
+		xs = append(xs, o.Vals[k])
 	}
-	return s
+	return money.PySum(xs)
 }
 
 func (o *Ordered) delete(k string) {
@@ -147,16 +147,17 @@ func BuildCard(cv *Cover, month string, tabs []Tab) (*Card, error) {
 	for _, p := range cv.PageOrder {
 		rs := cv.Rows[p]
 		minimum := c.Routes[p].Min
-		free := 0.0
+		var freeParts []float64
 		for _, r := range rs {
 			if !r.Avail.After(asOf) {
 				for _, part := range r.Parts {
 					if part.Req == nil && !part.Anchor {
-						free += part.Amt
+						freeParts = append(freeParts, part.Amt)
 					}
 				}
 			}
 		}
+		free := money.PySum(freeParts)
 		for _, r := range rs {
 			if r.T.Before(m0) || !r.T.Before(m1) {
 				continue
@@ -198,12 +199,12 @@ func BuildCard(cv *Cover, month string, tabs []Tab) (*Card, error) {
 	}
 	for _, p := range card.AggOrder {
 		a := card.Agg[p]
-		earned := 0.0
+		var earned []float64
 		for _, k := range parts {
 			a.Add(k, 0)
-			earned += a.Vals[k]
+			earned = append(earned, a.Vals[k])
 		}
-		a.Add("earned", earned)
+		a.Add("earned", money.PySum(earned))
 		rt := c.Routes[p]
 		l := card.line(LineKey{rt.Model, rt.Channel})
 		for _, k := range a.Keys {
@@ -332,13 +333,13 @@ func expenses(c Config, month string, rows []journal.Row, tabs []Tab, asOf time.
 			days = append(days, d)
 		}
 		sort.Strings(days)
-		s := 0.0
+		var worked []float64
 		for _, d := range days {
 			if d[:7] == month && d <= asDate {
-				s += t.Days[d]
+				worked = append(worked, t.Days[d])
 			}
 		}
-		e.Chat.Add(t.Model, s)
+		e.Chat.Add(t.Model, money.PySum(worked))
 	}
 	for _, r := range rows {
 		mo := r.Date[:7]
@@ -380,13 +381,15 @@ func expenses(c Config, month string, rows []journal.Row, tabs []Tab, asOf time.
 			}
 			e.Cats.Add(r.Category, v)
 		default:
-			movedSum, here := 0.0, 0.0
+			var movedParts []float64
+			here := 0.0
 			for _, fm := range tg.ForMonth {
-				movedSum += fm.Amount
+				movedParts = append(movedParts, fm.Amount)
 				if fm.Month == month {
 					here = fm.Amount
 				}
 			}
+			movedSum := money.PySum(movedParts)
 			own := 0.0
 			if mo == month {
 				own = amt - movedSum
@@ -437,11 +440,11 @@ func expenses(c Config, month string, rows []journal.Row, tabs []Tab, asOf time.
 		e.Cats.delete("Доля модели")
 		e.Cats.Add("Доля модели сверх доли", v)
 	}
-	extra := 0.0
+	var extras []float64
 	for _, x := range e.Extra {
-		extra += x.Amount
+		extras = append(extras, x.Amount)
 	}
-	e.Total = e.Chat.Sum() + extra + e.Cats.Sum()
+	e.Total = e.Chat.Sum() + money.PySum(extras) + e.Cats.Sum()
 	kept := newOrdered()
 	for _, k := range e.Cats.Keys {
 		if math.Abs(e.Cats.Vals[k]) > 5e-3 {
@@ -508,11 +511,11 @@ func (c *Card) Checks(tabsErr string) []Check {
 	var bad []string
 	for _, p := range cv.PageOrder {
 		for _, r := range cv.Rows[p] {
-			s := 0.0
+			var amts []float64
 			for _, part := range r.Parts {
-				s += part.Amt
+				amts = append(amts, part.Amt)
 			}
-			if math.Abs(s-r.Net) > 1e-6 {
+			if math.Abs(money.PySum(amts)-r.Net) > 1e-6 {
 				bad = append(bad, p+" "+iso(r.T))
 			}
 		}

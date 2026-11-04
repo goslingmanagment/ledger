@@ -123,3 +123,25 @@ func RoundN(x float64, n int) float64 {
 	v, _ := strconv.ParseFloat(strconv.FormatFloat(x, 'f', n, 64), 64)
 	return v
 }
+
+// PySum is Python's sum() over floats, as the month card script computes it (3.12 and later): Neumaier's
+// compensation, added at the end. A plain loop differs in the last bits, and an exact tie of a cent can flip.
+func PySum(xs []float64) float64 {
+	if len(xs) == 0 {
+		return 0
+	}
+	f, c := xs[0], 0.0
+	for _, x := range xs[1:] {
+		t := f + x
+		if math.Abs(f) >= math.Abs(x) {
+			c += (f - t) + x
+		} else {
+			c += (x - t) + f
+		}
+		f = t
+	}
+	if c != 0 && !math.IsInf(c, 0) && !math.IsNaN(c) {
+		f += c
+	}
+	return f
+}
