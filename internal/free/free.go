@@ -10,12 +10,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/goslingmanagment/ledger/internal/auth"
+	"github.com/goslingmanagment/ledger/internal/bybit"
 	"github.com/goslingmanagment/ledger/internal/journal"
 	"github.com/goslingmanagment/ledger/internal/ledger"
 	"github.com/goslingmanagment/ledger/internal/money"
@@ -232,6 +234,16 @@ func Compute(ctx context.Context, q ledger.Querier, now time.Time) (Answer, erro
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return a, err
+	}
+	// What already left the accounts and has no journal row yet: without it the free money is overstated
+	// until the owner answers the brief.
+	pending, err := bybit.PendingUSD(ctx, q)
+	if err != nil {
+		return a, err
+	}
+	if math.Abs(pending) >= 0.005 {
+		a.Liquid += pending
+		a.LiquidItems = append(a.LiquidItems, Item{Name: "движения Bybit без строки журнала", Amount: money.Round2(pending)})
 	}
 	sort.Slice(a.LiquidItems, func(i, j int) bool { return a.LiquidItems[i].Name < a.LiquidItems[j].Name })
 	sort.Slice(a.DebtItems, func(i, j int) bool { return a.DebtItems[i].Amount > a.DebtItems[j].Amount })

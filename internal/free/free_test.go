@@ -155,3 +155,23 @@ func TestFreeBreakdown(t *testing.T) {
 		t.Fatalf("v_free %v %v", freeNow, err)
 	}
 }
+
+// A movement that already left Bybit and has no journal row yet lowers the money at once.
+func TestPendingMovementLowersLiquid(t *testing.T) {
+	s, ctx := openDB(t)
+	now, _ := ts.Parse("2026-11-04T12:00:00+03:00")
+	post(t, s, ctx, "2026-10-01", line("bybit", "1000.00"), line("opening", "-1000.00"))
+	if _, err := s.RW.Exec(`INSERT INTO events(source, source_id, kind, occurred_at, received_at, payload) VALUES
+		('bybit', 'withdrawal:1', 'withdrawal', '2026-11-04T10:00:00.000+03:00', 'x', '{"direction":"expense","amount":"100","fee":"1.3","coin":"USDT"}'),
+		('bybit', 'deposit:2', 'deposit', '2026-11-04T11:00:00.000+03:00', 'x', '{"direction":"income","amount":"50","coin":"USDT"}'),
+		('bybit', 'withdrawal:3', 'withdrawal', '2026-11-04T11:30:00.000+03:00', 'x', '{"direction":"expense","amount":"1","coin":"BTC"}')`); err != nil {
+		t.Fatal(err)
+	}
+	a, err := Compute(ctx, s.RO, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !near(a.Liquid, 1000-101.3+50) {
+		t.Fatalf("liquid %v %+v", a.Liquid, a.LiquidItems)
+	}
+}
