@@ -535,3 +535,31 @@ func Export(ctx context.Context, q ledger.Querier) (string, error) {
 	}
 	return Render(lines, byNum, extra), nil
 }
+
+// OptionsFromSettings reads the accrual date and the model names.
+func OptionsFromSettings(ctx context.Context, q ledger.Querier) (Options, error) {
+	var o Options
+	if err := q.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'accrual_from'`).Scan(&o.AccrualFrom); err != nil {
+		return o, fmt.Errorf("нет settings.accrual_from: ledger import business")
+	}
+	var models string
+	_ = q.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'models'`).Scan(&models)
+	for _, m := range strings.Split(models, ",") {
+		if m = strings.TrimSpace(m); m != "" {
+			o.Models = append(o.Models, m)
+		}
+	}
+	return o, nil
+}
+
+// ParseAlign builds an alignment from its text parts.
+func ParseAlign(account, date string, upTo int, amount string) (Align, error) {
+	v, err := money.Parse(amount)
+	if err != nil {
+		return Align{}, fmt.Errorf("выравнивание %s: %w", account, err)
+	}
+	if !dateRe.MatchString(date) {
+		return Align{}, fmt.Errorf("выравнивание %s: дата «%s»", account, date)
+	}
+	return Align{Account: account, Date: date, UpTo: upTo, Amount: v}, nil
+}
