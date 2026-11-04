@@ -60,7 +60,7 @@ func EnsureAccount(ctx context.Context, q Querier, code, openedAt string) error 
 	return fmt.Errorf("unknown account %q (not in the chart and no pattern matches)", code)
 }
 
-// Slug normalises a model or person name for an account code: "Lora" → "lora".
+// Slug normalises a model or person name for an account code: "Alfa" → "alfa".
 func Slug(s string) string {
 	return strings.ToLower(strings.TrimSpace(s))
 }

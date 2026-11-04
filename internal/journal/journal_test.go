@@ -28,17 +28,17 @@ func sample() string {
 	return head + strings.Join([]string{
 		row("1", "2026-07-30", "income", "Owner вливание", "Владелец", "—", "1000.00", "USDT", "Internal Transfer (Bybit)", "paid", "старт"),
 		row("2", "2026-08-01", "transfer", "Остаток на старте", "CinCin •1111", "—", "20.00", "USD", "—", "paid", "остаток карты"),
-		row("3", "2026-08-10", "income", "Платформы", "Модель А", "Lora", "700.00", "USDT", "Internal Transfer (Bybit)", "paid", "перевод {перевод: срез 2026-08-10 12:00; депозиты: 1000}"),
-		row("4", "2026-08-12", "income", "Custom", "Фан", "Lora", "250.00", "USDT", "USDT TRC-20", "paid", "аванс {сделка: d1; цена 450; доля 135}"),
+		row("3", "2026-08-10", "income", "Платформы", "Модель А", "Alfa", "700.00", "USDT", "Internal Transfer (Bybit)", "paid", "перевод {перевод: срез 2026-08-10 12:00; депозиты: 1000}"),
+		row("4", "2026-08-12", "income", "Custom", "Фан", "Alfa", "250.00", "USDT", "USDT TRC-20", "paid", "аванс {сделка: d1; цена 450; доля 135}"),
 		"",
-		row("5", "2026-08-20", "income", "Custom", "Фан", "Lora", "200.00", "USDT", "USDT TRC-20", "paid", "остаток {сделка: d1; цена 450; доля 135}"),
+		row("5", "2026-08-20", "income", "Custom", "Фан", "Alfa", "200.00", "USDT", "USDT TRC-20", "paid", "остаток {сделка: d1; цена 450; доля 135}"),
 		row("6", "2026-08-21", "expense", "Инструменты", "Сервис", "—", "12.00", "USD", "Карта CinCin 1111", "paid", "покупка"),
 		row("7", "2026-07-23", "expense", "Инструменты", "Прокси", "—", "90.00", "USDT", "USDT TRC-20", "paid", "на 3 месяца {предоплата 2026-07..2026-09}"),
 		row("8", "2026-09-05", "expense", "Комиссии", "Bybit", "—", "3.00", "USDT", "USDT TRC-20", "paid", "сеть за август {за 2026-08: 3}"),
 		row("9", "2026-09-06", "transfer", "Внутренний перевод", "Bybit → CinCin (кошелёк)", "—", "97.00", "USDT", "USDT TRC-20", "paid", "пополнение"),
-		row("10", "2026-09-08", "income", "Платформы", "Модель А", "Lora", "1400.00", "USDT", "Internal Transfer (Bybit)", "paid", "перевод {перевод: срез 2026-09-08 10:00; депозиты: 2000}"),
-		row("11", "2026-09-09", "expense", "Чаттер зарплата", "Чаттер", "Lora", "105.00", "USDT", "Internal Transfer (Bybit)", "paid", "по таблице 100 {сверх таблицы: 5}"),
-		row("12", "2026-09-09", "expense", "Прочее", "Модель А", "Lora", "40.00", "USDT", "Удержано из вывода", "paid", "покупка из вывода #10"),
+		row("10", "2026-09-08", "income", "Платформы", "Модель А", "Alfa", "1400.00", "USDT", "Internal Transfer (Bybit)", "paid", "перевод {перевод: срез 2026-09-08 10:00; депозиты: 2000}"),
+		row("11", "2026-09-09", "expense", "Чаттер зарплата", "Чаттер", "Alfa", "105.00", "USDT", "Internal Transfer (Bybit)", "paid", "по таблице 100 {сверх таблицы: 5}"),
+		row("12", "2026-09-09", "expense", "Прочее", "Модель А", "Alfa", "40.00", "USDT", "Удержано из вывода", "paid", "покупка из вывода #10"),
 		row("13", "2026-09-10", "expense", "Комиссии", "Карта", "—", "1.00", "USD", "Карта CinCin 1111", "cancelled", "аннулирована"),
 	}, "\n") + "\n\n## Блок\n\nтекст после таблицы\n"
 }
@@ -104,7 +104,7 @@ func TestRoundTripAndBalances(t *testing.T) {
 		t.Fatalf("wallet %s", got)
 	}
 	// The deal's share goes to the model once, in its first payment by date.
-	if got := bal(t, s, "payable:lora", ""); got != money.MustParse("-135.00") {
+	if got := bal(t, s, "payable:alfa", ""); got != money.MustParse("-135.00") {
 		t.Fatalf("model share %s", got)
 	}
 	if got := bal(t, s, "income:custom", ""); got != money.MustParse("-315.00") {

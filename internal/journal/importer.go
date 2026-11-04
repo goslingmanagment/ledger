@@ -45,6 +45,7 @@ type Align struct {
 // Options of an import.
 type Options struct {
 	AccrualFrom string
+	Models      []string // settings.models
 	Align       []Align
 	Author      string
 }
@@ -260,7 +261,10 @@ func reconcile(ctx context.Context, tx *sql.Tx, docs map[int]ledger.Document, po
 	for _, d := range docs {
 		rows = append(rows, rowFromDoc(d))
 	}
-	c := &Context{AccrualFrom: o.AccrualFrom, FirstOfDeal: map[string]int{}, Overrides: overrides}
+	c := &Context{AccrualFrom: o.AccrualFrom, FirstOfDeal: map[string]int{}, Overrides: overrides, Models: map[string]bool{}}
+	for _, m := range o.Models {
+		c.Models[m] = true
+	}
 	tagsOf := map[int]Tags{}
 	var problems []string
 	for _, r := range SortedByDate(rows) {

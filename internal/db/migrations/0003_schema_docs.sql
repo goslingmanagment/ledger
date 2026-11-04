@@ -14,7 +14,7 @@ INSERT INTO schema_docs(tbl, col, description) VALUES
  ('documents','type','income | expense | transfer'),
  ('documents','category','Категория из правил учёта (Чаттер зарплата, Платформы, Комиссии…)'),
  ('documents','counterparty','Кому/Откуда'),
- ('documents','model','Модель (Lora, Ari, Lily, «—»)'),
+ ('documents','model','Модель или «—»'),
  ('documents','amount','Сумма текстом, как в журнале'),
  ('documents','amount_micros','Сумма в микродолларах'),
  ('documents','method','Метод: откуда или куда ушли деньги (Bybit, карта CinCin, P2P…)'),
