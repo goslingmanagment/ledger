@@ -312,3 +312,70 @@ func TestSaveAndLatest(t *testing.T) {
 		t.Fatalf("%+v %s %v", got, at, err)
 	}
 }
+
+func TestStaleRunIsNotGreen(t *testing.T) {
+	green := []Result{{Name: "а", OK: true}}
+	if got := WithStale(green, ts.Format(now.Add(-time.Hour)), now); len(got) != 1 {
+		t.Fatalf("a recent run: %+v", got)
+	}
+	got := WithStale(green, ts.Format(now.Add(-3*time.Hour)), now)
+	if len(got) != 2 || got[1].OK {
+		t.Fatalf("an old run: %+v", got)
+	}
+	if got := WithStale(nil, "", now); len(got) != 1 || got[0].OK {
+		t.Fatalf("no run: %+v", got)
+	}
+}
+
+// One run with a cash difference wakes nobody: the balance and the movements are read at different moments.
+func TestCashDifferenceMustHold(t *testing.T) {
+	s, ctx := openDB(t)
+	bad := []Result{{Name: cashCheck, Severity: "urgent", Summary: "Δ"}}
+	if err := Save(ctx, s.RW, []Result{{Name: cashCheck, OK: true, Severity: "urgent", Summary: "ok"}}, now.Add(-time.Hour), now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(ctx, s.RW, bad, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := Urgent(ctx, s.RW, bad, now, 6*time.Hour); err != nil || len(out) != 0 {
+		t.Fatalf("first failure: %+v %v", out, err)
+	}
+	if err := Save(ctx, s.RW, bad, now.Add(time.Hour), now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := Urgent(ctx, s.RW, bad, now.Add(time.Hour), 6*time.Hour); err != nil || len(out) != 1 {
+		t.Fatalf("second failure: %+v %v", out, err)
+	}
+}
+
+func TestWalletAgainstTheBot(t *testing.T) {
+	s, ctx := openDB(t)
+	e := Env{Q: s.RO, Now: now}
+	post := func(day, v string) {
+		t.Helper()
+		if _, err := ledger.Post(ctx, s.RW, ledger.Entry{EffectiveAt: day, Kind: "test", Author: "t", Lines: []ledger.Line{
+			{Account: "cincin_wallet", Amount: money.MustParse(v)}, {Account: "opening", Amount: -money.MustParse(v)}}}, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	anchor := func(kind, subject, v, at string) {
+		t.Helper()
+		if _, err := s.RW.Exec(`INSERT INTO observations(kind, subject, value, observed_at, source) VALUES (?, ?, ?, ?, 'test')`, kind, subject, int64(money.MustParse(v)), at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	post("2026-10-01", "100.00")
+	anchor("wallet_anchor", "cincin_wallet", "100.00", "2026-10-01T12:00:00+03:00")
+	anchor("card_anchor", "card:1111", "0.00", "2026-10-01T12:00:00+03:00")
+	if r := CardAnchors(ctx, e); !r.OK {
+		t.Fatalf("equal: %+v", r)
+	}
+	post("2026-10-10", "50.00") // after the anchor: the bot has not been asked since
+	if r := CardAnchors(ctx, e); !r.OK {
+		t.Fatalf("a later entry is not a difference: %+v", r)
+	}
+	anchor("wallet_anchor", "cincin_wallet", "20.00", "2026-10-11T12:00:00+03:00")
+	if r := CardAnchors(ctx, e); r.OK || r.Severity != "warn" || !strings.Contains(r.Summary, "кошелёк") {
+		t.Fatalf("a drifting wallet: %+v", r)
+	}
+}

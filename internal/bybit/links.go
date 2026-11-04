@@ -405,12 +405,21 @@ func LinkNotesAndClose(ctx context.Context, q ledger.Querier, by string, now tim
 // API, and have their own check of being closed within three days. A movement ledger-sync closed before
 // the transfer is not one of them: its row is usually there, only the link is not.
 func PendingUSD(ctx context.Context, q ledger.Querier) (float64, error) {
-	in, out, err := PendingUSDParts(ctx, q)
+	return PendingUSDAt(ctx, q, "")
+}
+
+// PendingUSDAt is PendingUSD up to a moment: a balance read at that moment knows nothing of what came later.
+func PendingUSDAt(ctx context.Context, q ledger.Querier, at string) (float64, error) {
+	in, out, err := pendingUSD(ctx, q, at)
 	return in + out, err
 }
 
 // PendingUSDParts is PendingUSD split in what came in and what went out (negative).
 func PendingUSDParts(ctx context.Context, q ledger.Querier) (float64, float64, error) {
+	return pendingUSD(ctx, q, "")
+}
+
+func pendingUSD(ctx context.Context, q ledger.Querier, at string) (float64, float64, error) {
 	start := ""
 	if err := q.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'full_ledger_from'`).Scan(&start); err != nil && err != sql.ErrNoRows {
 		return 0, 0, err
@@ -420,7 +429,7 @@ func PendingUSDParts(ctx context.Context, q ledger.Querier) (float64, float64, e
 	}
 	rows, err := q.QueryContext(ctx, `SELECT u.direction, u.amount, COALESCE(json_extract(e.payload, '$.fee'), '') FROM v_bybit_unlinked u
 		JOIN events e ON e.id = u.event_id WHERE u.occurred_at >= ? AND u.coin IN ('USDT', 'USDC')
-		AND COALESCE(u.links, '') NOT LIKE '%seen:%'`, start)
+		AND COALESCE(u.links, '') NOT LIKE '%seen:%' AND (? = '' OR u.occurred_at <= ?)`, start, at, at)
 	if err != nil {
 		return 0, 0, err
 	}

@@ -49,6 +49,8 @@ func health(ctx context.Context, args []string) error {
 			}
 		} else if rs, at, err = checks.Latest(ctx, store.RO); err != nil {
 			return err
+		} else {
+			rs = checks.WithStale(rs, at, time.Now())
 		}
 	} else {
 		c, err := apiClient()
