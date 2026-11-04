@@ -12,6 +12,7 @@ import (
 	"github.com/goslingmanagment/ledger/internal/hub"
 	"github.com/goslingmanagment/ledger/internal/journal"
 	"github.com/goslingmanagment/ledger/internal/ledger"
+	"github.com/goslingmanagment/ledger/internal/money"
 	"github.com/goslingmanagment/ledger/internal/ts"
 )
 
@@ -80,13 +81,7 @@ type Cover struct {
 	Src       Source
 }
 
-func sum(xs []float64) float64 {
-	s := 0.0
-	for _, x := range xs {
-		s += x
-	}
-	return s
-}
+func sum(xs []float64) float64 { return money.PySum(xs) }
 
 func iso(t time.Time) string { return ts.Format(t) }
 

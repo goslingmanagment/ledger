@@ -23,7 +23,7 @@ import (
 // or the same amount on that date (for a transfer: recorded − withheld − route fee).
 func Unrecorded(ctx context.Context, q ledger.Querier, month string, rows []journal.Row) ([]string, bool) {
 	res, err := q.QueryContext(ctx, `SELECT source_id, substr(occurred_at, 1, 10), payload FROM events WHERE source = 'bybit'
-		AND kind IN ('deposit', 'internal_deposit') AND substr(occurred_at, 1, 7) = ?`, month)
+		AND kind IN ('deposit', 'internal_deposit', 'p2p') AND json_extract(payload, '$.direction') = 'income' AND substr(occurred_at, 1, 7) = ?`, month)
 	if err != nil {
 		return nil, false
 	}
@@ -125,6 +125,34 @@ func Blockers(res []Check, tot Totals, now, m1 time.Time, open []string, openOK 
 	return stop
 }
 
+// sheetsMaxAge is how old the reading of a payout table may be at a close: the collector runs hourly on the
+// Mac, and the script it replaces read the tables live.
+const sheetsMaxAge = 3 * time.Hour
+
+// SheetsStale lists the payout tables read too long ago for an immutable snapshot.
+func SheetsStale(ctx context.Context, q ledger.Querier, now time.Time) ([]string, error) {
+	rows, err := q.QueryContext(ctx, `SELECT model, fetched_at FROM payroll_tables ORDER BY model`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var model, at string
+		if err := rows.Scan(&model, &at); err != nil {
+			return nil, err
+		}
+		t, err := ts.Parse(at)
+		if err != nil {
+			return nil, fmt.Errorf("payroll_tables.fetched_at: %w", err)
+		}
+		if now.Sub(t) > sheetsMaxAge {
+			out = append(out, fmt.Sprintf("таблица выплат %s прочитана %s: сборщик мака не работает, закрытие без свежих таблиц занизит расходы", model, at))
+		}
+	}
+	return out, rows.Err()
+}
+
 // Close writes the closing snapshot of a month once, or returns why it cannot be closed.
 func Close(ctx context.Context, tx *sql.Tx, month string, asOf time.Time, ceoRate float64, now time.Time, source string) (*Card, []string, error) {
 	m0, m1, err := ts.MonthStart(month)
@@ -166,6 +194,11 @@ func Close(ctx context.Context, tx *sql.Tx, month string, asOf time.Time, ceoRat
 	open, openOK := OpenBrief(ctx, tx, month)
 	lost, lostOK := Unrecorded(ctx, tx, month, cv.Ledger)
 	stop := Blockers(res, tot, now, m1, open, openOK, lost, lostOK)
+	stale, err := SheetsStale(ctx, tx, now)
+	if err != nil {
+		return nil, nil, err
+	}
+	stop = append(stop, stale...)
 	if len(stop) > 0 {
 		return card, stop, nil
 	}

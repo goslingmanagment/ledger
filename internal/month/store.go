@@ -17,15 +17,36 @@ import (
 // LoadTabs reads the parsed payout tabs of the sheets collector. tabsErr lists the tabs the strict
 // parser refused: the card can still be shown, the close is blocked.
 func LoadTabs(ctx context.Context, q ledger.Querier) (tabs []Tab, tabsErr string, err error) {
-	rows, err := q.QueryContext(ctx, `SELECT model, name, status, COALESCE(error, ''), COALESCE(notes, '[]') FROM payroll_tabs ORDER BY rowid`)
+	var errs []string
+	var read int
+	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM payroll_tables`).Scan(&read); err != nil {
+		return nil, "", err
+	}
+	if read == 0 {
+		return nil, "таблицы выплат ещё не собраны", nil
+	}
+	failed, err := q.QueryContext(ctx, `SELECT model, COALESCE(error, '') FROM payroll_tables WHERE status <> 'ok' ORDER BY model`)
 	if err != nil {
-		if strings.Contains(err.Error(), "no such table") {
-			return nil, "таблицы выплат ещё не собраны", nil
+		return nil, "", err
+	}
+	for failed.Next() {
+		var model, tableErr string
+		if err := failed.Scan(&model, &tableErr); err != nil {
+			failed.Close()
+			return nil, "", err
 		}
+		errs = append(errs, "таблица "+model+": "+tableErr)
+	}
+	failed.Close()
+	if err := failed.Err(); err != nil {
+		return nil, "", err
+	}
+	// A tab gone from the sheet's lists is not read by the card, as in the script; its debts stay in payroll.
+	rows, err := q.QueryContext(ctx, `SELECT model, name, status, COALESCE(error, ''), COALESCE(notes, '[]') FROM payroll_tabs WHERE listed = 1 ORDER BY rowid`)
+	if err != nil {
 		return nil, "", err
 	}
 	byKey := map[string]*Tab{}
-	var errs []string
 	for rows.Next() {
 		var model, name, status, tabErr, notes string
 		if err := rows.Scan(&model, &name, &status, &tabErr, &notes); err != nil {
@@ -51,9 +72,6 @@ func LoadTabs(ctx context.Context, q ledger.Querier) (tabs []Tab, tabsErr string
 	}
 	drows, err := q.QueryContext(ctx, `SELECT model, name, date, amount, worked FROM payroll_days ORDER BY date`)
 	if err != nil {
-		if strings.Contains(err.Error(), "no such table") {
-			return tabs, strings.Join(errs, "; "), nil
-		}
 		return nil, "", err
 	}
 	defer drows.Close()

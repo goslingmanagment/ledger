@@ -144,10 +144,14 @@ func init() {
 		}
 		asOf, err := LiveAsOf(ctx, tx, cfg)
 		if err != nil {
-			if hub.IsRefusal(err) {
-				return nil
+			if !hub.IsRefusal(err) {
+				return err
 			}
-			return err
+			// The figures stay for reading, but they are no longer proven.
+			if _, err := tx.ExecContext(ctx, `UPDATE month_cards SET status = 'unknown', reason = ?, computed_at = ?`, err.Error(), ts.Format(now)); err != nil {
+				return err
+			}
+			return tx.Commit()
 		}
 		if err := RefreshCards(ctx, tx, asOf, now); err != nil {
 			return err

@@ -275,7 +275,7 @@ func (s DBSource) SummaryNet(page string, from, to time.Time) (float64, error) {
 // BybitIncomes reads the income movements stored as events.
 func (s DBSource) BybitIncomes(date string) ([]float64, bool) {
 	rows, err := s.Q.QueryContext(s.Ctx, `SELECT payload FROM events WHERE source = 'bybit'
-		AND kind IN ('deposit', 'internal_deposit') AND substr(occurred_at, 1, 10) = ?`, date)
+		AND kind IN ('deposit', 'internal_deposit', 'p2p') AND json_extract(payload, '$.direction') = 'income' AND substr(occurred_at, 1, 10) = ?`, date)
 	if err != nil {
 		return nil, false
 	}
