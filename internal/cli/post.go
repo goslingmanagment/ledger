@@ -45,13 +45,14 @@ func readInput(path string) ([]byte, error) {
 func post(ctx context.Context, args []string) error {
 	fs := Flags("post")
 	dry := fs.Bool("dry-run", false, "проверить и откатить")
-	if err := fs.Parse(args); err != nil {
+	pos, err := ParseArgs(fs, args)
+	if err != nil {
 		return err
 	}
-	if fs.NArg() != 1 {
+	if len(pos) != 1 {
 		return fmt.Errorf("нужен JSON-файл или -")
 	}
-	raw, err := readInput(fs.Arg(0))
+	raw, err := readInput(pos[0])
 	if err != nil {
 		return err
 	}

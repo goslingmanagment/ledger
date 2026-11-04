@@ -91,3 +91,19 @@ func Flags(name string) *flag.FlagSet {
 	fs.SetOutput(os.Stderr)
 	return fs
 }
+
+// ParseArgs parses flags placed anywhere among the arguments and returns the positional ones.
+func ParseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
+	var pos []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		args = fs.Args()
+		if len(args) == 0 {
+			return pos, nil
+		}
+		pos = append(pos, args[0])
+		args = args[1:]
+	}
+}
