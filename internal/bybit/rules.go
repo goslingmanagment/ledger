@@ -403,3 +403,107 @@ func ParseNotes(text string) []Note {
 	flush()
 	return notes
 }
+
+// RuleInput is one rule from the owner's answer.
+type RuleInput struct {
+	Kind      string `json:"kind"` // counterparty, ignore or merchant
+	UID       string `json:"uid,omitempty"`
+	Address   string `json:"address,omitempty"`
+	Prefix    string `json:"prefix,omitempty"`
+	Suffix    string `json:"suffix,omitempty"`
+	Merchant  string `json:"merchant,omitempty"` // a regular expression over the bot's merchant text
+	Direction string `json:"direction,omitempty"`
+	Name      string `json:"name"`
+	Category  string `json:"category,omitempty"`
+	Model     string `json:"model,omitempty"`
+	Note      string `json:"note,omitempty"`
+}
+
+// AddRule remembers an answer, so the next movement with this identity needs no question. A file's rows
+// are replaced by `rules import`; these have their own source and stay.
+func AddRule(ctx context.Context, q ledger.Querier, in RuleInput, by string, now time.Time) (int64, error) {
+	if strings.TrimSpace(in.Name) == "" {
+		return 0, fmt.Errorf("правило: нужно имя")
+	}
+	var dup string
+	switch in.Kind {
+	case "counterparty", "ignore":
+		ids := 0
+		for _, v := range []string{in.UID, in.Address, in.Prefix + in.Suffix} {
+			if v != "" {
+				ids++
+			}
+		}
+		if ids != 1 || (in.Prefix == "") != (in.Suffix == "") {
+			return 0, fmt.Errorf("правило: нужен ровно один признак: uid, address или prefix с suffix")
+		}
+		if in.Merchant != "" {
+			return 0, fmt.Errorf("правило %s: merchant только у вида merchant", in.Kind)
+		}
+		if in.Kind == "counterparty" {
+			if in.Direction != "income" && in.Direction != "expense" {
+				return 0, fmt.Errorf("правило: у контрагента direction income или expense")
+			}
+			if in.Category == "" {
+				return 0, fmt.Errorf("правило: у контрагента нужна category")
+			}
+			if in.Model == "" {
+				in.Model = "—"
+			}
+		} else if in.Direction == "" {
+			in.Direction = "any"
+		}
+		dup = `SELECT count(*) FROM rules WHERE kind = ? AND COALESCE(match_uid, '') = ? AND COALESCE(match_address, '') = ?
+			AND COALESCE(match_prefix, '') = ? AND COALESCE(match_suffix, '') = ? AND COALESCE(direction, '') = ?`
+		var n int
+		if err := q.QueryRowContext(ctx, dup, in.Kind, in.UID, in.Address, in.Prefix, in.Suffix, in.Direction).Scan(&n); err != nil {
+			return 0, err
+		}
+		if n > 0 {
+			return 0, fmt.Errorf("такое правило уже есть")
+		}
+	case "merchant":
+		if in.Merchant == "" || in.Category == "" {
+			return 0, fmt.Errorf("правило мерчанта: нужны merchant и category")
+		}
+		if _, err := regexp.Compile("(?i)" + in.Merchant); err != nil {
+			return 0, fmt.Errorf("правило мерчанта: шаблон: %w", err)
+		}
+		var n int
+		if err := q.QueryRowContext(ctx, `SELECT count(*) FROM rules WHERE kind = 'merchant' AND match_merchant = ?`, in.Merchant).Scan(&n); err != nil {
+			return 0, err
+		}
+		if n > 0 {
+			return 0, fmt.Errorf("такое правило уже есть")
+		}
+	default:
+		return 0, fmt.Errorf("правило: вид counterparty, ignore или merchant, не «%s»", in.Kind)
+	}
+	res, err := q.ExecContext(ctx, `INSERT INTO rules(kind, match_uid, match_address, match_prefix, match_suffix, match_merchant, direction,
+		name, category, model, note, created_at, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		in.Kind, nullable(in.UID), nullable(in.Address), nullable(in.Prefix), nullable(in.Suffix), nullable(in.Merchant), nullable(in.Direction),
+		in.Name, nullable(in.Category), nullable(in.Model), in.Note, ts.Format(now), "answer:"+by)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// AddNote keeps a pattern learned from an answer: a hypothesis for the next investigation, never an auto rule.
+func AddNote(ctx context.Context, q ledger.Querier, text, status, by string, now time.Time) (int64, error) {
+	if strings.TrimSpace(text) == "" {
+		return 0, fmt.Errorf("заметка пустая")
+	}
+	if status == "" {
+		status = "info"
+	}
+	if status != "confirmed" && status != "hypothesis" && status != "refuted" && status != "info" {
+		return 0, fmt.Errorf("заметка: статус confirmed, hypothesis, refuted или info")
+	}
+	res, err := q.ExecContext(ctx, `INSERT INTO notes(text, status, dated, created_at, source) VALUES (?, ?, ?, ?, ?)`,
+		text, status, ts.Date(now), ts.Format(now), "answer:"+by)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}

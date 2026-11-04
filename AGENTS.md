@@ -23,7 +23,7 @@
 - Бриф: `ledger brief [--text] [--new]` — открытый неотправленный или новый из открытых предложений, номера заморожены; `ledger brief-sent --brief N`, `ledger pending`.
   Решения: `ledger decide --brief N --set 1=confirm --set 2=personal --set 3=custom:{…} --set 4=defer --set 5=recorded:388,389`, весь набор одной транзакцией, ключ с правом decide.
   `mode` shadow: решения только записываются, закрывает их импорт журнала или `import bybit-state`; live: `confirm` и `custom` (JSON-правка: `category`, `counterparty`, `model`, `note`, `type`, `amount`, `split`) пишут строки и проводки, точное правило пишет само.
-  `ledger propose <json>`, `ledger evidence add|show`, `ledger dispute open|list|resolve` — у споров исправление только в live.
+  `ledger propose <json>`, `ledger evidence add|show`, `ledger dispute open|list|resolve` — у споров исправление только в live; `ledger rule add` и `ledger note add` запоминают ответ.
 - Карты: `ledger collect cards [--dry-run] [--local-db]` на маке (конфиг `~/.config/ledger/cards.json`, очередь `spool-cards`, только `tg history`); `ledger cards balances` — журнал против анкоров бота, `ledger cards link <msg_id> <withdrawal:N>`.
   На сервере события разбирает `internal/cards` при приходе и джобом: загрузка с даты `settings.cards_load_from` (по умолчанию 2026-09-05, раньше журнал писал дошедшее до карты переводом) — проводка кошелёк → карта. Ответ владельца без строки из кошелька сторнирует её: так бот показывает зачисления саппорта и переносы между картами.
 - Перед PR: `gofmt -l .`, `go vet ./...` и `go test` затронутых пакетов; остальное проверяет CI.

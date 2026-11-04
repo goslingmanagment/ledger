@@ -199,6 +199,41 @@ func install(s *server.Server) {
 		}
 		server.WriteJSON(w, http.StatusOK, out)
 	})
+	handle("GET /v1/bybit/status", auth.ScopeRead, func(w http.ResponseWriter, r *http.Request) {
+		st, err := bybit.ReadStatus(r.Context(), s.Store.RO)
+		if err != nil {
+			fail(s, w, err)
+			return
+		}
+		server.WriteJSON(w, http.StatusOK, st)
+	})
+	handle("POST /v1/rules", auth.ScopeDecide, func(w http.ResponseWriter, r *http.Request) {
+		var in bybit.RuleInput
+		if !decodeBody(w, r, &in) {
+			return
+		}
+		id, err := bybit.AddRule(r.Context(), s.Store.RW, in, auth.KeyName(r.Context()), ts.Now())
+		if err != nil {
+			server.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		server.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
+	})
+	handle("POST /v1/notes", auth.ScopePropose, func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Text   string `json:"text"`
+			Status string `json:"status"`
+		}
+		if !decodeBody(w, r, &in) {
+			return
+		}
+		id, err := bybit.AddNote(r.Context(), s.Store.RW, in.Text, in.Status, auth.KeyName(r.Context()), ts.Now())
+		if err != nil {
+			server.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		server.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
+	})
 	handle("POST /v1/evidence", auth.ScopePropose, func(w http.ResponseWriter, r *http.Request) {
 		var in Evidence
 		if !decodeBody(w, r, &in) {

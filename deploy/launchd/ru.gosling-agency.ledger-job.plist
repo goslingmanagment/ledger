@@ -7,8 +7,7 @@
 	<key>ProgramArguments</key>
 	<array>
 		<string>__DEST__/bin/ledger</string>
-		<string>collect</string>
-		<string>__WHAT__</string>
+		__ARGS__
 	</array>
 	<key>EnvironmentVariables</key>
 	<dict>
@@ -22,8 +21,8 @@
 	<key>RunAtLoad</key>
 	<true/>
 	<key>StandardOutPath</key>
-	<string>__LOGS__/__WHAT__.log</string>
+	<string>__LOGS__/__NAME__.log</string>
 	<key>StandardErrorPath</key>
-	<string>__LOGS__/__WHAT__.err</string>
+	<string>__LOGS__/__NAME__.err</string>
 </dict>
 </plist>

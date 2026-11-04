@@ -48,18 +48,20 @@ bash deploy/compose.sh exec -T app ledger keys create bobr --scope read --replac
 Файл по умолчанию держит ключ только на чтение. Задание с большими правами (сборщики мака, `decide`) называет свой файл через
 `LEDGER_CREDENTIALS=<путь>`.
 
-## Сборщики на маке
+## Задания на маке
 
-`ledger collect sheets` и `ledger collect cards` живут на маке: `gog` и сессия телеграма есть только там. Таблицы — раз в час, бот
-CinCin — раз в 30 минут, читают только на чтение (`gog --readonly`, `uv run tg history`). Пока API недоступен, события лежат в очереди
-(`~/.config/ledger/spool` и `spool-cards`) и досылаются без дублей.
+`ledger collect sheets` и `ledger collect cards` живут на маке: `gog` и сессия телеграма есть только там. Таблицы читаются раз в час, бот
+CinCin раз в 30 минут, только на чтение (`gog --readonly`, `uv run tg history`). Пока API недоступен, события лежат в очереди
+(`~/.config/ledger/spool` и `spool-cards`) и досылаются без дублей. Журнал раз в час: в тени `ledger journal sync` толкает новые коммиты
+файла из /OS на сервер, после переключения `ledger mirror` пишет файл из базы, коммит делает ближайшая сессия /OS.
 
 1. На VPS: `bash deploy/compose.sh exec -T app ledger keys create mac-collector --scope read,collect,import`.
 2. На маке в `~/.config/ledger/` (всё chmod 600): `credentials.collector` с `LEDGER_URL` и `LEDGER_KEY`;
    `sheets.json` — `{"account": "...", "tables": {"<модель>": "<id таблицы>"}}`, пример — `internal/payroll/testdata/sheets.example.json`;
    `cards.json` — `{"peer": <id бота>, "account": "...", "tg_dir": "<каталог tg-inbox>"}`, пример — `internal/cards/testdata/cards.example.json`.
-3. `bash deploy/install-collectors-launchd.sh` — бинарник в `~/.config/ledger/bin`, launchd-агенты `ru.gosling-agency.ledger-cards` и
-   `ru.gosling-agency.ledger-sheets` (шаблон один, `deploy/launchd/ru.gosling-agency.ledger-collect.plist`), журналы в `~/Library/Logs/ledger`.
+3. `bash deploy/install-mac-jobs.sh shadow` (после переключения `live`): бинарник в `~/.config/ledger/bin`, launchd-агенты
+   `ru.gosling-agency.ledger-cards`, `-sheets`, `-journal` или `-mirror` (шаблон один, `deploy/launchd/ru.gosling-agency.ledger-job.plist`),
+   журналы в `~/Library/Logs/ledger`.
 
 Карточки людей переносятся один раз: `ledger import people <папка people>` внутри контейнера, папку — через `docker cp`. Стартовые
 долги — `ledger payroll open --dry-run`, потом без `--dry-run`: это делает человек, посмотрев таблицу.
@@ -74,3 +76,16 @@ nginx -t && systemctl reload nginx
 ```
 
 Пока сертификата нет, блок 443 закомментирован в sites-available (DNS ещё не указывает на сервер).
+
+## Рутины OpenClaw
+
+`deploy/openclaw/`: промпты, условия и `install.sh`, идемпотентно по `declarationKey`. Ночной бриф 00:30, health 11:00, срочное каждые 15 минут
+(модель запускается, только когда есть что сказать), цифры месяца по понедельникам, закрытие месяца 10–18-го. Получатель — `LEDGER_TG_CHAT_ID`,
+в репозитории его нет. Закрытие требует ключа с правом decide: `~/.config/ledger/credentials.decide`; основная сессия OpenClaw применяет ответы
+владельца тем же ключом: `ledger decide`, затем `ledger rule add` и `ledger note add`, чтобы отвеченное больше не спрашивать.
+
+## Ночь переключения
+
+Только после «да» владельца. `bash deploy/switch.sh check` до ночи: режим, ключи сбора, API, журнал равен экспорту, проверки зелёные, кроме кассы и
+карт, их выравнивает финальный импорт. `LEDGER_TG_CHAT_ID=<чат> bash deploy/switch.sh go --aligns <файл вне репозитория>`: финальный импорт, `ledger mode live`,
+задания мака и рутины OpenClaw. Откат: `bash deploy/switch.sh back`. `ledger-sync` неделю остаётся запасным путём: его джобы только выключены.
