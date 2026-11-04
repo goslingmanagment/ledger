@@ -17,9 +17,9 @@ import (
 )
 
 func init() {
-	Command(Cmd{Name: "month show", Summary: "карточка месяца: ledger month show ГГГГ-ММ [--as-of] [--ceo-rate N] [--json]", Run: monthShow})
-	Command(Cmd{Name: "month close", Summary: "закрыть месяц снимком: ledger month close ГГГГ-ММ --ceo-rate N (не раньше 8-го, один раз)", Run: monthClose})
-	Command(Cmd{Name: "month brief", Summary: "сообщение владельцу в понедельник [--ceo-rate N]", Run: monthBrief})
+	Command(Cmd{Name: "month show", Summary: "карточка месяца: ledger month show ГГГГ-ММ [--as-of] [--ceo-rate N, иначе из настройки] [--json]", Run: monthShow})
+	Command(Cmd{Name: "month close", Summary: "закрыть месяц снимком: ledger month close ГГГГ-ММ [--ceo-rate N, иначе из настройки] (не раньше 8-го, один раз)", Run: monthClose})
+	Command(Cmd{Name: "month brief", Summary: "сообщение владельцу в понедельник [--ceo-rate N, иначе из настройки]", Run: monthBrief})
 	Command(Cmd{Name: "months", Summary: "закрытые месяцы: «сейчас» против сообщённого [--accept]", Run: months})
 	Command(Cmd{Name: "month import-close", Summary: "принять снимок закрытия из /OS: ledger month import-close <ГГГГ-ММ.json>", Run: monthImportClose})
 	Command(Cmd{Name: "month import-reported", Summary: "принять колонки «Сообщено» из /OS finance/months.md", Run: monthImportReported})
@@ -162,8 +162,8 @@ func monthClose(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(pos) != 1 || *rate == 0 {
-		return fmt.Errorf("нужны месяц и --ceo-rate")
+	if len(pos) != 1 {
+		return fmt.Errorf("нужен месяц ГГГГ-ММ")
 	}
 	c, err := apiClient()
 	if err != nil {
@@ -174,7 +174,10 @@ func monthClose(ctx context.Context, args []string) error {
 		Stops  []string `json:"stops"`
 		Text   string   `json:"text"`
 	}
-	path := "/v1/month/" + url.PathEscape(pos[0]) + "/close?ceo_rate=" + fmt.Sprint(*rate)
+	path := "/v1/month/" + url.PathEscape(pos[0]) + "/close"
+	if *rate != 0 {
+		path += "?ceo_rate=" + fmt.Sprint(*rate)
+	}
 	if err := c.Do(ctx, "POST", path, nil, &out); err != nil {
 		return apiError(err)
 	}

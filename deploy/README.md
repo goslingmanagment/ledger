@@ -45,6 +45,8 @@ bash deploy/compose.sh exec -T app ledger keys create bobr --scope read --replac
 
 Агенту — `~/.config/ledger/credentials` (chmod 600): `LEDGER_URL=https://ledger.gosling-agency.ru` и
 `LEDGER_KEY=<ключ>`. Проверка: `ledger sql "SELECT 1"` отвечает строкой, `ledger sql "DELETE FROM meta"` — 403.
+Файл по умолчанию держит ключ только на чтение. Задание с большими правами (сборщики мака, `decide`) называет свой файл через
+`LEDGER_CREDENTIALS=<путь>`.
 
 ## Сайт
 
