@@ -23,6 +23,7 @@ func init() {
 		Summary: "бот CinCin через tg history → события в API: [--dry-run] [--local-db] [--since] [--config файл] [--spool папка]"})
 	Command(Cmd{Name: "cards process", Summary: "разобрать события бота сейчас: проводки загрузок, анкоры, предложения, связи депозитов", Run: cardsProcess})
 	Command(Cmd{Name: "cards balances", Summary: "карты и кошелёк в журнале против последних анкоров бота [--json]", Run: cardsBalances})
+	Command(Cmd{Name: "cards anchor", Summary: "баланс со скрина приложения: ledger cards anchor <номер карты|wallet> <сумма> [--at время]", Run: cardsAnchor})
 	Command(Cmd{Name: "cards link", Summary: "связать депозит с выводом по уликам: ledger cards link <msg_id> <withdrawal:N>", Run: cardsLink})
 }
 
@@ -204,4 +205,21 @@ func collectCards(ctx context.Context, args []string) error {
 		return Exit{Code: 2, Msg: "события приняты, разбор не прошёл:\n  " + strings.Join(rep.Settle, "\n  ")}
 	}
 	return readErr
+}
+
+func cardsAnchor(ctx context.Context, args []string) error {
+	fs := Flags("cards anchor")
+	at := fs.String("at", "", "когда снят скрин, по умолчанию сейчас")
+	pos, err := ParseArgs(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) != 2 {
+		return Exit{Code: 2, Msg: "нужны карта и сумма: ledger cards anchor 1234 56.78"}
+	}
+	out := map[string]any{}
+	if err := call(ctx, http.MethodPost, "/v1/cards/anchor", map[string]any{"subject": pos[0], "amount": pos[1], "at": *at}, &out); err != nil {
+		return err
+	}
+	return printJSON(out)
 }

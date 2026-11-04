@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -169,14 +170,15 @@ func closedThere(e Event, part string) bool {
 }
 
 type pass struct {
-	ctx      context.Context
-	q        ledger.Querier
-	now      time.Time
-	mode     string
-	loadFrom string
-	rules    []merchantRule
-	links    map[linkKey]bool
-	rep      Report
+	ctx         context.Context
+	q           ledger.Querier
+	now         time.Time
+	mode        string
+	loadFrom    string
+	feePermille int64
+	rules       []merchantRule
+	links       map[linkKey]bool
+	rep         Report
 }
 
 func (p *pass) closed(e Event, part string) bool {
@@ -323,19 +325,45 @@ func (p *pass) walletLoad(e Event) (bool, error) {
 	return !marked, rows.Err()
 }
 
-// bookLoad keeps the entry of a load in line with what is known about it: posted once for a wallet
-// load, reversed when the owner's answer says it was none. Idempotent by key.
+// loadEntry finds the entry of a load that stands and how many it had: an answer can reverse one, and a
+// later answer can bring it back under a new key.
+func (p *pass) loadEntry(e Event) (key string, stands int64, revisions int, err error) {
+	key = fmt.Sprintf("cards:load:%d", e.MsgID)
+	rows, err := p.q.QueryContext(p.ctx, `SELECT e.id, NOT EXISTS (SELECT 1 FROM entries r WHERE r.reverses_id = e.id) FROM entries e
+		WHERE e.source_key = ? OR e.source_key LIKE ?`, key, key+":r%")
+	if err != nil {
+		return key, 0, 0, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var live bool
+		if err := rows.Scan(&id, &live); err != nil {
+			return key, 0, 0, err
+		}
+		revisions++
+		if live {
+			stands = id
+		}
+	}
+	return key, stands, revisions, rows.Err()
+}
+
+// bookLoad keeps the entry of a load in line with what is known about it: posted for a wallet load,
+// reversed when the owner's answer says it was none, posted again when a later answer says it was.
 func (p *pass) bookLoad(e Event, card string, amount money.Micros) error {
-	key := fmt.Sprintf("cards:load:%d", e.MsgID)
 	wallet, err := p.walletLoad(e)
 	if err != nil {
 		return err
 	}
-	var id int64
-	switch err := p.q.QueryRowContext(p.ctx, `SELECT id FROM entries WHERE source_key = ?`, key).Scan(&id); {
-	case err == sql.ErrNoRows:
-		if !wallet {
-			return nil
+	key, stands, revisions, err := p.loadEntry(e)
+	if err != nil {
+		return err
+	}
+	switch {
+	case wallet && stands == 0:
+		if revisions > 0 {
+			key = fmt.Sprintf("%s:r%d", key, revisions+1)
 		}
 		if _, err := ledger.Post(p.ctx, p.q, ledger.Entry{EffectiveAt: e.At, Kind: "card:load", Memo: fmt.Sprintf("загрузка карты %s из кошелька, card:%d", card, e.MsgID),
 			Author: author, SourceKey: key, EventIDs: []int64{e.ID}, Lines: []ledger.Line{
@@ -344,22 +372,22 @@ func (p *pass) bookLoad(e Event, card string, amount money.Micros) error {
 			return err
 		}
 		p.rep.LoadsPosted++
-		return nil
-	case err != nil:
+	case !wallet && stands != 0:
+		if _, err := ledger.Reverse(p.ctx, p.q, stands, ledger.Reversal{Author: author, Memo: fmt.Sprintf("card:%d не загрузка с кошелька: решение брифа", e.MsgID)}, p.now); err != nil {
+			return err
+		}
+		p.rep.LoadsReversed++
+	}
+	return nil
+}
+
+// unbookLoad reverses the entry of a message that turned out to repeat another: the load stands once.
+func (p *pass) unbookLoad(e Event) error {
+	_, stands, _, err := p.loadEntry(e)
+	if err != nil || stands == 0 {
 		return err
 	}
-	if wallet {
-		return nil
-	}
-	var reversed int
-	err = p.q.QueryRowContext(p.ctx, `SELECT 1 FROM entries WHERE reverses_id = ?`, id).Scan(&reversed)
-	if err == nil {
-		return nil
-	}
-	if err != sql.ErrNoRows {
-		return err
-	}
-	if _, err := ledger.Reverse(p.ctx, p.q, id, ledger.Reversal{Author: author, Memo: fmt.Sprintf("card:%d не загрузка с кошелька: решение брифа", e.MsgID)}, p.now); err != nil {
+	if _, err := ledger.Reverse(p.ctx, p.q, stands, ledger.Reversal{Author: author, Memo: fmt.Sprintf("card:%d повтор уведомления бота", e.MsgID)}, p.now); err != nil {
 		return err
 	}
 	p.rep.LoadsReversed++
@@ -383,13 +411,15 @@ func (p *pass) load(s Step) error {
 	if p.closed(s.Event, "") {
 		return nil
 	}
-	fee, gross := loadFee(amount)
-	note := fmt.Sprintf("%s; комиссия загрузки карты %s, уведомление бота %s MSK. На карту зачислено %s, остаток карты после загрузки %s; с кошелька расчётно %s (%s / 0.957), %s × 4.3%% = %s",
-		key, s.Card, when(s.Event), amount, after, gross.Cents(), amount, gross.Cents(), fee.Cents())
+	fee, gross := loadFee(amount, p.feePermille)
+	rate := strconv.FormatFloat(float64(p.feePermille)/10, 'f', -1, 64)
+	keep := strconv.FormatFloat(float64(1000-p.feePermille)/1000, 'f', -1, 64)
+	note := fmt.Sprintf("%s; комиссия загрузки карты %s, уведомление бота %s MSK. На карту зачислено %s, остаток карты после загрузки %s; с кошелька расчётно %s (%s / %s), %s × %s%% = %s",
+		key, s.Card, when(s.Event), amount, after, gross.Cents(), amount, keep, gross.Cents(), rate, fee.Cents())
 	doc := bybit.SuggestedDocument{Date: date(s.Event), Type: "expense", Category: feeCategory, Counterparty: counterparty, Model: "—", Amount: fee.Cents(),
 		Currency: "USD", Method: walletMethod, Status: "paid", Note: note}
-	summary := fmt.Sprintf("загрузил карту %s на %s USD (зачислено на карту — наблюдение бота); с кошелька расчётно %s, 4.3%% с него = комиссия %s (%s)",
-		s.Card, s.Amount, gross.Cents(), fee.Cents(), when(s.Event))
+	summary := fmt.Sprintf("загрузил карту %s на %s USD (зачислено на карту — наблюдение бота); с кошелька расчётно %s, %s%% с него = комиссия %s (%s)",
+		s.Card, s.Amount, gross.Cents(), rate, fee.Cents(), when(s.Event))
 	c := cardContent{Key: key, EventID: s.ID, Date: date(s.Event), At: s.At, LoadedCard: s.Card, Amount: amount.String(), BalanceAfter: after.String(),
 		Gross: gross.Cents(), Fee: fee.Cents(), Documents: []bybit.SuggestedDocument{doc}, Money: &bybit.MoneyCheck{Account: walletAccount, Amount: (-fee).Cents()}}
 	// A chain that closes on the load is the tariff at work; otherwise it may be no load at all.
@@ -477,6 +507,44 @@ func (p *pass) delta(s Step) error {
 	return p.propose(key, KindCardDelta, "unknown", summary, c)
 }
 
+// loadPosted lists the bot's events the books already stand on: of two messages that repeat each other, this
+// one stays the event, whichever came first, so a message read late never posts the same load again.
+func loadPosted(ctx context.Context, q ledger.Querier) (map[int64]bool, error) {
+	rows, err := q.QueryContext(ctx, `SELECT v.id FROM events v WHERE v.source = ? AND (
+		EXISTS (SELECT 1 FROM entries x WHERE (x.source_key = 'cards:load:' || v.source_id OR x.source_key LIKE 'cards:load:' || v.source_id || ':r%')
+			AND NOT EXISTS (SELECT 1 FROM entries r WHERE r.reverses_id = x.id))
+		OR EXISTS (SELECT 1 FROM event_links l WHERE l.event_id = v.id AND l.document_num IS NOT NULL))`, Source)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]bool{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
+}
+
+// loadFeeSetting reads the tariff of a card load: a share of the charge, settings.cards_load_fee.
+func loadFeeSetting(ctx context.Context, q ledger.Querier) (int64, error) {
+	v, err := setting(ctx, q, "cards_load_fee", "")
+	if err != nil {
+		return 0, err
+	}
+	if v == "" {
+		return 0, fmt.Errorf("нет настройки cards_load_fee: ledger import business")
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil || f <= 0 || f >= 1 {
+		return 0, fmt.Errorf("настройка cards_load_fee: доля от 0 до 1, не «%s»", v)
+	}
+	return int64(math.Round(f * 1000)), nil
+}
+
 // Process turns events into what they mean, each at most once. It runs on arrival and as a job, over
 // the whole chain: a late message can change the deltas after it.
 func Process(ctx context.Context, q ledger.Querier, now time.Time) (Report, error) {
@@ -496,13 +564,20 @@ func Process(ctx context.Context, q ledger.Querier, now time.Time) (Report, erro
 	if p.loadFrom, err = setting(ctx, q, settingLoadFrom, DefaultLoadFrom); err != nil {
 		return rep, err
 	}
+	if p.feePermille, err = loadFeeSetting(ctx, q); err != nil {
+		return rep, err
+	}
 	if p.rules, err = loadMerchants(ctx, q); err != nil {
 		return rep, err
 	}
 	if p.links, err = loadLinks(ctx, q); err != nil {
 		return rep, err
 	}
-	steps, _ := Chain(events)
+	posted, err := loadPosted(ctx, q)
+	if err != nil {
+		return rep, err
+	}
+	steps, _ := Chain(events, posted)
 	p.rep.Events = len(steps)
 	for _, s := range steps {
 		if s.Problem != "" {
@@ -510,6 +585,11 @@ func Process(ctx context.Context, q ledger.Querier, now time.Time) (Report, erro
 			continue
 		}
 		if s.DupOf != 0 {
+			if s.Kind == KindLoad {
+				if err := p.unbookLoad(s.Event); err != nil {
+					return p.rep, err
+				}
+			}
 			if err := p.ignore(s.Event, fmt.Sprintf("повтор уведомления бота, card:%d", s.DupOf)); err != nil {
 				return p.rep, err
 			}

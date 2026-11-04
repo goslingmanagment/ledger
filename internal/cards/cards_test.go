@@ -43,7 +43,7 @@ func open(t *testing.T, mode string) (*db.Store, context.Context) {
 	if _, err := s.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
-	for k, v := range map[string]string{"accrual_from": "2026-09-01", "models": "Alfa", "mode": mode} {
+	for k, v := range map[string]string{"accrual_from": "2026-09-01", "models": "Alfa", "mode": mode, "cards_load_fee": "0.05"} {
 		if _, err := s.RW.Exec(`INSERT INTO settings(key, value, updated_at) VALUES (?, ?, 'now')`, k, v); err != nil {
 			t.Fatal(err)
 		}
@@ -196,8 +196,8 @@ func TestParseMessageOnSyntheticBotTexts(t *testing.T) {
 }
 
 func TestLoadFee(t *testing.T) {
-	for net, want := range map[string][2]string{"50": {"2.25", "52.25"}, "100": {"4.49", "104.49"}, "10.5": {"0.47", "10.97"}, "1": {"0.04", "1.04"}} {
-		fee, gross := loadFee(money.MustParse(net))
+	for net, want := range map[string][2]string{"50": {"2.63", "52.63"}, "100": {"5.26", "105.26"}, "10.5": {"0.55", "11.05"}, "1": {"0.05", "1.05"}} {
+		fee, gross := loadFee(money.MustParse(net), 50)
 		if fee.Cents() != want[0] || gross.Cents() != want[1] {
 			t.Fatalf("%s: %s %s", net, fee.Cents(), gross.Cents())
 		}
@@ -226,7 +226,7 @@ func TestChainDeltasAndCardInference(t *testing.T) {
 		ev(8, "2026-09-02T15:00:00+03:00", KindLoad, "3333", "20", "", "51"),           // a new card with 31 already on it
 		ev(9, "2026-09-03T10:00:00+03:00", KindWalletAnchor, "", "3", "", "3"),
 		ev(10, "2026-09-03T11:00:00+03:00", KindPurchase, "", "bad", "ServiceD", "1"),
-	})
+	}, nil)
 	check := func(i int, card string, delta string) {
 		t.Helper()
 		s := steps[i]
@@ -266,7 +266,7 @@ func TestChainDeltasAndCardInference(t *testing.T) {
 		ev(1, "2026-09-01T10:00:00+03:00", KindLoad, "1111", "100", "", "100"),
 		ev(2, "2026-09-01T11:00:00+03:00", KindPurchase, "", "30", "ServiceA", "70"),
 		ev(3, "2026-09-01T11:05:00+03:00", KindPurchase, "", "30", "ServiceA", "70"),
-	})
+	}, nil)
 	if steps[2].DupOf != 0 {
 		t.Fatalf("%+v", steps[2])
 	}
@@ -298,10 +298,10 @@ func TestLoadIsPostedOnceWithItsFeeProposal(t *testing.T) {
 		t.Fatalf("%+v %+v", p, c)
 	}
 	d := c.Documents[0]
-	if d.Category != "Комиссии" || d.Amount != "2.25" || d.Method != "Кошелёк CinCin" || d.Counterparty != "CinCin" || d.Type != "expense" || d.Date != "2026-09-10" {
+	if d.Category != "Комиссии" || d.Amount != "2.63" || d.Method != "Кошелёк CinCin" || d.Counterparty != "CinCin" || d.Type != "expense" || d.Date != "2026-09-10" {
 		t.Fatalf("%+v", d)
 	}
-	if !strings.Contains(d.Note, "card:100") || !strings.Contains(p.Summary, "комиссия 2.25") {
+	if !strings.Contains(d.Note, "card:100") || !strings.Contains(p.Summary, "комиссия 2.63") {
 		t.Fatalf("%s | %s", d.Note, p.Summary)
 	}
 	// Twice is once, and the fee row leaves the wallet, not the card: `ledger health` must not count it.
@@ -766,7 +766,7 @@ func TestLiveWritesWhatIsExact(t *testing.T) {
 		t.Fatalf("%+v", rep)
 	}
 	feeRow, err := ledger.CurrentDocument(ctx, s.RW, 1)
-	if err != nil || feeRow.Category != "Комиссии" || feeRow.Amount != "4.49" {
+	if err != nil || feeRow.Category != "Комиссии" || feeRow.Amount != "5.26" {
 		t.Fatalf("%+v %v", feeRow, err)
 	}
 	buy, err := ledger.CurrentDocument(ctx, s.RW, 2)
@@ -775,7 +775,7 @@ func TestLiveWritesWhatIsExact(t *testing.T) {
 	}
 	card, _ := ledger.Balance(ctx, s.RW, "card:1111", "", "")
 	wallet, _ := ledger.Balance(ctx, s.RW, "cincin_wallet", "", "")
-	if card != money.MustParse("70") || wallet != money.MustParse("-104.49") {
+	if card != money.MustParse("70") || wallet != money.MustParse("-105.26") {
 		t.Fatal(card, wallet)
 	}
 	for key, want := range map[string]string{"card:100": "auto", "card:101": "auto", "card:102": "open"} {
@@ -982,4 +982,105 @@ func TestCollectorAndImportDescribeOneMessage(t *testing.T) {
 	if err := s.RW.QueryRow(`SELECT payload FROM events WHERE source = ? AND source_id = '5'`, Source).Scan(&payload); err != nil || !strings.Contains(payload, "ledger_sync") {
 		t.Fatal("the first record stays", err)
 	}
+}
+
+// Two messages of one load: the books stand on the one posted first, whichever is earlier, and only once.
+func TestLateRepeatOfALoadPostsNothing(t *testing.T) {
+	s, ctx := open(t, "shadow")
+	run := func() { t.Helper(); process(t, s, ctx, "2026-09-11T10:00:00+03:00") }
+	botEvent(t, s, ctx, 501, "2026-09-10T10:00:05+03:00", KindLoad, "1111", "100", "", "100", nil)
+	run()
+	if got := accountBalance(t, s, "card:1111"); got != money.MustParse("100") {
+		t.Fatalf("after the load: %s", got)
+	}
+	// The same notice, a moment earlier, read only now.
+	botEvent(t, s, ctx, 500, "2026-09-10T10:00:01+03:00", KindLoad, "1111", "100", "", "100", nil)
+	run()
+	run()
+	if got := accountBalance(t, s, "card:1111"); got != money.MustParse("100") {
+		t.Fatalf("after the late repeat: %s", got)
+	}
+}
+
+// An answer can take a load back and a later one can return it: the entry follows.
+func TestLoadComesBackAfterAReversal(t *testing.T) {
+	s, ctx := open(t, "shadow")
+	now := time.Now()
+	id := botEvent(t, s, ctx, 601, "2026-09-10T10:00:00+03:00", KindLoad, "1111", "100", "", "100", nil)
+	run := func() { t.Helper(); process(t, s, ctx, "2026-09-11T10:00:00+03:00") }
+	run()
+	if _, err := bybit.AddLink(ctx, s.RW, bybit.Link{EventID: id, How: "mark", Decision: "personal"}, now); err != nil {
+		t.Fatal(err)
+	}
+	run()
+	if got := accountBalance(t, s, "card:1111"); got != 0 {
+		t.Fatalf("reversed: %s", got)
+	}
+	if _, _, err := ledger.PutDocument(ctx, s.RW, ledger.Document{Num: 1, Date: "2026-09-10", Type: "expense", Category: "Комиссии", Counterparty: "CinCin", Model: "—",
+		Amount: "5.26", Currency: "USD", Method: "Кошелёк CinCin", Status: "paid", Note: "card:601"}, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RW.Exec(`DELETE FROM event_links WHERE event_id = ?`, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bybit.AddLink(ctx, s.RW, bybit.Link{EventID: id, DocumentNum: 1, How: "mark", Decision: "confirm"}, now); err != nil {
+		t.Fatal(err)
+	}
+	run()
+	if got := accountBalance(t, s, "card:1111"); got != money.MustParse("100") {
+		t.Fatalf("back: %s", got)
+	}
+}
+
+// A full page of tg history means there is more: the next page starts at its newest message.
+func TestCollectReadsEveryPage(t *testing.T) {
+	var froms []string
+	all := make([]Message, 0, 7)
+	for i := 0; i < 7; i++ {
+		all = append(all, Message{ID: int64(i + 1), Date: fmt.Sprintf("2026-09-10T10:00:%02d+03:00", i), Text: "Текущий баланс: USDT: 1"})
+	}
+	read := func(_ context.Context, _, _, since string, limit int) ([]byte, error) {
+		froms = append(froms, since)
+		var page []Message
+		for _, m := range all {
+			if (since == "2026-09-10" || m.Date >= since) && len(page) < limit {
+				page = append(page, m)
+			}
+		}
+		return json.Marshal(History{Messages: page})
+	}
+	got, err := Collect(context.Background(), Config{Peer: "1", Account: "a"}, read, "2026-09-10", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Messages != 7 || len(got.Events) != 7 {
+		t.Fatalf("messages %d, events %d, read from %v", got.Messages, len(got.Events), froms)
+	}
+}
+
+func TestAnchorFromAScreen(t *testing.T) {
+	s, ctx := open(t, "shadow")
+	now := time.Now()
+	if _, err := AddAnchor(ctx, s.RW, "1111", "12,5", "", "main", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AddAnchor(ctx, s.RW, "wallet", "1.00", "", "main", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AddAnchor(ctx, s.RW, "12", "1.00", "", "main", now); err == nil {
+		t.Fatal("a wrong card must be refused")
+	}
+	var n int
+	if err := s.RW.QueryRow(`SELECT count(*) FROM observations WHERE source = 'screen:main'`).Scan(&n); err != nil || n != 2 {
+		t.Fatalf("anchors %d %v", n, err)
+	}
+}
+
+func accountBalance(t *testing.T, s *db.Store, acct string) money.Micros {
+	t.Helper()
+	v, err := ledger.Balance(context.Background(), s.RW, acct, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v
 }

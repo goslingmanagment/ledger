@@ -34,10 +34,10 @@ func abs(m money.Micros) money.Micros {
 // Chain walks the events in time order: the balance per card after each. A purchase names no card, so
 // it goes to the card whose balance minus the amount is nearest what the bot printed. A repeated
 // notification (same amount, merchant and balance within seconds) moves nothing and is skipped.
-func Chain(events []Event) ([]Step, map[string]money.Micros) {
+func Chain(events []Event, posted map[int64]bool) ([]Step, map[string]money.Micros) {
 	balances := map[string]money.Micros{}
 	var order []string // cards in the order they appeared: ties go to the earlier one
-	seen := map[string]Step{}
+	seen := map[string]int{}
 	steps := make([]Step, 0, len(events))
 	remember := func(card string, after money.Micros) {
 		if _, ok := balances[card]; !ok {
@@ -48,8 +48,16 @@ func Chain(events []Event) ([]Step, map[string]money.Micros) {
 	for _, e := range events {
 		s := Step{Event: e, Card: e.Card}
 		sig := fmt.Sprintf("%s|%s|%s|%s|%s|%s", e.Kind, e.Card, e.Amount, e.Merchant, e.BalanceAfter, e.Extra["zayavka"])
-		if prev, ok := seen[sig]; ok && repeats(prev.Event, e) {
-			s.DupOf = prev.MsgID
+		if i, ok := seen[sig]; ok && repeats(steps[i].Event, e) {
+			if posted[e.ID] && !posted[steps[i].ID] {
+				// The later message is the one on the books, the earlier was read late: it is the repeat.
+				s = steps[i]
+				s.Event = e
+				steps[i] = Step{Event: steps[i].Event, Card: steps[i].Card, DupOf: e.MsgID}
+				seen[sig] = len(steps)
+			} else {
+				s.DupOf = steps[i].MsgID
+			}
 			steps = append(steps, s)
 			continue
 		}
@@ -89,7 +97,7 @@ func Chain(events []Event) ([]Step, map[string]money.Micros) {
 			}
 			remember(s.Card, after)
 		}
-		seen[sig] = s
+		seen[sig] = len(steps)
 		steps = append(steps, s)
 	}
 	return steps, balances
