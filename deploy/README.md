@@ -48,6 +48,20 @@ bash deploy/compose.sh exec -T app ledger keys create bobr --scope read --replac
 Файл по умолчанию держит ключ только на чтение. Задание с большими правами (сборщики мака, `decide`) называет свой файл через
 `LEDGER_CREDENTIALS=<путь>`.
 
+## Таблицы выплат
+
+`ledger collect sheets` живёт на маке: `gog` работает только там. Раз в час читает таблицы, шлёт вкладки событиями, а пока API
+недоступен, держит их в `~/.config/ledger/spool` и досылает без дублей.
+
+1. На VPS: `bash deploy/compose.sh exec -T app ledger keys create sheets-mac --scope collect,read`.
+2. На маке: в `~/.config/ledger/credentials` (chmod 600) `LEDGER_URL` и `LEDGER_KEY`; в `~/.config/ledger/sheets.json` (chmod 600)
+   `{"account": "...", "tables": {"<модель>": "<id таблицы>"}}`, пример — `internal/payroll/testdata/sheets.example.json`.
+3. `bash deploy/install-sheets-launchd.sh` — бинарник в `~/.config/ledger/bin`, launchd-агент `ru.gosling-agency.ledger-sheets`,
+   журнал в `~/.config/ledger/logs`.
+
+Карточки людей переносятся один раз: `ledger import people <папка people>` внутри контейнера, папку — через `docker cp`. Стартовые
+долги — `ledger payroll open --dry-run`, потом без `--dry-run`: это делает человек, посмотрев таблицу.
+
 ## Сайт
 
 ```

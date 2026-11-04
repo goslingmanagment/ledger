@@ -263,7 +263,7 @@ func TestSources(t *testing.T) {
 func TestPayablesWithoutSheets(t *testing.T) {
 	s, ctx := openDB(t)
 	r := Payables(ctx, Env{Q: s.RO, Now: now})
-	if r.OK || r.Severity != "warn" {
+	if r.OK || r.Severity != "warn" || !strings.Contains(r.Summary, "ещё не собраны") {
 		t.Fatalf("no sheets yet: %+v", r)
 	}
 }
