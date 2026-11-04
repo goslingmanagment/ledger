@@ -6,7 +6,9 @@ package month
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -59,6 +61,7 @@ type Config struct {
 	Exc        hub.Exceptions
 	TabAliases map[string]string
 	Names      map[string]string
+	CardNotes  []string // standing remarks of the card, from the optional setting card_notes
 }
 
 // LoadConfig reads routes, rates, settings and hub exceptions.
@@ -94,6 +97,16 @@ func LoadConfig(ctx context.Context, q ledger.Querier) (Config, error) {
 	}
 	if c.Names, err = set.Map("model_names"); err != nil {
 		return c, err
+	}
+	var notes string
+	switch err := q.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'card_notes'`).Scan(&notes); {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return c, err
+	default:
+		if err := json.Unmarshal([]byte(notes), &c.CardNotes); err != nil {
+			return c, fmt.Errorf("настройка card_notes: нужен JSON-список строк: %w", err)
+		}
 	}
 	if c.Exc, err = hub.LoadExceptions(ctx, q); err != nil {
 		return c, err
