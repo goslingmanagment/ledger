@@ -192,6 +192,15 @@ func TestCoverageChecks(t *testing.T) {
 	if r := Deposits(bad); r.OK || !strings.Contains(r.Summary, "по заявкам") {
 		t.Errorf("deposits below the requests: %+v", r)
 	}
+	agency := cover()
+	agency.Reqs[0].Page = "gamma-1"
+	tr := agency.Transfers["Alfa"][0]
+	tr.Model, tr.Deps, tr.Amount, tr.Fee, tr.N = "Gamma", []float64{1100}, 1100, 100, 11
+	agency.Transfers = map[string][]*month.Transfer{"Gamma": {tr}}
+	agency.Src = src{incomes: map[string][]float64{"2026-10-20": {1000}}}
+	if r := Deposits(agency); !r.OK {
+		t.Errorf("the route fee is inside the deposits of an agency route: %+v", r)
+	}
 	bad = cover()
 	bad.Src = src{incomes: map[string][]float64{}}
 	if r := Deposits(bad); r.OK || !strings.Contains(r.Summary, "зачисления") {
