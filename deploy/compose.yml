@@ -1,0 +1,50 @@
+name: ledger
+services:
+  app:
+    image: ${LEDGER_IMAGE:?Set LEDGER_IMAGE to an immutable release tag}
+    environment:
+      LEDGER_DB: /data/ledger.db
+      LEDGER_ADDR: ':8080'
+      LEDGER_BUILD: ${LEDGER_BUILD:-local}
+      LEDGER_DEPLOYMENT: ${LEDGER_DEPLOYMENT:?Set a unique deployment attempt ID}
+      # off — без сборщиков и проверок по таймеру (учения, отладка).
+      LEDGER_SCHEDULER: ${LEDGER_SCHEDULER:-on}
+      # Секреты приходят из /etc/ledger/ledger.env (root, 600), в git их нет.
+      LEDGER_BYBIT_API_KEY: ${LEDGER_BYBIT_API_KEY:-}
+      LEDGER_BYBIT_API_SECRET: ${LEDGER_BYBIT_API_SECRET:-}
+      LEDGER_HUB_AGENT_KEY: ${LEDGER_HUB_AGENT_KEY:-}
+      LEDGER_HUB_BASE_URL: ${LEDGER_HUB_BASE_URL:-https://hub.gosling-agency.ru}
+      TZ: Europe/Moscow
+    ports:
+      - '127.0.0.1:3300:8080'
+    volumes:
+      - data:/data
+    restart: unless-stopped
+    stop_grace_period: 20s
+    healthcheck:
+      test: ['CMD', 'ledger', 'probe']
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    logging:
+      driver: json-file
+      options: { max-size: '10m', max-file: '3' }
+  litestream:
+    image: litestream/litestream:0.5.12
+    user: '1000:1000'
+    command: ['replicate', '-config', '/etc/litestream.yml']
+    environment:
+      # Реплика на том же томе (решение владельца: внешнего S3 нет, копии забирает мак).
+      LITESTREAM_REPLICA_URL: ${LITESTREAM_REPLICA_URL:-file:///data/replica/ledger}
+    volumes:
+      - data:/data
+      - ./litestream.yml:/etc/litestream.yml:ro
+    restart: unless-stopped
+    stop_grace_period: 40s
+    logging:
+      driver: json-file
+      options: { max-size: '10m', max-file: '3' }
+volumes:
+  data:
+    name: ${LEDGER_VOLUME:-ledger_data}

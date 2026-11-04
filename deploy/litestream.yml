@@ -1,0 +1,17 @@
+logging:
+  type: json
+  stderr: true
+snapshot:
+  interval: 24h
+  retention: 720h
+shutdown-sync-timeout: 30s
+socket:
+  enabled: true
+  path: /data/litestream.sock
+  permissions: 0600
+dbs:
+  - path: /data/ledger.db
+    meta-path: /data/.ledger.db-litestream
+    replica:
+      url: ${LITESTREAM_REPLICA_URL}
+      auto-recover: false

@@ -1,9 +1,16 @@
 /bin/
 /dist/
+/var/
+/tmp/
+/data/
+/deploy/.runtime/
+.DS_Store
 *.db
 *.db-*
 *.sqlite
 *.sqlite-*
 .env
 .env.*
-/var/
+*.env
+!deploy/.env.example
+# Реальные данные (ledger.md, выгрузки хаба, конфиги ledger-sync) в репозиторий не попадают никогда.
