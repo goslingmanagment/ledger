@@ -476,6 +476,18 @@ func fundingReport(ctx context.Context, q ledger.Querier, until time.Time) (Fund
 		return FundingReport{}, err
 	}
 	rep := Reconcile(list, ops, since.UnixMilli())
+	// A conversion is no journal operation: PostConverts or its journal row answers for it.
+	converted, err := ConvertedFunding(ctx, q)
+	if err != nil {
+		return FundingReport{}, err
+	}
+	kept := rep.UnmatchedFunding[:0]
+	for _, r := range rep.UnmatchedFunding {
+		if !converted[r.ID] {
+			kept = append(kept, r)
+		}
+	}
+	rep.UnmatchedFunding = kept
 	rep.From, rep.To = ts.Format(since), ts.Format(until)
 	return rep, nil
 }

@@ -7,6 +7,7 @@ import (
 	"math"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/goslingmanagment/ledger/internal/ledger"
@@ -28,19 +29,30 @@ type convertRow struct {
 	delta float64
 }
 
-// PostConverts brings the entries of the conversions in the Funding rows in line with the journal.
-func PostConverts(ctx context.Context, q ledger.Querier, now time.Time) (int, error) {
+// convertPair is a conversion of the Funding log: in one second a coin went out and USDT came in.
+type convertPair struct {
+	at      string
+	usdt    convertRow
+	spent   string
+	sold    float64
+	account string // the coin's book account; empty when there is none and the owner decides
+	ids     []string
+}
+
+// convertPairs reads the conversions of the Funding log in time order. Anything else (USDC swaps, sales
+// for another coin) is not a pair and stays for the owner.
+func convertPairs(ctx context.Context, q ledger.Querier) ([]convertPair, error) {
 	rows, err := q.QueryContext(ctx, `SELECT source_id, occurred_at, payload FROM events WHERE source = 'bybit' AND kind = 'funding'
 		AND json_extract(payload, '$.type') = 'Convert' ORDER BY occurred_at`)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	bySecond := map[string][]convertRow{}
 	for rows.Next() {
 		var id, at, payload string
 		if err := rows.Scan(&id, &at, &payload); err != nil {
 			rows.Close()
-			return 0, err
+			return nil, err
 		}
 		var p struct {
 			Coin   string          `json:"coin"`
@@ -48,47 +60,85 @@ func PostConverts(ctx context.Context, q ledger.Querier, now time.Time) (int, er
 		}
 		if err := json.Unmarshal([]byte(payload), &p); err != nil {
 			rows.Close()
-			return 0, err
+			return nil, err
 		}
 		s, err := strconv.ParseFloat(trimQuotes(string(p.Signed)), 64)
 		if err != nil {
 			rows.Close()
-			return 0, fmt.Errorf("funding %s: signed %s", id, p.Signed)
+			return nil, fmt.Errorf("funding %s: signed %s", id, p.Signed)
 		}
 		bySecond[at] = append(bySecond[at], convertRow{id: id, at: at, coin: p.Coin, delta: s})
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return 0, err
+		return nil, err
 	}
 	seconds := make([]string, 0, len(bySecond))
 	for s := range bySecond {
 		seconds = append(seconds, s)
 	}
 	sort.Strings(seconds)
-	posted := 0
+	var pairs []convertPair
 	for _, s := range seconds {
+		p := convertPair{at: s}
 		var usdt *convertRow
-		spent, sold := "", 0.0
 		for i := range bySecond[s] {
 			r := &bySecond[s][i]
+			p.ids = append(p.ids, r.id)
 			if r.coin == "USDT" && r.delta > 0 {
 				usdt = r
 			} else if r.delta < 0 {
-				spent, sold = r.coin, sold-r.delta
+				p.spent, p.sold = r.coin, p.sold-r.delta
 			}
 		}
-		if usdt == nil || spent == "" {
-			continue // anything else (USDC swaps, sales for another coin) stays for the owner
+		if usdt == nil || p.spent == "" {
+			continue
 		}
-		coinAccount := "bybit:" + lower(spent)
+		p.usdt = *usdt
 		var known int
-		if err := q.QueryRowContext(ctx, `SELECT count(*) FROM accounts WHERE code = ?`, coinAccount).Scan(&known); err != nil {
-			return posted, err
+		if err := q.QueryRowContext(ctx, `SELECT count(*) FROM accounts WHERE code = ?`, "bybit:"+lower(p.spent)).Scan(&known); err != nil {
+			return nil, err
 		}
-		if known == 0 {
+		if known > 0 {
+			p.account = "bybit:" + lower(p.spent)
+		}
+		pairs = append(pairs, p)
+	}
+	return pairs, nil
+}
+
+// ConvertedFunding is the set of Funding row ids that PostConverts answers for: a coin with a book account
+// sold for USDT, posted by PostConverts or counted by a journal row «… → Convert USDT». The Funding check
+// does not raise them as movements without an operation.
+func ConvertedFunding(ctx context.Context, q ledger.Querier) (map[string]bool, error) {
+	pairs, err := convertPairs(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	ids := map[string]bool{}
+	for _, p := range pairs {
+		if p.account == "" {
+			continue
+		}
+		for _, id := range p.ids {
+			ids[strings.TrimPrefix(id, "funding:")] = true
+		}
+	}
+	return ids, nil
+}
+
+// PostConverts brings the entries of the conversions in the Funding rows in line with the journal.
+func PostConverts(ctx context.Context, q ledger.Querier, now time.Time) (int, error) {
+	pairs, err := convertPairs(ctx, q)
+	if err != nil {
+		return 0, err
+	}
+	posted := 0
+	for _, p := range pairs {
+		if p.account == "" {
 			continue // a coin without a book account stays for the owner
 		}
+		s, usdt, spent, sold, coinAccount := p.at, p.usdt, p.spent, p.sold, p.account
 		key := "bybit:convert:" + usdt.id
 		want, err := convertLines(ctx, q, key, s, spent, coinAccount, sold, money.FromFloat(usdt.delta))
 		if err != nil {

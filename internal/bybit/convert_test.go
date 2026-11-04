@@ -51,6 +51,18 @@ func TestConvertPostsOnceAndRespectsTheJournal(t *testing.T) {
 	if again, err := PostConverts(ctx, s.RW, now); err != nil || again != 0 {
 		t.Fatalf("repeat posted %d %v", again, err)
 	}
+	// The Funding check leaves both conversions to PostConverts; a USDC swap stays for the owner.
+	add("5", "2026-10-31T10:00:00+03:00", "USDC", "-50")
+	add("6", "2026-10-31T10:00:00+03:00", "USDT", "49.98")
+	conv, err := ConvertedFunding(ctx, s.RO)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]bool{"1": true, "2": true, "3": true, "4": true, "5": false, "6": false} {
+		if conv[id] != want {
+			t.Errorf("converted[%s] = %v, want %v", id, conv[id], want)
+		}
+	}
 	for acct, want := range map[string]string{"bybit": "103.50", "bybit:btc": "0", "income:other": "-3.50"} {
 		got, err := ledger.Balance(ctx, s.RO, acct, "", "")
 		if err != nil || got != money.MustParse(want) {
