@@ -481,10 +481,10 @@ func (c *Card) Totals() Totals {
 	return t
 }
 
-// Verdict of the owner-salary safeguard: candidate ≤ 0.6 × decision figure; «на грани» when the margin
+// Verdict of the owner-salary safeguard: candidate ≤ share × decision figure; «на грани» when the margin
 // is below max($100, what still stands as an estimate at the close).
-func Verdict(decision, candidate float64, transit *float64) string {
-	margin := decision - candidate/0.6
+func Verdict(decision, candidate, share float64, transit *float64) string {
+	margin := decision - candidate/share
 	if margin < 0 {
 		return "не проходит"
 	}

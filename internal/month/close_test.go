@@ -32,14 +32,14 @@ func TestBlockers(t *testing.T) {
 }
 
 func TestVerdict(t *testing.T) {
-	if v := Verdict(6000, 3500, nil); v != "проходит" {
+	if v := Verdict(6000, 3000, 0.55, nil); v != "проходит" {
 		t.Fatal(v)
 	}
-	if v := Verdict(5000, 3500, nil); v != "не проходит" {
+	if v := Verdict(5000, 3000, 0.55, nil); v != "не проходит" {
 		t.Fatal(v)
 	}
 	tr := 200.0
-	if v := Verdict(5900, 3500, &tr); v != "на грани" { // запас 66.67 < max(100, 200)
+	if v := Verdict(5500, 3000, 0.55, &tr); v != "на грани" { // запас 45.45 < max(100, 200)
 		t.Fatal(v)
 	}
 }

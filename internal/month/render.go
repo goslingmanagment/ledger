@@ -191,10 +191,10 @@ func (c *Card) Render(ceoRate *float64, res []Check, extraNotes []string) string
 	if ceoRate == nil {
 		out = append(out, "Предохранитель: без --ceo-rate вердикт не считаю")
 	} else {
-		cand := *ceoRate + 500
-		need := cand / 0.6
-		out = append(out, fmt.Sprintf("Предохранитель %s (ставка %s + 500; нужно ≥ %s): %s, запас %s; по оценке ещё в пути %s — до закрытия цифра предварительная",
-			Money(cand), Money(*ceoRate), Money(need), Verdict(dec, cand, nil), Money(dec-need), Money(t.Transit)))
+		cand := *ceoRate + cfg.GuardStep
+		need := cand / cfg.GuardShare
+		out = append(out, fmt.Sprintf("Предохранитель %s (ставка %s + %s; нужно ≥ %s): %s, запас %s; по оценке ещё в пути %s — до закрытия цифра предварительная",
+			Money(cand), Money(*ceoRate), strconv.FormatFloat(cfg.GuardStep, 'f', -1, 64), Money(need), Verdict(dec, cand, cfg.GuardShare, nil), Money(dec-need), Money(t.Transit)))
 	}
 	notes := dedupe(append(append(append([]string(nil), e.Notes...), c.Notes...), extraNotes...))
 	if len(notes) > 0 {
@@ -376,11 +376,11 @@ func Brief(ctx context.Context, q ledger.Querier, cv *Cover, tabs []Tab, ceoRate
 			cand = &v
 		}
 	} else if ceoRate != nil && *ceoRate != 0 {
-		v := *ceoRate + 500
+		v := *ceoRate + cfg.GuardStep
 		cand = &v
 	}
 	if cand != nil {
-		need := *cand / 0.6
+		need := *cand / cfg.GuardShare
 		if closed {
 			if v, ok := snap["need"].(float64); ok && v != 0 {
 				need = v
@@ -390,7 +390,7 @@ func Brief(ctx context.Context, q ledger.Querier, cv *Cover, tabs []Tab, ceoRate
 		if closed && haveTotals {
 			tr = &transit
 		}
-		v := Verdict(dec, need*0.6, tr)
+		v := Verdict(dec, need*cfg.GuardShare, cfg.GuardShare, tr)
 		line := fmt.Sprintf("Повышение до %s %s: нужно от %s, ", USD(*cand, false), v, USD(need, false))
 		if dec < need {
 			line += "не хватает " + USD(need-dec, false)

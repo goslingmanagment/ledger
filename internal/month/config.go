@@ -62,6 +62,8 @@ type Config struct {
 	TabAliases map[string]string
 	Names      map[string]string
 	CardNotes  []string // standing remarks of the card, from the optional setting card_notes
+	GuardShare float64  // the owner-salary safeguard: candidate ≤ share × decision figure
+	GuardStep  float64  // the raise the safeguard tests, on top of the current rate
 }
 
 // LoadConfig reads routes, rates, settings and hub exceptions.
@@ -84,6 +86,12 @@ func LoadConfig(ctx context.Context, q ledger.Querier) (Config, error) {
 		return c, err
 	}
 	if c.KHigh, err = set.Float("k_norm_high"); err != nil {
+		return c, err
+	}
+	if c.GuardShare, err = set.Float("guard_share"); err != nil {
+		return c, err
+	}
+	if c.GuardStep, err = set.Float("guard_step"); err != nil {
 		return c, err
 	}
 	if c.Lookback, err = set.Days("lookback_days"); err != nil {
