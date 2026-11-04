@@ -66,6 +66,10 @@ func CheckCells(r Row) error {
 	return err
 }
 
+// RowsCheck is a further check of the whole journal before rows are written: the month card refuses to
+// count a journal its transfers do not fit, so such a row must not get in.
+var RowsCheck func(ctx context.Context, q ledger.Querier, rows []Row) error
+
 // LoadContext builds what the mapping of a row needs from the current journal plus rows about to be
 // added (extra), and returns all those rows in number order for Lint.
 func LoadContext(ctx context.Context, q ledger.Querier, extra ...Row) (*Context, []Row, error) {
@@ -112,7 +116,7 @@ func LoadContext(ctx context.Context, q ledger.Querier, extra ...Row) (*Context,
 		if err != nil {
 			continue
 		}
-		if t.Deal != nil && r.Type == "income" && !notOff[r.Category] {
+		if t.Deal != nil && r.Status == "paid" && r.Type == "income" && !notOff[r.Category] {
 			if _, ok := c.FirstOfDeal[t.Deal.ID]; !ok {
 				c.FirstOfDeal[t.Deal.ID] = r.Num
 			}
@@ -153,6 +157,11 @@ func Check(ctx context.Context, q ledger.Querier, rows []Row) ([]Row, [][]ledger
 	}
 	if errs := Lint(all); len(errs) > 0 {
 		return nil, nil, errs[0]
+	}
+	if RowsCheck != nil {
+		if err := RowsCheck(ctx, q, all); err != nil {
+			return nil, nil, err
+		}
 	}
 	entries := make([][]ledger.Entry, 0, len(out))
 	for _, r := range out {
@@ -211,7 +220,66 @@ func Append(ctx context.Context, q ledger.Querier, rows []Row, w Write) ([]ledge
 		}
 		out = append(out, d)
 	}
-	return out, nil
+	return out, settleDeals(ctx, q, checked, w)
+}
+
+// settleDeals reposts the other rows of the written rows' deals. The model's share sits on the deal's first
+// paid row, so a row dated earlier, or a corrected date or status, moves it from one row to another.
+func settleDeals(ctx context.Context, q ledger.Querier, written []Row, w Write) error {
+	deals := map[string]bool{}
+	for _, r := range written {
+		if t, err := RowTags(r); err == nil && t.Deal != nil {
+			deals[t.Deal.ID] = true
+		}
+	}
+	if len(deals) == 0 {
+		return nil
+	}
+	c, all, err := LoadContext(ctx, q)
+	if err != nil {
+		return err
+	}
+	active, err := loadActive(ctx, q)
+	if err != nil {
+		return err
+	}
+	for _, r := range all {
+		t, err := RowTags(r)
+		if err != nil || t.Deal == nil || !deals[t.Deal.ID] {
+			continue
+		}
+		want, err := Entries(r, t, c)
+		if err != nil {
+			return fmt.Errorf("#%d: %w", r.Num, err)
+		}
+		sigs := make([]string, 0, len(want))
+		for _, e := range want {
+			sigs = append(sigs, Signature(e))
+		}
+		have := active[r.Num]
+		if have != nil && sameSet(have.sigs, sigs) {
+			continue
+		}
+		if have != nil {
+			for _, id := range have.ids {
+				if _, err := ledger.Reverse(ctx, q, id, ledger.Reversal{Author: w.Author, DisputeID: w.DisputeID,
+					Memo: fmt.Sprintf("сторно #%d: сменилась первая строка сделки", r.Num)}, w.Now); err != nil {
+					return err
+				}
+			}
+		}
+		doc, err := ledger.CurrentDocument(ctx, q, r.Num)
+		if err != nil {
+			return err
+		}
+		for _, e := range want {
+			e.DocumentID, e.Author, e.DisputeID = doc.ID, w.Author, w.DisputeID
+			if _, err := ledger.Post(ctx, q, e, w.Now); err != nil {
+				return fmt.Errorf("#%d: %w", r.Num, err)
+			}
+		}
+	}
+	return nil
 }
 
 // Correction is what a corrected row did: the new version, the reversals and the new entries.
@@ -253,9 +321,11 @@ func Correct(ctx context.Context, q ledger.Querier, r Row, w Write) (Correction,
 			res.Reversals = append(res.Reversals, rev)
 		}
 	}
-	res.Document, err = put(ctx, q, checked[0], entries[0], w)
+	if res.Document, err = put(ctx, q, checked[0], entries[0], w); err != nil {
+		return res, err
+	}
 	res.Posted = len(entries[0])
-	return res, err
+	return res, settleDeals(ctx, q, checked, w)
 }
 
 // RowFromDocument is the journal row of a stored document.

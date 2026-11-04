@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -74,6 +75,16 @@ func (m *multi) Set(v string) error { *m = append(*m, v); return nil }
 
 func importLedgerMD(ctx context.Context, args []string) error {
 	fs := Flags("import ledger-md")
+	refuseLive := func(tx *sql.Tx) error {
+		var mode string
+		if err := tx.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'mode'`).Scan(&mode); err != nil && err != sql.ErrNoRows {
+			return err
+		}
+		if mode == "live" {
+			return fmt.Errorf("ledger — канон журнала: импорт из файла закрыт, сначала ledger mode shadow")
+		}
+		return nil
+	}
 	var aligns multi
 	fs.Var(&aligns, "align", "счёт@ГГГГ-ММ-ДД[#N]=сумма: остаток по снимку на конец дня или сразу после строки #N этой даты")
 	overrides := fs.String("overrides", "", "JSON {\"<номер>\": {\"money\": [{\"account\": …, \"amount\": …}]}}")
@@ -132,6 +143,9 @@ func importLedgerMD(ctx context.Context, args []string) error {
 		return err
 	}
 	defer tx.Rollback()
+	if err := refuseLive(tx); err != nil {
+		return err
+	}
 	if opts.AccrualFrom == "" {
 		_ = tx.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'accrual_from'`).Scan(&opts.AccrualFrom)
 	}

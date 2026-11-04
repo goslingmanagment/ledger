@@ -131,7 +131,7 @@ func (s Settings) Map(key string) (map[string]string, error) {
 var settingKinds = map[string]string{
 	"share": "float", "k_norm_low": "float", "k_norm_high": "float",
 	"hold_days": "int", "lookback_days": "int", "hub_tail_days": "int", "hub_full_every_days": "int", "hub_rpm": "int",
-	"full_ledger_from": "time", "hub_window_start": "time", "accrual_from": "time",
+	"full_ledger_from": "time", "hub_window_start": "time", "accrual_from": "date",
 	"fansly_payout_methods": "list", "hold_types": "list",
 	"hub_model_slugs": "map", "tab_aliases": "map", "sheet_pages": "map",
 }
@@ -151,6 +151,10 @@ func checkSetting(key, value string) error {
 		}
 	case "time":
 		_, err = s.Time(key)
+	case "date":
+		if _, derr := time.Parse(ts.DateLayout, strings.TrimSpace(value)); derr != nil {
+			err = fmt.Errorf("настройка %s: нужна дата ГГГГ-ММ-ДД, не «%s»", key, value)
+		}
 	case "list":
 		_, err = s.List(key)
 	case "map":

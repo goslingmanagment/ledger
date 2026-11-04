@@ -110,7 +110,7 @@ type NoteLinks struct {
 // LinkNotes links events to journal rows whose note names the movement key ("withdrawal:259…").
 func LinkNotes(ctx context.Context, q ledger.Querier, now time.Time) (NoteLinks, error) {
 	var rep NoteLinks
-	rows, err := q.QueryContext(ctx, `SELECT num, note FROM v_documents WHERE note LIKE '%:%' ORDER BY num`)
+	rows, err := q.QueryContext(ctx, `SELECT num, note FROM v_documents WHERE note LIKE '%:%' AND status <> 'cancelled' ORDER BY num`)
 	if err != nil {
 		return rep, err
 	}

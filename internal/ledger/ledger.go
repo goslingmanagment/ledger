@@ -169,9 +169,13 @@ func Post(ctx context.Context, q Querier, e Entry, now time.Time) (int64, error)
 			return 0, err
 		}
 	}
+	recorded, err := recordedAt(ctx, q, now)
+	if err != nil {
+		return 0, err
+	}
 	res, err := q.ExecContext(ctx, `INSERT INTO entries(effective_at, recorded_at, kind, memo, document_id, proposal_id,
 		dispute_id, reverses_id, author, source_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		e.EffectiveAt, ts.Format(now), e.Kind, e.Memo, nullID(e.DocumentID), nullID(e.ProposalID),
+		e.EffectiveAt, recorded, e.Kind, e.Memo, nullID(e.DocumentID), nullID(e.ProposalID),
 		nullID(e.DisputeID), nullID(e.ReversesID), e.Author, nullStr(e.SourceKey))
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed: entries.reverses_id") {
@@ -192,6 +196,25 @@ func Post(ctx context.Context, q Querier, e Entry, now time.Time) (int64, error)
 		}
 	}
 	return id, nil
+}
+
+// recordedAt is the time an entry is recorded at: the source's own time, but always after the last closed
+// month, because «на закрытии» counts by recorded_at <= locked_at. A fetch made before a close and delivered
+// after it, or an entry in the same second as the close, was not known to the close.
+func recordedAt(ctx context.Context, q Querier, now time.Time) (string, error) {
+	recorded := ts.Format(now)
+	var locked sql.NullString
+	if err := q.QueryRowContext(ctx, `SELECT MAX(locked_at) FROM periods`).Scan(&locked); err != nil {
+		return "", err
+	}
+	if !locked.Valid || recorded > locked.String {
+		return recorded, nil
+	}
+	t, err := ts.Parse(locked.String)
+	if err != nil {
+		return "", fmt.Errorf("periods.locked_at: %w", err)
+	}
+	return ts.Format(t.Add(time.Second)), nil
 }
 
 func sameLines(ctx context.Context, q Querier, id int64, want []Line) (bool, error) {
