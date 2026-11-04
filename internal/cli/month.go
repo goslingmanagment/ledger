@@ -130,14 +130,29 @@ func monthShow(ctx context.Context, args []string) error {
 		return printJSON(out)
 	}
 	fmt.Println(out["text"])
-	if checks, ok := out["checks"].([]month.Check); ok {
-		for _, c := range checks {
+	if checksFailed(out["checks"]) {
+		return Exit{Code: 3, Msg: "проверки не пройдены"}
+	}
+	return nil
+}
+
+// checksFailed reads the card's checks: typed next to the database, decoded JSON through the API.
+func checksFailed(v any) bool {
+	switch cs := v.(type) {
+	case []month.Check:
+		for _, c := range cs {
 			if !c.OK {
-				return Exit{Code: 3, Msg: "проверки не пройдены"}
+				return true
+			}
+		}
+	case []any:
+		for _, c := range cs {
+			if m, ok := c.(map[string]any); ok && m["ok"] != true {
+				return true
 			}
 		}
 	}
-	return nil
+	return false
 }
 
 func monthClose(ctx context.Context, args []string) error {

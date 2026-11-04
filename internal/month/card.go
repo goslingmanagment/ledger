@@ -142,7 +142,7 @@ func BuildCard(cv *Cover, month string, tabs []Tab) (*Card, error) {
 	}
 	asOf := cv.AsOf
 	card := &Card{Month: month, AsOf: asOf, Cover: cv, lineIdx: map[LineKey]*Line{}, Agg: map[string]*Ordered{}, Off: map[string]*OffModel{},
-		Notes: append([]string(nil), cv.Notes...), M0: m0, M1: m1}
+		Notes: append(append([]string(nil), cv.Notes...), cv.Cfg.CardNotes...), M0: m0, M1: m1}
 	c := cv.Cfg
 	for _, p := range cv.PageOrder {
 		rs := cv.Rows[p]
