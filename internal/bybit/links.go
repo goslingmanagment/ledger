@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -398,4 +399,37 @@ func LinkNotesAndClose(ctx context.Context, q ledger.Querier, by string, now tim
 		return nil, err
 	}
 	return map[string]any{"documents": rep.Documents, "keys": rep.Keys, "linked": rep.Linked, "missing": rep.Missing, "proposals_superseded": n}, nil
+}
+
+// PendingUSD sums the dollar movements the books do not know yet: they already changed the balance of the
+// API, and have their own check of being closed within three days.
+func PendingUSD(ctx context.Context, q ledger.Querier) (float64, error) {
+	start := ""
+	if err := q.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'full_ledger_from'`).Scan(&start); err != nil && err != sql.ErrNoRows {
+		return 0, err
+	}
+	if start == "" {
+		start = "2026-08-01"
+	}
+	rows, err := q.QueryContext(ctx, `SELECT u.direction, u.amount, COALESCE(json_extract(e.payload, '$.fee'), '') FROM v_bybit_unlinked u
+		JOIN events e ON e.id = u.event_id WHERE u.occurred_at >= ? AND u.coin IN ('USDT', 'USDC')`, start)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	sum := 0.0
+	for rows.Next() {
+		var dir, amount, fee sql.NullString
+		if err := rows.Scan(&dir, &amount, &fee); err != nil {
+			return 0, err
+		}
+		a, _ := strconv.ParseFloat(amount.String, 64)
+		f, _ := strconv.ParseFloat(fee.String, 64)
+		if dir.String == "income" {
+			sum += a
+		} else {
+			sum -= a + f
+		}
+	}
+	return sum, rows.Err()
 }

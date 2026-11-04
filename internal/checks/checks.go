@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -91,7 +90,7 @@ func BybitBalance(ctx context.Context, e Env) Result {
 	if err != nil {
 		return fail(name, "urgent", err.Error(), nil)
 	}
-	pending, err := pendingBybit(ctx, e.Q)
+	pending, err := bybit.PendingUSD(ctx, e.Q)
 	if err != nil {
 		return fail(name, "urgent", err.Error(), nil)
 	}
@@ -102,39 +101,6 @@ func BybitBalance(ctx context.Context, e Env) Result {
 			map[string]float64{"book": b, "pending": pending, "api": api})
 	}
 	return pass(name, fmt.Sprintf("по книгам %.2f, движения без строки журнала %+.2f, по API %.2f", b, pending, api))
-}
-
-// pendingBybit sums the USDT movements the books do not know yet: they already changed the balance of the
-// API, and have their own check of being closed within three days.
-func pendingBybit(ctx context.Context, q ledger.Querier) (float64, error) {
-	start := ""
-	if err := q.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'full_ledger_from'`).Scan(&start); err != nil && err != sql.ErrNoRows {
-		return 0, err
-	}
-	if start == "" {
-		start = "2026-08-01"
-	}
-	rows, err := q.QueryContext(ctx, `SELECT u.direction, u.amount, COALESCE(json_extract(e.payload, '$.fee'), '') FROM v_bybit_unlinked u
-		JOIN events e ON e.id = u.event_id WHERE u.occurred_at >= ? AND u.coin IN ('USDT', 'USDC')`, start)
-	if err != nil {
-		return 0, err
-	}
-	defer rows.Close()
-	sum := 0.0
-	for rows.Next() {
-		var dir, amount, fee sql.NullString
-		if err := rows.Scan(&dir, &amount, &fee); err != nil {
-			return 0, err
-		}
-		a, _ := strconv.ParseFloat(amount.String, 64)
-		f, _ := strconv.ParseFloat(fee.String, 64)
-		if dir.String == "income" {
-			sum += a
-		} else {
-			sum -= a + f
-		}
-	}
-	return sum, rows.Err()
 }
 
 // frozenAccounts are accounts of closed or frozen cards: their balance is history, not cash.
