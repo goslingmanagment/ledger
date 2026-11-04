@@ -1,0 +1,8 @@
+# Сборка образа на этом хосте: только учения и аварийный --build-here. Обычный путь — образ из CI.
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        BUILD: ${LEDGER_BUILD:-local}
