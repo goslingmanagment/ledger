@@ -16,10 +16,16 @@
 - Bybit локально: `LEDGER_BYBIT_API_KEY=… LEDGER_BYBIT_API_SECRET=… ledger bybit fetch --since ГГГГ-ММ-ДД`; статус прогона и
   Funding — `ledger bybit status`, без строки журнала — `ledger bybit unlinked`. Перенос из `ledger-sync`: `ledger rules import <config>`,
   затем `ledger import bybit-state <bybit.sqlite>`; после первого прогона сбора, тогда у событий истории есть сырая запись Bybit.
-  Настройки `mode` (shadow: документы не создаются) и `bybit_start`.
+  Настройки `mode` (shadow: документы не создаются, live: `ledger mode live`) и `bybit_start`.
 - Долги людям: `ledger import people <папка people>`, затем `ledger collect sheets [--dry-run] [--local-db]` (конфиг `~/.config/ledger/sheets.json`,
   очередь `~/.config/ledger/spool`, только `gog --readonly`); `ledger payroll open --dry-run` — стартовые долги таблицей, без `--dry-run` они замораживаются
   навсегда; `ledger payroll rebuild` — свести сейчас, `ledger payables` — что вышло. Строки вкладок, которые не пишутся как страница хаба, — в `settings.sheet_pages`.
+- Бриф: `ledger brief [--text] [--new]` — открытый неотправленный или новый из открытых предложений, номера заморожены; `ledger brief-sent --brief N`, `ledger pending`.
+  Решения: `ledger decide --brief N --set 1=confirm --set 2=personal --set 3=custom:{…} --set 4=defer --set 5=recorded:388,389`, весь набор одной транзакцией, ключ с правом decide.
+  `mode` shadow: решения только записываются, закрывает их импорт журнала или `import bybit-state`; live: `confirm` и `custom` (JSON-правка: `category`, `counterparty`, `model`, `note`, `type`, `amount`, `split`) пишут строки и проводки, точное правило пишет само.
+  `ledger propose <json>`, `ledger evidence add|show`, `ledger dispute open|list|resolve` — у споров исправление только в live.
+- Карты: `ledger collect cards [--dry-run] [--local-db]` на маке (конфиг `~/.config/ledger/cards.json`, очередь `spool-cards`, только `tg history`); `ledger cards balances` — журнал против анкоров бота, `ledger cards link <msg_id> <withdrawal:N>`.
+  На сервере события разбирает `internal/cards` при приходе и джобом: загрузка с даты `settings.cards_load_from` (по умолчанию 2026-09-05, раньше журнал писал дошедшее до карты переводом) — проводка кошелёк → карта. Ответ владельца без строки из кошелька сторнирует её: так бот показывает зачисления саппорта и переносы между картами.
 - Перед PR: `gofmt -l .`, `go vet ./...` и `go test` затронутых пакетов; остальное проверяет CI.
 - Устройство: `cmd/ledger` — один бинарник; `internal/cli` — подкоманды (каждая фича своим файлом через
   `cli.Command` в `init`); `internal/server` — HTTP и планировщик (`server.Register`, `server.Every`);

@@ -48,16 +48,18 @@ bash deploy/compose.sh exec -T app ledger keys create bobr --scope read --replac
 Файл по умолчанию держит ключ только на чтение. Задание с большими правами (сборщики мака, `decide`) называет свой файл через
 `LEDGER_CREDENTIALS=<путь>`.
 
-## Таблицы выплат
+## Сборщики на маке
 
-`ledger collect sheets` живёт на маке: `gog` работает только там. Раз в час читает таблицы, шлёт вкладки событиями, а пока API
-недоступен, держит их в `~/.config/ledger/spool` и досылает без дублей.
+`ledger collect sheets` и `ledger collect cards` живут на маке: `gog` и сессия телеграма есть только там. Таблицы — раз в час, бот
+CinCin — раз в 30 минут, читают только на чтение (`gog --readonly`, `uv run tg history`). Пока API недоступен, события лежат в очереди
+(`~/.config/ledger/spool` и `spool-cards`) и досылаются без дублей.
 
-1. На VPS: `bash deploy/compose.sh exec -T app ledger keys create sheets-mac --scope collect,read`.
-2. На маке: в `~/.config/ledger/credentials` (chmod 600) `LEDGER_URL` и `LEDGER_KEY`; в `~/.config/ledger/sheets.json` (chmod 600)
-   `{"account": "...", "tables": {"<модель>": "<id таблицы>"}}`, пример — `internal/payroll/testdata/sheets.example.json`.
-3. `bash deploy/install-sheets-launchd.sh` — бинарник в `~/.config/ledger/bin`, launchd-агент `ru.gosling-agency.ledger-sheets`,
-   журнал в `~/.config/ledger/logs`.
+1. На VPS: `bash deploy/compose.sh exec -T app ledger keys create mac-collector --scope read,collect,import`.
+2. На маке в `~/.config/ledger/` (всё chmod 600): `credentials.collector` с `LEDGER_URL` и `LEDGER_KEY`;
+   `sheets.json` — `{"account": "...", "tables": {"<модель>": "<id таблицы>"}}`, пример — `internal/payroll/testdata/sheets.example.json`;
+   `cards.json` — `{"peer": <id бота>, "account": "...", "tg_dir": "<каталог tg-inbox>"}`, пример — `internal/cards/testdata/cards.example.json`.
+3. `bash deploy/install-collectors-launchd.sh` — бинарник в `~/.config/ledger/bin`, launchd-агенты `ru.gosling-agency.ledger-cards` и
+   `ru.gosling-agency.ledger-sheets` (шаблон один, `deploy/launchd/ru.gosling-agency.ledger-collect.plist`), журналы в `~/Library/Logs/ledger`.
 
 Карточки людей переносятся один раз: `ledger import people <папка people>` внутри контейнера, папку — через `docker cp`. Стартовые
 долги — `ledger payroll open --dry-run`, потом без `--dry-run`: это делает человек, посмотрев таблицу.

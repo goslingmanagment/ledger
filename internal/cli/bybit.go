@@ -9,7 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/goslingmanagment/ledger/internal/brief"
 	"github.com/goslingmanagment/ledger/internal/bybit"
+	"github.com/goslingmanagment/ledger/internal/cards"
 	"github.com/goslingmanagment/ledger/internal/ts"
 )
 
@@ -282,10 +284,37 @@ func importBybitState(ctx context.Context, args []string) error {
 		return err
 	}
 	defer tx.Rollback()
-	rep, err := bybit.ImportState(ctx, tx, source, time.Now())
-	if err == nil {
-		_, err = bybit.PostConverts(ctx, tx, time.Now())
+	now := time.Now()
+	rep, err := bybit.ImportState(ctx, tx, source, now)
+	if err != nil {
+		return err
 	}
+	if _, err := bybit.PostConverts(ctx, tx, now); err != nil {
+		return err
+	}
+	evidence, err := brief.ImportEvidence(ctx, tx, source, now)
+	if err != nil {
+		return err
+	}
+	// Card events take the same path as the collector's, nothing closed there asks again; what
+	// ledger-sync left undecided becomes a proposal, what it decided closes one.
+	cardsRep, err := cards.Process(ctx, tx, now)
+	if err != nil {
+		return err
+	}
+	mode, err := bybit.Mode(ctx, tx)
+	if err != nil {
+		return err
+	}
+	start, err := bybit.Start(ctx, tx)
+	if err != nil {
+		return err
+	}
+	proposals, err := bybit.ClassifyEvents(ctx, tx, mode, start, now)
+	if err != nil {
+		return err
+	}
+	sweep, err := brief.Sweep(ctx, tx, "import:ledger-sync", now)
 	if err != nil {
 		return err
 	}
@@ -294,5 +323,5 @@ func importBybitState(ctx context.Context, args []string) error {
 			return err
 		}
 	}
-	return printJSON(map[string]any{"ok": true, "dryRun": *dry, "report": rep})
+	return printJSON(map[string]any{"ok": true, "dryRun": *dry, "report": rep, "evidence": evidence, "cards": cardsRep, "proposals": proposals, "sweep": sweep})
 }

@@ -1,18 +1,25 @@
 package journal
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/goslingmanagment/ledger/internal/auth"
+	"github.com/goslingmanagment/ledger/internal/ledger"
 	"github.com/goslingmanagment/ledger/internal/server"
 )
 
 // maxBundle limits one import: the whole history of the journal is well below it.
 const maxBundle = 64 << 20
+
+// AfterImport runs inside the import's transaction: rows naming a movement close what was asked about
+// it. The packages that ask about movements set it; the journal does not know them.
+var AfterImport func(ctx context.Context, q ledger.Querier, now time.Time) error
 
 func init() {
 	server.Register(func(s *server.Server) {
@@ -75,6 +82,12 @@ func init() {
 				}
 				server.WriteError(w, http.StatusInternalServerError, err.Error())
 				return
+			}
+			if AfterImport != nil {
+				if err := AfterImport(ctx, tx, time.Now()); err != nil {
+					server.WriteError(w, http.StatusInternalServerError, err.Error())
+					return
+				}
 			}
 			var unbalanced int
 			if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM v_unbalanced`).Scan(&unbalanced); err != nil || unbalanced != 0 {

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/goslingmanagment/ledger/internal/ledger"
+	"github.com/goslingmanagment/ledger/internal/money"
 	"github.com/goslingmanagment/ledger/internal/ts"
 )
 
@@ -23,9 +24,15 @@ const (
 )
 
 // Journal vocabulary (finance rules): the fee row and the categories that are transfers, not P&L.
-const feeCategory = "Комиссии"
+const (
+	feeCategory      = "Комиссии"
+	internalTransfer = "Внутренний перевод"
 
-var transferCategories = map[string]bool{"Внутренний перевод": true, "Остаток на старте": true}
+	// CinCinRoute is the journal's name of a top-up of the CinCin wallet from Bybit.
+	CinCinRoute = "Bybit → CinCin (кошелёк)"
+)
+
+var transferCategories = map[string]bool{internalTransfer: true, "Остаток на старте": true}
 
 // Rule is a row of `rules`: an exact identity with a direction, and what it means in the journal.
 type Rule struct {
@@ -139,35 +146,94 @@ type SuggestedDocument struct {
 	Note         string `json:"note"`
 }
 
-// suggest builds the rows of an exact match: the movement and, for a withdrawal, its network fee as
-// a second row on the same counterparty (finance rules: otherwise the cash drifts from Funding).
-func suggest(m Movement, r Rule) ([]SuggestedDocument, error) {
+// IsCinCin says the rule is the CinCin deposit address: such a withdrawal is a top-up of an own wallet.
+func (r Rule) IsCinCin() bool { return strings.EqualFold(r.Name, "cincin") }
+
+// Skeleton is what the movement says about its journal rows before anyone names the counterparty: the
+// movement and, for a withdrawal, its network fee as a second row (finance rules: otherwise the cash
+// drifts from Funding). Category and counterparty stay empty.
+func Skeleton(m Movement) ([]SuggestedDocument, error) {
 	amount, err := toMicros(m.Amount)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %v", m.Key, err)
 	}
-	model := r.Model
-	if model == "" {
-		model = "—"
+	docType := "income"
+	if m.Direction == "expense" {
+		docType = "expense"
 	}
-	docType := m.Direction
-	if transferCategories[r.Category] {
-		docType = "transfer"
-	}
-	docs := []SuggestedDocument{{Date: m.Date, Type: docType, Category: r.Category, Counterparty: r.Name, Model: model,
-		Amount: amount.String(), Currency: "USDT", Method: m.Method, Status: "paid", Note: m.Key}}
+	docs := []SuggestedDocument{{Date: m.Date, Type: docType, Model: "—", Amount: amount.String(), Currency: "USDT",
+		Method: m.Method, Status: "paid", Note: m.Key}}
 	if m.Kind == "withdrawal" && m.Fee != "" {
 		fee, err := toMicros(m.Fee)
 		if err != nil {
 			return nil, fmt.Errorf("%s: комиссия: %v", m.Key, err)
 		}
 		if fee > 0 {
-			docs = append(docs, SuggestedDocument{Date: m.Date, Type: "expense", Category: feeCategory, Counterparty: r.Name,
-				Model: model, Amount: fee.String(), Currency: "USDT", Method: m.Method, Status: "paid", Note: "комиссия сети " + m.Key})
+			docs = append(docs, SuggestedDocument{Date: m.Date, Type: "expense", Category: feeCategory, Model: "—",
+				Amount: fee.String(), Currency: "USDT", Method: m.Method, Status: "paid", Note: "комиссия сети " + m.Key})
 		}
 	}
 	return docs, nil
 }
+
+// suggest builds the rows of an exact match on the movement's skeleton. A CinCin address means a
+// top-up of the wallet: the journal names the route, and what reached the wallet comes with the deposit.
+func suggest(m Movement, r Rule) ([]SuggestedDocument, error) {
+	docs, err := Skeleton(m)
+	if err != nil {
+		return nil, err
+	}
+	model := r.Model
+	if model == "" {
+		model = "—"
+	}
+	for i := range docs {
+		docs[i].Counterparty, docs[i].Model = r.Name, model
+	}
+	docs[0].Category = r.Category
+	if transferCategories[r.Category] {
+		docs[0].Type = "transfer"
+	}
+	if r.Category == internalTransfer && r.IsCinCin() {
+		docs[0].Counterparty, docs[0].Currency = CinCinRoute, "USD"
+		for i := 1; i < len(docs); i++ {
+			docs[i].Currency = "USD"
+		}
+	}
+	return docs, nil
+}
+
+// MoneyCheck is what a journal row of the proposal must do to a money account: an owner's correction
+// may split or rename a row, not change what the money did. An account ending in ":" is a prefix.
+type MoneyCheck struct {
+	Account string `json:"account"`
+	Amount  string `json:"amount"` // signed: + came in, − went out
+}
+
+// moneyOf is the Bybit side of a movement in USDT; other coins live under other accounts.
+func moneyOf(m Movement) *MoneyCheck {
+	if m.Coin != "USDT" {
+		return nil
+	}
+	amount, err := toMicros(m.Amount)
+	if err != nil {
+		return nil
+	}
+	if m.Direction == "income" {
+		return &MoneyCheck{Account: "bybit", Amount: amount.String()}
+	}
+	if m.Kind == "withdrawal" && m.Fee != "" {
+		fee, err := toMicros(m.Fee)
+		if err != nil {
+			return nil
+		}
+		amount += fee
+	}
+	return &MoneyCheck{Account: "bybit", Amount: (-amount).String()}
+}
+
+// AmountMicros reads an amount as Bybit writes it, rounded to micro-dollars.
+func AmountMicros(s string) (money.Micros, error) { return toMicros(s) }
 
 // Sighting is an earlier movement with the same uid or address.
 type Sighting struct {
@@ -297,9 +363,15 @@ type Content struct {
 	Key                 string              `json:"key"`
 	EventID             int64               `json:"event_id"`
 	Mode                string              `json:"mode"`
+	Date                string              `json:"date,omitempty"`
 	Movement            Movement            `json:"movement"`
 	Rule                *Rule               `json:"rule,omitempty"`
 	Documents           []SuggestedDocument `json:"documents,omitempty"`
+	Skeleton            []SuggestedDocument `json:"skeleton,omitempty"`      // the base of a custom answer when nothing is suggested
+	PersonalDraw        bool                `json:"personal_draw,omitempty"` // «личное» from the business wallet is an Owner draw row
+	AwaitDeposit        bool                `json:"await_deposit,omitempty"` // a CinCin top-up: written when its deposit tells what reached the wallet
+	Money               *MoneyCheck         `json:"money,omitempty"`
+	AlsoEvents          []int64             `json:"also_events,omitempty"` // other events the rows close: the CinCin deposit
 	Hint                string              `json:"hint,omitempty"`
 	PriorSightings      []Sighting          `json:"prior_sightings,omitempty"`
 	AmountPattern       string              `json:"amount_pattern,omitempty"`
@@ -420,13 +492,20 @@ func ClassifyEvents(ctx context.Context, q ledger.Querier, mode string, start ti
 func propose(ctx context.Context, q ledger.Querier, eventID int64, m Movement, v Verdict, mode string, now time.Time) error {
 	bare := m
 	bare.Raw = nil
-	c := Content{Key: m.Key, EventID: eventID, Mode: mode, Movement: bare, Rule: v.Rule, Hint: v.Hint}
+	c := Content{Key: m.Key, EventID: eventID, Mode: mode, Date: m.Date, Movement: bare, Rule: v.Rule, Hint: v.Hint,
+		PersonalDraw: m.Direction == "expense" && m.Coin == "USDT", Money: moneyOf(m)}
 	var err error
+	if v.Block != "auto" && m.Coin == "USDT" { // another coin: its dollars are for the owner to say
+		if c.Skeleton, err = Skeleton(m); err != nil {
+			return err
+		}
+	}
 	switch {
 	case v.Block == "auto":
 		if c.Documents, err = suggest(m, *v.Rule); err != nil {
 			return err
 		}
+		c.AwaitDeposit = v.Rule.Category == internalTransfer && v.Rule.IsCinCin()
 	case v.Kind == KindP2P:
 		s, err := ownerSalaryRecorded(ctx, q, m.Date[:min(7, len(m.Date))])
 		if err != nil {

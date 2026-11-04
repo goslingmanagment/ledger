@@ -157,49 +157,92 @@ func LinkNotes(ctx context.Context, q ledger.Querier, now time.Time) (NoteLinks,
 	return rep, nil
 }
 
-// supersedeLinked closes the open Bybit proposals whose movement got a link: the movement was decided
-// elsewhere (ledger-sync, a journal row, a manual link) and must not come back in the brief.
+// supersedeLinked closes the open proposals of Bybit movements and bot events whose event (or its
+// delta part) got a link: decided elsewhere (ledger-sync, a journal row, a manual link) and must not
+// come back in the brief. A link to a journal row reads as recorded, one without a row keeps its decision.
 func supersedeLinked(ctx context.Context, q ledger.Querier, by string, now time.Time) (int, error) {
-	rows, err := q.QueryContext(ctx, `SELECT p.id, l.how, l.decision, COALESCE(l.document_num, 0)
-		FROM proposals p
-		JOIN events e ON e.source = 'bybit' AND e.source_id = p.key
-		JOIN event_links l ON l.event_id = e.id AND l.part = ''
-		WHERE p.status = 'open' AND p.kind LIKE 'bybit%'
-		ORDER BY p.id, l.id`)
+	rows, err := q.QueryContext(ctx, `SELECT id, key FROM proposals WHERE status = 'open'
+		AND (kind LIKE 'bybit%' OR kind LIKE 'card%') ORDER BY id`)
 	if err != nil {
 		return 0, err
 	}
-	texts := map[int64][]string{}
-	var ids []int64
+	type open struct {
+		id  int64
+		key string
+	}
+	var list []open
 	for rows.Next() {
-		var id int64
-		var how, decision string
-		var doc int
-		if err := rows.Scan(&id, &how, &decision, &doc); err != nil {
+		var o open
+		if err := rows.Scan(&o.id, &o.key); err != nil {
 			rows.Close()
 			return 0, err
 		}
-		if _, ok := texts[id]; !ok {
-			ids = append(ids, id)
-		}
-		t := how + ":" + decision
-		if doc > 0 {
-			t += fmt.Sprintf(" #%d", doc)
-		}
-		texts[id] = append(texts[id], t)
+		list = append(list, o)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return 0, err
 	}
-	for _, id := range ids {
-		if _, err := q.ExecContext(ctx, `UPDATE proposals SET status = 'superseded', decided_at = ?, decided_by = ?,
-			decision = 'linked', decision_text = ? WHERE id = ? AND status = 'open'`,
-			ts.Format(now), by, strings.Join(texts[id], ", "), id); err != nil {
-			return 0, err
+	closed := 0
+	for _, o := range list {
+		ref, ok := ParseKey(o.key)
+		if !ok {
+			continue
 		}
+		event, err := eventID(ctx, q, ref)
+		if err != nil {
+			return closed, err
+		}
+		if event == 0 {
+			continue
+		}
+		decision, text, err := linksOf(ctx, q, event, ref.Part)
+		if err != nil {
+			return closed, err
+		}
+		if decision == "" {
+			continue
+		}
+		if _, err := q.ExecContext(ctx, `UPDATE proposals SET status = 'superseded', decided_at = ?, decided_by = ?,
+			decision = ?, decision_text = ? WHERE id = ? AND status = 'open'`,
+			ts.Format(now), by, decision, text, o.id); err != nil {
+			return closed, err
+		}
+		closed++
 	}
-	return len(ids), nil
+	return closed, nil
+}
+
+// linksOf is the decision the links of an event part amount to and their text; "" without links.
+func linksOf(ctx context.Context, q ledger.Querier, event int64, part string) (decision, text string, err error) {
+	rows, err := q.QueryContext(ctx, `SELECT how, decision, COALESCE(document_num, 0) FROM event_links
+		WHERE event_id = ? AND part = ? ORDER BY id`, event, part)
+	if err != nil {
+		return "", "", err
+	}
+	defer rows.Close()
+	var texts []string
+	for rows.Next() {
+		var how, d string
+		var doc int
+		if err := rows.Scan(&how, &d, &doc); err != nil {
+			return "", "", err
+		}
+		t := how + ":" + d
+		if doc > 0 {
+			t += fmt.Sprintf(" #%d", doc)
+			decision = "recorded"
+		} else if decision == "" {
+			decision = d
+		}
+		texts = append(texts, t)
+	}
+	return decision, strings.Join(texts, ", "), rows.Err()
+}
+
+// SupersedeLinked is what a journal or state import runs after its rows are linked.
+func SupersedeLinked(ctx context.Context, q ledger.Querier, by string, now time.Time) (int, error) {
+	return supersedeLinked(ctx, q, by, now)
 }
 
 // UnlinkedRow is a Bybit movement without a journal row and without a personal/ignore decision.

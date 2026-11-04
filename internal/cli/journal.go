@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	_ "github.com/goslingmanagment/ledger/internal/cards" // sets journal.AfterImport
 	"github.com/goslingmanagment/ledger/internal/journal"
 	"github.com/goslingmanagment/ledger/internal/ledger"
 	"github.com/goslingmanagment/ledger/internal/money"
@@ -163,6 +164,10 @@ func importLedgerMD(ctx context.Context, args []string) error {
 		if errors.As(err, &pe) {
 			return Exit{Code: 2, Msg: pe.Error()}
 		}
+		return err
+	}
+	// Rows that name a movement close its open proposal; a card event the journal recorded asks nothing.
+	if err := journal.AfterImport(ctx, tx, time.Now()); err != nil {
 		return err
 	}
 	var unbalanced int
