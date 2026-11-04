@@ -597,3 +597,41 @@ func PlainSum(ctx context.Context, q ledger.Querier, page string, from, to time.
 		Scan(&n, &sum)
 	return n, sum, err
 }
+
+// NetExcluded is the net of a page over [from, to) in dollars, without rows decided «исключить»
+// (the day figures of the plan line). It refuses like Rows when the window is not proven.
+func NetExcluded(ctx context.Context, q ledger.Querier, page string, from, to time.Time) (float64, error) {
+	ex, err := LoadExceptions(ctx, q)
+	if err != nil {
+		return 0, err
+	}
+	a := from
+	if st, ok := ex.Starts[page]; ok && st.After(a) {
+		a = st
+	}
+	if !a.Before(to) {
+		return 0, nil
+	}
+	if _, err := proven(ctx, q, page, "transactions", a, to); err != nil {
+		return 0, err
+	}
+	rows, err := q.QueryContext(ctx, `SELECT ref, net_mills FROM hub_transactions WHERE page_label = ? AND occurred_at >= ? AND occurred_at < ?`,
+		page, ts.FormatMilli(a), ts.FormatMilli(to))
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	var sum int64
+	for rows.Next() {
+		var ref sql.NullString
+		var net sql.NullInt64
+		if err := rows.Scan(&ref, &net); err != nil {
+			return 0, err
+		}
+		if e, ok := ex.Rows[RowRef{page, ref.String}]; ok && ref.Valid && e.Decision == "исключить" {
+			continue
+		}
+		sum += net.Int64
+	}
+	return float64(sum) / 1000, rows.Err()
+}
