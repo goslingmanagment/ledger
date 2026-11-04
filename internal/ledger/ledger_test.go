@@ -196,3 +196,31 @@ func TestDocumentVersions(t *testing.T) {
 		t.Fatalf("row visible before it was recorded: %+v", none)
 	}
 }
+
+// What reaches the books after a close stays out of «на закрытии», whatever time its source claims.
+func TestEntryAfterCloseIsRecordedAfterIt(t *testing.T) {
+	s, ctx := open(t)
+	locked := time.Date(2026, 10, 14, 12, 0, 0, 0, ts.MSK)
+	line := func(v string) []Line {
+		return []Line{{Account: "expense:tools", Amount: money.MustParse(v)}, {Account: "bybit", Amount: -money.MustParse(v)}}
+	}
+	if _, err := Post(ctx, s.RW, Entry{EffectiveAt: "2026-09-10", Kind: "document", Author: "t", Lines: line("100.00")}, locked.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := Lock(ctx, s.RW, Period{Month: "2026-09", LockedAt: ts.Format(locked), AsOf: ts.Format(locked), Snapshot: []byte(`{}`), Source: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Post(ctx, s.RW, Entry{EffectiveAt: "2026-09-11", Kind: "accrual", Author: "t", Lines: line("7.00")}, locked.Add(-time.Minute)); err != nil {
+		t.Fatal(err) // fetched before the close, delivered after it
+	}
+	if _, err := Post(ctx, s.RW, Entry{EffectiveAt: "2026-09-12", Kind: "document", Author: "t", Lines: line("3.00")}, locked.Add(100*time.Millisecond)); err != nil {
+		t.Fatal(err) // the same second as the close
+	}
+	now, atClose, err := MonthTotals(ctx, s.RW, "2026-09")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if atClose["expense:tools"] != money.MustParse("100.00") || now["expense:tools"] != money.MustParse("110.00") {
+		t.Fatalf("at close %s, now %s", atClose["expense:tools"], now["expense:tools"])
+	}
+}

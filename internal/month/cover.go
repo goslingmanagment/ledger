@@ -1,6 +1,7 @@
 package month
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"sort"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/goslingmanagment/ledger/internal/hub"
 	"github.com/goslingmanagment/ledger/internal/journal"
+	"github.com/goslingmanagment/ledger/internal/ledger"
 	"github.com/goslingmanagment/ledger/internal/ts"
 )
 
@@ -146,6 +148,23 @@ func transfersOf(c Config, rows []journal.Row, asOf time.Time) (map[string][]*Tr
 		}
 	}
 	return out, untagged, nil
+}
+
+func init() {
+	journal.RowsCheck = func(ctx context.Context, q ledger.Querier, rows []journal.Row) error {
+		c, err := LoadConfig(ctx, q)
+		if err != nil {
+			return err
+		}
+		var paid []journal.Row
+		for _, r := range rows {
+			if r.Status == "paid" {
+				paid = append(paid, r)
+			}
+		}
+		_, _, err = transfersOf(c, paid, time.Now().AddDate(10, 0, 0))
+		return err
+	}
 }
 
 func payments(ck hub.Checked) []*Payment {

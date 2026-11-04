@@ -219,3 +219,77 @@ func TestTagsAreStrict(t *testing.T) {
 		t.Error("transfer tag on an expense accepted")
 	}
 }
+
+// Alignments of one account: a repeat changes nothing, a new target moves the balance to it, and a later
+// alignment starts from the earlier one.
+func TestAlignmentsAddUpToTheirTargets(t *testing.T) {
+	s, ctx := openDB(t)
+	at, _ := ts.Parse("2026-09-30T12:00:00+03:00")
+	b := FromFile(sample(), "file", at)
+	base := Options{AccrualFrom: "2026-09-01", Models: []string{"Alfa"}}
+	if _, err := runImport(t, s, ctx, b, base); err != nil {
+		t.Fatal(err)
+	}
+	day := "2026-08-10"
+	target := func(amount string) Align { return Align{Account: "bybit", Date: day, Amount: money.MustParse(amount)} }
+	through := func() money.Micros { return bal(t, s, "bybit", "2026-08-11") }
+	for _, amount := range []string{"1000.00", "1100.00", "1100.00", "1100.00", "900.00"} {
+		o := base
+		o.Align = []Align{target(amount)}
+		if _, err := runImport(t, s, ctx, b, o); err != nil {
+			t.Fatal(err)
+		}
+		if got := through(); got != money.MustParse(amount) {
+			t.Fatalf("after aligning to %s the balance is %s", amount, got)
+		}
+	}
+	later := base
+	later.Align = []Align{{Account: "bybit", Date: "2026-12-31", Amount: money.MustParse("777.00")}}
+	if _, err := runImport(t, s, ctx, b, later); err != nil {
+		t.Fatal(err)
+	}
+	if got := bal(t, s, "bybit", "2027-01-01"); got != money.MustParse("777.00") {
+		t.Fatalf("a later alignment left %s", got)
+	}
+}
+
+// The model's share sits on the first paid row of a deal: a row dated earlier moves it, without doubling.
+func TestDealShareMovesToTheFirstPaidRow(t *testing.T) {
+	s, ctx := openDB(t)
+	if _, err := s.RW.Exec(`INSERT INTO settings(key, value, updated_at) VALUES ('accrual_from', '2026-09-01', 'x'), ('models', 'Alfa', 'x')`); err != nil {
+		t.Fatal(err)
+	}
+	w := Write{Author: "t", Origin: "test", Now: time.Date(2026, 10, 1, 12, 0, 0, 0, ts.MSK)}
+	deal := func(date, amount, status string) Row {
+		return Row{Date: date, Type: "income", Category: "Custom", Counterparty: "Фан", Model: "Alfa", Amount: amount, Currency: "USDT",
+			Method: "USDT TRC-20", Status: status, Note: "{сделка: d1; цена 100; доля 60}"}
+	}
+	due := func() money.Micros { return -bal(t, s, "payable:alfa", "2030-01-01") }
+	if _, err := Append(ctx, s.RW, []Row{deal("2026-09-20", "100.00", "paid")}, w); err != nil {
+		t.Fatal(err)
+	}
+	if got := due(); got != money.MustParse("60.00") {
+		t.Fatalf("share after the first row: %s", got)
+	}
+	if _, err := Append(ctx, s.RW, []Row{deal("2026-09-10", "100.00", "paid")}, w); err != nil {
+		t.Fatal(err)
+	}
+	if got := due(); got != money.MustParse("60.00") {
+		t.Fatalf("share after an earlier row: %s", got)
+	}
+	var first string
+	if err := s.RW.QueryRow(`SELECT e.effective_at FROM entries e JOIN lines l ON l.entry_id = e.id WHERE l.account = 'payable:alfa'
+		AND e.reverses_id IS NULL AND NOT EXISTS (SELECT 1 FROM entries r WHERE r.reverses_id = e.id)`).Scan(&first); err != nil {
+		t.Fatal(err)
+	}
+	if first != "2026-09-10" {
+		t.Fatalf("the share stayed on %s", first)
+	}
+	// A row that is not paid is no first row.
+	if _, err := Append(ctx, s.RW, []Row{deal("2026-09-01", "10.00", "pending")}, w); err != nil {
+		t.Fatal(err)
+	}
+	if got := due(); got != money.MustParse("60.00") {
+		t.Fatalf("share after a pending row: %s", got)
+	}
+}

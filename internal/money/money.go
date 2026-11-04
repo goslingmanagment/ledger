@@ -49,6 +49,9 @@ func Parse(s string) (Micros, error) {
 	if frac != "" {
 		f, _ = strconv.ParseInt(frac+strings.Repeat("0", 6-len(frac)), 10, 64)
 	}
+	if w*Scale > math.MaxInt64-f {
+		return 0, fmt.Errorf("amount %q out of range", s)
+	}
 	v := Micros(w*Scale + f)
 	if neg {
 		v = -v

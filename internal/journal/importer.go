@@ -277,7 +277,7 @@ func reconcile(ctx context.Context, tx *sql.Tx, docs map[int]ledger.Document, po
 			}
 		}
 		tagsOf[r.Num] = t
-		if t.Deal != nil && r.Type == "income" && !notOff[r.Category] {
+		if t.Deal != nil && r.Status == "paid" && r.Type == "income" && !notOff[r.Category] {
 			if _, ok := c.FirstOfDeal[t.Deal.ID]; !ok {
 				c.FirstOfDeal[t.Deal.ID] = r.Num
 			}
@@ -464,17 +464,20 @@ func align(ctx context.Context, tx *sql.Tx, a Align, author string) (string, err
 		ids, current = append(ids, id), current+money.Micros(v)
 	}
 	rows.Close()
+	// The base leaves out this alignment and its reversals; other alignments of the account count.
+	const notThis = `NOT (e.kind = 'opening:align' AND e.memo LIKE ?)
+		AND NOT EXISTS (SELECT 1 FROM entries o WHERE o.id = e.reverses_id AND o.kind = 'opening:align' AND o.memo LIKE ?)`
 	var bal int64
 	if a.UpTo > 0 {
 		err = tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(l.amount), 0) FROM lines l JOIN entries e ON e.id = l.entry_id
 			LEFT JOIN documents d ON d.id = e.document_id
-			WHERE l.account = ? AND e.kind <> 'opening:align'
+			WHERE l.account = ? AND `+notThis+`
 			  AND (substr(e.effective_at, 1, 10) < ? OR (substr(e.effective_at, 1, 10) = ? AND d.num IS NOT NULL AND d.num <= ?))`,
-			a.Account, a.Date, a.Date, a.UpTo).Scan(&bal)
+			a.Account, key+" =%", key+" =%", a.Date, a.Date, a.UpTo).Scan(&bal)
 	} else {
 		err = tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(l.amount), 0) FROM lines l JOIN entries e ON e.id = l.entry_id
-			WHERE l.account = ? AND e.kind <> 'opening:align' AND substr(e.effective_at, 1, 10) <= ?`,
-			a.Account, a.Date).Scan(&bal)
+			WHERE l.account = ? AND `+notThis+` AND substr(e.effective_at, 1, 10) <= ?`,
+			a.Account, key+" =%", key+" =%", a.Date).Scan(&bal)
 	}
 	if err != nil {
 		return "", err

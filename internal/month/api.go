@@ -203,7 +203,16 @@ func init() {
 				httpFail(w, err)
 				return
 			}
-			if err := Accept(ctx, s.Store.RW, rows, time.Now()); err != nil {
+			tx, err := s.Store.RW.BeginTx(ctx, nil)
+			if err != nil {
+				server.WriteError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			defer tx.Rollback()
+			if err = Accept(ctx, tx, rows, time.Now()); err == nil {
+				err = tx.Commit()
+			}
+			if err != nil {
 				httpFail(w, err)
 				return
 			}
