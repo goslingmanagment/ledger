@@ -405,9 +405,15 @@ func LinkNotesAndClose(ctx context.Context, q ledger.Querier, by string, now tim
 // API, and have their own check of being closed within three days. A movement ledger-sync closed before
 // the transfer is not one of them: its row is usually there, only the link is not.
 func PendingUSD(ctx context.Context, q ledger.Querier) (float64, error) {
+	in, out, err := PendingUSDParts(ctx, q)
+	return in + out, err
+}
+
+// PendingUSDParts is PendingUSD split in what came in and what went out (negative).
+func PendingUSDParts(ctx context.Context, q ledger.Querier) (float64, float64, error) {
 	start := ""
 	if err := q.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'full_ledger_from'`).Scan(&start); err != nil && err != sql.ErrNoRows {
-		return 0, err
+		return 0, 0, err
 	}
 	if start == "" {
 		start = "2026-08-01"
@@ -416,22 +422,22 @@ func PendingUSD(ctx context.Context, q ledger.Querier) (float64, error) {
 		JOIN events e ON e.id = u.event_id WHERE u.occurred_at >= ? AND u.coin IN ('USDT', 'USDC')
 		AND COALESCE(u.links, '') NOT LIKE '%seen:%'`, start)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	defer rows.Close()
-	sum := 0.0
+	in, out := 0.0, 0.0
 	for rows.Next() {
 		var dir, amount, fee sql.NullString
 		if err := rows.Scan(&dir, &amount, &fee); err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 		a, _ := strconv.ParseFloat(amount.String, 64)
 		f, _ := strconv.ParseFloat(fee.String, 64)
 		if dir.String == "income" {
-			sum += a
+			in += a
 		} else {
-			sum -= a + f
+			out -= a + f
 		}
 	}
-	return sum, rows.Err()
+	return in, out, rows.Err()
 }
