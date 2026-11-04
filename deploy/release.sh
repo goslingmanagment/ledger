@@ -102,9 +102,10 @@ else
   say "backup before"
   bash deploy/pull-backup.sh
   say "checkout and plan on $host"
+  previous=$(remote "git -C '$repo_on_host' rev-parse HEAD")
   remote "set -e; $checkout && $deploy --plan $how '$sha'"
   say "deploy"
-  remote "set -e; $deploy $how '$sha'"
+  remote "set -e; export LEDGER_PREVIOUS_REF='$previous'; $deploy $how '$sha'"
 fi
 say "backup after"
 bash deploy/pull-backup.sh

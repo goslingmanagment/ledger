@@ -23,7 +23,8 @@ cd "$repo"
 source "$repo/deploy/common.sh"
 target=$(git rev-parse --verify --quiet "$target_ref^{commit}") || { printf 'Unknown commit: %s\n' "$target_ref" >&2; exit 1; }
 runtime=$(runtime_directory)
-previous_ref=$(git symbolic-ref -q --short HEAD || git rev-parse HEAD)
+# release.sh переключает checkout на цель до вызова и передаёт, откуда он пришёл.
+previous_ref=${LEDGER_PREVIOUS_REF:-$(git symbolic-ref -q --short HEAD || git rev-parse HEAD)}
 if [[ $plan == true ]]; then
   current=null
   [[ ! -f $runtime/current.json ]] || current=$(jq -c . "$runtime/current.json")
@@ -70,6 +71,10 @@ on_failure() {
       export LITESTREAM_REPLICA_URL="${previous_replica%/}-restore-$(date -u +%Y%m%dT%H%M%SZ)"
       start_release open && printf 'Candidate failed after migration; previous release restored from %s (old files in %s).\n' \
         "$backup_path" "$quarantine" >&2 ;;
+    serving)
+      # Кандидат здоров и уже принимает записи: откат из копии потерял бы их. Реплику чинят рядом.
+      printf 'The candidate is healthy and serving, but the replica did not confirm: it stays, check Litestream.\n' >&2
+      exit "$code" ;;
     *) printf 'Deployment stopped before touching the running release.\n' >&2 ;;
   esac
   git checkout --quiet "$previous_ref" || printf 'Return the checkout to %s manually.\n' "$previous_ref" >&2
@@ -101,8 +106,9 @@ schema=$(dc run --rm --no-deps -T app ledger migrate </dev/null | jq -er '.schem
 save_current_release candidate
 dc up -d litestream app
 wait_health "$target" "$schema"
-confirmed_sync >/dev/null
 save_current_release open
+phase=serving
+confirmed_sync >/dev/null
 trap - ERR
 prune_superseded_images "ledger:$target" "$previous_image" || true
 dc exec -T app ledger probe --print

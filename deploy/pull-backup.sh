@@ -13,18 +13,22 @@ keep=${LEDGER_BACKUP_KEEP:-120}
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 base=${LEDGER_BACKUP_DIR:-$HOME/Backups/ledger}
 target="$base/$stamp"
-mkdir -p "$target"
+incoming="$base/.incoming-$stamp"
+mkdir -p "$incoming"
+trap 'rm -rf "$incoming"' EXIT
 remote_copy="/data/backups/pull-$stamp.db"
 app="cd '$repo_on_host' && set -a && . '$remote_env' && set +a && bash deploy/compose.sh exec -T app"
 ssh -o BatchMode=yes "$host" "$app ledger backup '$remote_copy' >/dev/null && $app cat '$remote_copy' \
-  && $app rm -f '$remote_copy'" > "$target/ledger.db"
-ssh -o BatchMode=yes "$host" "curl -fsS http://127.0.0.1:3300/health" > "$target/health.json" || true
-size=$(wc -c < "$target/ledger.db" | tr -d ' ')
-[[ $size -gt 4096 ]] || { printf 'Backup looks empty (%s bytes): %s\n' "$size" "$target" >&2; exit 1; }
+  && $app rm -f '$remote_copy'" > "$incoming/ledger.db"
+ssh -o BatchMode=yes "$host" "curl -fsS http://127.0.0.1:3300/health" > "$incoming/health.json" || true
+size=$(wc -c < "$incoming/ledger.db" | tr -d ' ')
+[[ $size -gt 4096 ]] || { printf 'Backup looks empty (%s bytes), not kept\n' "$size" >&2; exit 1; }
 if command -v sqlite3 >/dev/null; then
-  check=$(sqlite3 "file:$target/ledger.db?mode=ro" 'PRAGMA integrity_check;')
-  [[ $check == ok ]] || { printf 'Backup %s fails integrity_check: %s\n' "$target" "$check" >&2; exit 1; }
+  check=$(sqlite3 "file:$incoming/ledger.db?mode=ro" 'PRAGMA integrity_check;')
+  [[ $check == ok ]] || { printf 'Backup fails integrity_check, not kept: %s\n' "$check" >&2; exit 1; }
 fi
+# Датированное имя получает только проверенная копия: из них берутся учение восстановления и подсчёт хранения.
+mv "$incoming" "$target"
 # Отметка для проверки «копии базы»; не критична, копия уже на маке.
 ssh -o BatchMode=yes "$host" "$app ledger mark-backup" || true
 copies=("$base"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z/)

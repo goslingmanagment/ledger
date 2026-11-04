@@ -79,6 +79,8 @@ func TestWritesAndEscapesAreRefused(t *testing.T) {
 		{`DELETE FROM meta`, Denied, "DELETE meta"},
 		{`SELECT hash FROM keys`, Denied, "hash"},
 		{`SELECT * FROM keys`, Denied, "hash"},
+		{`SELECT data FROM sqlite_dbpage`, Denied, "sqlite_dbpage"},
+		{`SELECT name FROM dbstat`, Denied, "dbstat"},
 		{`REPLACE INTO meta(key, value) VALUES ('probe', 'changed')`, Denied, "INSERT"},
 		{`INSERT INTO meta SELECT 'a', 'b' RETURNING *`, Denied, "INSERT"},
 		{`WITH x AS (SELECT 1) DELETE FROM meta`, Denied, "DELETE"},

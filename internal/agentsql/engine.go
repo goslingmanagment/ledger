@@ -269,6 +269,9 @@ func jsonValue(v driver.Value) (any, int) {
 	return v, 8
 }
 
+// rawPages are the virtual tables that read the database file itself, past any column rule.
+var rawPages = map[string]bool{"sqlite_dbpage": true, "dbstat": true}
+
 // readOnly is the policy of every agent connection: SELECT, reading columns, calling
 // functions and recursive CTEs compile, anything else is refused, and so is the column with the keys'
 // hashes. The first refusal goes to d.
@@ -278,7 +281,7 @@ func readOnly(d *denial) sqlite.AuthorizerFn {
 		case sqlite.AuthSelect, sqlite.AuthFunction, sqlite.AuthRecursive:
 			return sqlite.AuthorizerOK
 		case sqlite.AuthRead:
-			if arg1 != "keys" || arg2 != "hash" {
+			if (arg1 != "keys" || arg2 != "hash") && !rawPages[arg1] {
 				return sqlite.AuthorizerOK
 			}
 		}
@@ -321,7 +324,7 @@ var schemaTables = map[string]bool{"sqlite_master": true, "sqlite_temp_master": 
 
 func (d denial) message(stmt string) string {
 	if d.action == sqlite.AuthRead {
-		return "запрещено: хеши ключей агентам не видны; отклонено: чтение " + d.arg1 + "." + d.arg2
+		return "запрещено: хеши ключей и сырые страницы базы агентам не видны; отклонено: чтение " + d.arg1 + "." + d.arg2
 	}
 	what, ok := actionNames[d.action]
 	if !ok {

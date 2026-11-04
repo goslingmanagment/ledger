@@ -32,15 +32,23 @@ bash deploy/release.sh --bootstrap   # первая установка
 - `bash deploy/restore-drill.sh` — восстановить свежую копию локально и поднять на ней сервис.
 - `bash deploy/replica-drill.sh` на VPS — восстановить базу из реплики Litestream и проверить её.
 
+## Если сервер потерян
+
+Копии на маке — полная база (`~/Backups/ledger/<UTC>/ledger.db`). На новом VPS: перенести `/etc/ledger/ledger.env`; `LEDGER_HOST=root@<адрес> bash deploy/release.sh --bootstrap --build-here`;
+остановить сервис: `bash deploy/compose.sh stop app litestream`; положить копию в том:
+`docker run --rm -i -v ledger_data:/data alpine sh -c 'rm -f /data/ledger.db* && cat > /data/ledger.db && chown 1000:1000 /data/ledger.db' < ledger.db`; запустить: `bash deploy/compose.sh up -d`;
+проверить: `ledger verify /data/ledger.db`, `ledger health --now`; перевести DNS и получить сертификат. Сбор Bybit и хаба догонит пропущенное сам, сборщики мака досылают очередь.
+Проверено учением `deploy/restore-drill.sh` на маке; на живом VPS эта последовательность не прогонялась.
+
 ## Ключи агентов
 
 На VPS, `cd /opt/ledger`; ключ печатается один раз, в базе остаётся только SHA-256:
 
 ```
-bash deploy/compose.sh exec -T app ledger keys create bobr --scope read      # decide — только openclaw-main
+bash deploy/compose.sh exec -T app ledger keys create bobr --scope read,propose   # агенты: read,propose; decide — только openclaw-main (read,propose,decide)
 bash deploy/compose.sh exec -T app ledger keys list
 bash deploy/compose.sh exec -T app ledger keys revoke bobr                   # действует сразу
-bash deploy/compose.sh exec -T app ledger keys create bobr --scope read --replace   # новый вместо прежнего
+bash deploy/compose.sh exec -T app ledger keys create bobr --scope read,propose --replace   # новый вместо прежнего
 ```
 
 Агенту — `~/.config/ledger/credentials` (chmod 600): `LEDGER_URL=https://ledger.gosling-agency.ru` и
