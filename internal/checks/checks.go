@@ -327,7 +327,8 @@ func Deposits(cv *month.Cover) Result {
 			}
 			want := covered[t]
 			if want > 0 {
-				r := dep / want
+				// On a route paying the agency 100% the deposits are the payout before the route's fee.
+				r := (dep - t.Fee) / want
 				if r < cv.Cfg.KLow || r > cv.Cfg.KHigh {
 					fails = append(fails, fmt.Sprintf("#%d депозиты %.2f, по заявкам с учётом маршрута %.2f", t.N, dep, want))
 				}
@@ -364,7 +365,7 @@ func Deposits(cv *month.Cover) Result {
 // Payables: the debt to each person against «К выплате» of their tabs, ±$1, and tabs that do not parse.
 func Payables(ctx context.Context, e Env) Result {
 	const name = "долги равны «К выплате»"
-	rows, err := e.Q.QueryContext(ctx, `SELECT person, balance, kv, difference, tabs_status FROM v_payables`)
+	rows, err := e.Q.QueryContext(ctx, `SELECT person, balance, to_pay, difference, tabs_status FROM v_payables WHERE to_pay IS NOT NULL`)
 	if err != nil {
 		if strings.Contains(err.Error(), "no such table") {
 			return fail(name, "warn", "таблицы выплат ещё не собраны", nil)
