@@ -379,3 +379,31 @@ func TestWalletAgainstTheBot(t *testing.T) {
 		t.Fatalf("a drifting wallet: %+v", r)
 	}
 }
+
+func TestRatesAgainstCards(t *testing.T) {
+	s, ctx := openDB(t)
+	e := Env{Q: s.RO, Now: now}
+	if _, err := s.RW.Exec(`INSERT INTO people(slug, name, rate, source, imported_at) VALUES
+		('petr', 'Пётр', '25% от выручки', 't', 'x'), ('vasya', 'Вася', 'фикс за смену', 't', 'x')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RW.Exec(`INSERT INTO events(id, source, source_id, kind, occurred_at, received_at, payload) VALUES (1, 'sheets', 't1', 'tab', 'x', 'x', '{}')`); err != nil {
+		t.Fatal(err)
+	}
+	add := func(model, person string, rate float64) {
+		t.Helper()
+		if _, err := s.RW.Exec(`INSERT INTO payroll_tabs(model, name, person, status, fetched_at, rate, event_id, listed) VALUES (?, ?, ?, 'ok', 'x', ?, 1, 1)`,
+			model, person, person, rate); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("Alfa", "petr", 0.25)
+	add("Alfa", "vasya", 0.3)
+	if r := Rates(ctx, e); !r.OK {
+		t.Fatalf("equal: %+v", r)
+	}
+	add("Beta", "petr", 0.2)
+	if r := Rates(ctx, e); r.OK || !strings.Contains(r.Summary, "petr (Beta)") {
+		t.Fatalf("different: %+v", r)
+	}
+}

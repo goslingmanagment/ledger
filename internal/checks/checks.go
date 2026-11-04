@@ -12,7 +12,9 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -527,7 +529,50 @@ func Run(ctx context.Context, e Env) []Result {
 		}
 		return out
 	}
+	out = append(out, Rates(ctx, e))
 	return append(out, Requests(cv), KNorm(cv), Overdue(cv, e.Now), Deposits(cv), DriftOf(ctx, e.Q, cv, tabs))
+}
+
+var percentRe = regexp.MustCompile(`(\d+(?:[.,]\d+)?)\s*%`)
+
+// Rates: the share in a payout tab's header against the rate on the person's card in /OS. The card is the
+// canon of the rate; a tab with another share pays by the wrong number.
+func Rates(ctx context.Context, e Env) Result {
+	const name = "ставки вкладок как в карточках"
+	rows, err := e.Q.QueryContext(ctx, `SELECT p.slug, p.rate, t.model, t.rate FROM payroll_tabs t JOIN people p ON p.slug = t.person
+		WHERE t.rate IS NOT NULL AND t.listed = 1 ORDER BY p.slug, t.model`)
+	if err != nil {
+		return fail(name, "warn", err.Error(), nil)
+	}
+	defer rows.Close()
+	var bad []string
+	n := 0
+	for rows.Next() {
+		var slug, card, model string
+		var tab float64
+		if err := rows.Scan(&slug, &card, &model, &tab); err != nil {
+			return fail(name, "warn", err.Error(), nil)
+		}
+		m := percentRe.FindStringSubmatch(card)
+		if m == nil {
+			continue // a fixed rate: nothing to compare in a share
+		}
+		want, err := strconv.ParseFloat(strings.ReplaceAll(m[1], ",", "."), 64)
+		if err != nil {
+			continue
+		}
+		n++
+		if math.Abs(tab*100-want) > 0.01 {
+			bad = append(bad, fmt.Sprintf("%s (%s): во вкладке %.4g%%, в карточке %s%%", slug, model, tab*100, m[1]))
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fail(name, "warn", err.Error(), nil)
+	}
+	if len(bad) > 0 {
+		return fail(name, "warn", strings.Join(bad, "; "), nil)
+	}
+	return pass(name, fmt.Sprintf("%d вкладок с той же долей, что в карточке", n))
 }
 
 // Save writes the results to `checks`.

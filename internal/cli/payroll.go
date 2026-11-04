@@ -229,6 +229,20 @@ func payrollOpen(ctx context.Context, args []string) error {
 	if *dry {
 		return nil
 	}
+	unchecked := 0
+	for _, o := range plan {
+		for _, f := range o.Flags {
+			if strings.HasPrefix(f, "нет вкладки") {
+				unchecked++
+			}
+		}
+	}
+	if check.TabsRead == 0 && !*force {
+		return Exit{Code: 3, Msg: "таблицы выплат ещё не прочитаны: стартовые долги считались бы по одним выплатам журнала; сначала ledger collect sheets"}
+	}
+	if unchecked > 0 && !*force {
+		return Exit{Code: 3, Msg: fmt.Sprintf("у %d человек нет вкладки: их стартовый долг ничем не проверен; разберите или --force", unchecked)}
+	}
 	if problems > 0 && !*force {
 		return Exit{Code: 3, Msg: fmt.Sprintf("есть несопоставленное (%d): заморозка считала бы неполные данные; разберите или --force", problems)}
 	}
