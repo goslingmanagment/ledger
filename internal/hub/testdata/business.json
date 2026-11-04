@@ -1,0 +1,30 @@
+{
+ "source": "synthetic seed for tests",
+ "routes": [
+  {"page_label": "alfa-1", "model": "Alfa", "channel": "Fansly", "rate": "0.950", "min_payout": "0", "payee": "model", "lag_days": 2},
+  {"page_label": "alfa-of", "model": "Alfa", "channel": "OF", "rate": "0.940", "min_payout": "0", "payee": "model", "lag_days": 2},
+  {"page_label": "beta-1", "model": "Beta", "channel": "Fansly", "rate": "0.900", "min_payout": "250", "payee": "agency", "lag_days": 20}
+ ],
+ "route_rates": [
+  {"page_label": "alfa-1", "method": "*", "rate": "0.950", "valid_from": "2026-01-01T00:00:00+03:00", "note": "synthetic"},
+  {"page_label": "alfa-1", "method": "bank", "rate": "0.940", "valid_from": "2026-01-01T00:00:00+03:00", "note": "synthetic"},
+  {"page_label": "alfa-1", "method": "*", "rate": "0.960", "valid_from": "2026-10-10T00:00:00+03:00", "note": "synthetic"}
+ ],
+ "settings": {
+  "share": "0.5",
+  "hold_days": "5",
+  "k_norm_low": "0.98",
+  "k_norm_high": "1.02",
+  "lookback_days": "90",
+  "full_ledger_from": "2026-08-01T00:00:00+03:00",
+  "accrual_from": "2026-09-01",
+  "fansly_payout_methods": "crypto,bank",
+  "hold_types": "subscription,tip,message_purchase,post_purchase",
+  "hub_model_slugs": "{\"Alfaa\": \"Alfa\"}",
+  "tab_aliases": "{}",
+  "hub_window_start": "2026-05-01T00:00:00+03:00",
+  "hub_tail_days": "10",
+  "hub_full_every_days": "6",
+  "hub_rpm": "30"
+ }
+}

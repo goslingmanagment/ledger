@@ -10,6 +10,9 @@
   затем `go run ./cmd/ledger probe --url http://127.0.0.1:8080/health --print`. `ledger help` — все команды.
 - SQL агентов локально: `LEDGER_DB=./var/dev.db go run ./cmd/ledger keys create dev --scope read`, затем
   `LEDGER_URL=http://127.0.0.1:8080 LEDGER_KEY=<ключ> go run ./cmd/ledger sql "SELECT * FROM v_balances"` и `ledger schema`.
+- Хаб локально: `ledger import business <seed.json>` и `ledger import hub-exceptions <файл>`, затем
+  `LEDGER_HUB_AGENT_KEY=<ключ> ledger hub sync`; что доказано — `ledger hub status`, оборот — `ledger hub net --month ГГГГ-ММ`.
+  Лимит запросов к датасетам (`hub_rpm`) у хаба на адрес: `hub sync` и `month.py` с одного мака не запускать одновременно.
 - Перед PR: `gofmt -l .`, `go vet ./...` и `go test` затронутых пакетов; остальное проверяет CI.
 - Устройство: `cmd/ledger` — один бинарник; `internal/cli` — подкоманды (каждая фича своим файлом через
   `cli.Command` в `init`); `internal/server` — HTTP и планировщик (`server.Register`, `server.Every`);
