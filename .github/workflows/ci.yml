@@ -19,7 +19,7 @@ defaults:
     shell: bash
 jobs:
   check:
-    runs-on: ${{ vars.CI_POOL == 'pc' && github.run_attempt == '1' && fromJSON('["self-hosted","ci-pc"]') || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.CI_POOL == 'pc' && github.run_attempt == '1' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","ci-pc"]') || 'ubuntu-24.04' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
@@ -36,7 +36,7 @@ jobs:
   image:
     needs: check
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
-    runs-on: ${{ vars.CI_POOL == 'pc' && github.run_attempt == '1' && fromJSON('["self-hosted","ci-pc"]') || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.CI_POOL == 'pc' && github.run_attempt == '1' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","ci-pc"]') || 'ubuntu-24.04' }}
     timeout-minutes: 20
     env:
       PLATFORM: ${{ (vars.CI_POOL == 'pc' && github.run_attempt == '1') && 'linux/arm64' || 'linux/amd64' }}
