@@ -98,12 +98,28 @@ type commitment struct {
 	amount                                   money.Micros
 }
 
-// occurrences yields the due dates of a commitment in (from, to], rolling a recurring next_due forward.
+// addMonths keeps the day of the month, or the last day of a shorter month.
+func addMonths(t time.Time, n int) time.Time {
+	y, m, day := t.Date()
+	last := time.Date(y, m+time.Month(n)+1, 0, 0, 0, 0, 0, t.Location()).Day()
+	if day > last {
+		day = last
+	}
+	return time.Date(y, m+time.Month(n), day, 0, 0, 0, 0, t.Location())
+}
+
+// occurrences yields the due dates of a commitment from the calendar day of from through to, rolling a
+// recurring next_due forward. A one-off that is overdue is still owed: it counts as due today. A commitment
+// with only a term is due at the term.
 func occurrences(c commitment, from, to time.Time) []time.Time {
-	if c.nextDue == "" {
+	due := c.nextDue
+	if due == "" {
+		due = c.until
+	}
+	if due == "" {
 		return nil
 	}
-	d, err := ts.Parse(c.nextDue)
+	d, err := ts.Parse(due)
 	if err != nil {
 		return nil
 	}
@@ -113,14 +129,20 @@ func occurrences(c commitment, from, to time.Time) []time.Time {
 			return nil
 		}
 	}
+	from = from.In(ts.MSK)
+	day := time.Date(from.Year(), from.Month(), from.Day(), 0, 0, 0, 0, ts.MSK)
+	if c.period == "once" && d.Before(day) {
+		d = day
+	}
+	base := d
 	var out []time.Time
 	for i := 0; i < 400; i++ {
-		if !d.After(to) && !d.Before(from) && (until.IsZero() || !d.After(until)) {
+		if !d.After(to) && !d.Before(day) && (until.IsZero() || !d.After(until) || c.period == "once") {
 			out = append(out, d)
 		}
 		switch {
 		case c.period == "month":
-			d = d.AddDate(0, 1, 0)
+			d = addMonths(base, i+1)
 		case c.period == "week":
 			d = d.AddDate(0, 0, 7)
 		case strings.HasSuffix(c.period, "d"):
@@ -227,6 +249,13 @@ func Compute(ctx context.Context, q ledger.Querier, now time.Time) (Answer, erro
 		case liquid == 1:
 			a.Notes = append(a.Notes, fmt.Sprintf("%s заморожен: %.2f не считается", acct, m))
 		case grp == "payable":
+			// An advance to one person pays nobody else's debt: the money has already left the cash.
+			if m > 0 {
+				if m >= 0.005 {
+					a.Notes = append(a.Notes, fmt.Sprintf("%s: аванс %.2f, остальные долги не уменьшает", acct, m))
+				}
+				continue
+			}
 			a.Debts += -m
 			a.DebtItems = append(a.DebtItems, Item{Name: acct, Amount: money.Round2(-m)})
 		}
@@ -235,15 +264,40 @@ func Compute(ctx context.Context, q ledger.Querier, now time.Time) (Answer, erro
 	if err := rows.Err(); err != nil {
 		return a, err
 	}
-	// What already left the accounts and has no journal row yet: without it the free money is overstated
+	// What already left or reached the accounts and has no journal row yet: without it the free money is off
 	// until the owner answers the brief.
-	pending, err := bybit.PendingUSD(ctx, q)
+	pendingIn, pendingOut, err := bybit.PendingUSDParts(ctx, q)
 	if err != nil {
 		return a, err
 	}
-	if math.Abs(pending) >= 0.005 {
+	if pending := pendingIn + pendingOut; math.Abs(pending) >= 0.005 {
 		a.Liquid += pending
 		a.LiquidItems = append(a.LiquidItems, Item{Name: "движения Bybit без строки журнала", Amount: money.Round2(pending)})
+	}
+	crows, err := q.QueryContext(ctx, `SELECT json_extract(content, '$.card'), CAST(json_extract(content, '$.amount') AS REAL) FROM proposals
+		WHERE status = 'open' AND json_extract(content, '$.card') IS NOT NULL`)
+	if err != nil {
+		return a, err
+	}
+	spent := 0.0
+	for crows.Next() {
+		var card string
+		var v float64
+		if err := crows.Scan(&card, &v); err != nil {
+			crows.Close()
+			return a, err
+		}
+		if !frozen["card:"+card] {
+			spent += v
+		}
+	}
+	crows.Close()
+	if err := crows.Err(); err != nil {
+		return a, err
+	}
+	if math.Abs(spent) >= 0.005 {
+		a.Liquid -= spent
+		a.LiquidItems = append(a.LiquidItems, Item{Name: "покупки по картам без строки журнала", Amount: money.Round2(-spent)})
 	}
 	sort.Slice(a.LiquidItems, func(i, j int) bool { return a.LiquidItems[i].Name < a.LiquidItems[j].Name })
 	sort.Slice(a.DebtItems, func(i, j int) bool { return a.DebtItems[i].Amount > a.DebtItems[j].Amount })
@@ -368,13 +422,39 @@ func Compute(ctx context.Context, q ledger.Querier, now time.Time) (Answer, erro
 	if a.TransitStatus == "ok" {
 		withdraw := next.AddDate(0, 0, -lag)
 		cut := time.Date(withdraw.Year(), withdraw.Month(), withdraw.Day(), 23, 59, 59, 0, ts.MSK)
+		// Riding is money at the model. A part with a transfer already arrived: a transfer the coverage did
+		// not accept stays riding, but its cash is on Bybit, so it is not expected again.
 		var riding, page, hold sql.NullFloat64
-		err := q.QueryRowContext(ctx, `SELECT SUM(CASE WHEN state = 'riding' THEN est END), SUM(CASE WHEN state = 'page' THEN est END),
-			SUM(CASE WHEN state = 'hold' AND avail_at <= ? THEN est END) FROM coverage_parts`, ts.FormatMilli(cut)).Scan(&riding, &page, &hold)
+		if err := q.QueryRowContext(ctx, `SELECT SUM(est) FROM coverage_parts WHERE state = 'riding' AND transfer_num IS NULL`).Scan(&riding); err != nil {
+			return a, err
+		}
+		// A page withdraws only when what it has by then reaches its minimum.
+		at := ts.FormatMilli(cut)
+		prows, err := q.QueryContext(ctx, `SELECT COALESCE(c.min_payout, 0),
+			COALESCE(SUM(CASE WHEN p.state = 'page' THEN p.est END), 0),
+			COALESCE(SUM(CASE WHEN p.state = 'hold' AND p.avail_at <= ? THEN p.est END), 0),
+			COALESCE(SUM(CASE WHEN p.state IN ('page', 'stuck') OR (p.state = 'hold' AND p.avail_at <= ?) THEN p.part END), 0)
+			FROM coverage_parts p LEFT JOIN coverage_pages c ON c.page_label = p.page_label GROUP BY p.page_label`, at, at)
 		if err != nil {
 			return a, err
 		}
-		a.Expected = (riding.Float64 + page.Float64 + hold.Float64) * a.AvgK
+		for prows.Next() {
+			var minimum, onPage, fromHold, net float64
+			if err := prows.Scan(&minimum, &onPage, &fromHold, &net); err != nil {
+				prows.Close()
+				return a, err
+			}
+			if net >= minimum {
+				page.Float64 += onPage
+				hold.Float64 += fromHold
+			}
+		}
+		prows.Close()
+		if err := prows.Err(); err != nil {
+			return a, err
+		}
+		// A deposit already counted in the cash above is most likely one of these transfers.
+		a.Expected = math.Max(0, (riding.Float64+page.Float64+hold.Float64)*a.AvgK-pendingIn)
 		a.ExpectedNote = fmt.Sprintf("у моделей %.2f + на страницах %.2f + выйдет из холда к %s %.2f, × средний k %.4f", riding.Float64, page.Float64, ts.Date(withdraw), hold.Float64, a.AvgK)
 	} else {
 		a.ExpectedNote = "деньги в пути неизвестны: " + a.TransitReason
@@ -471,6 +551,9 @@ func ImportCommitments(ctx context.Context, tx *sql.Tx, items []CommitmentSeed, 
 		v, err := money.Parse(c.Amount)
 		if err != nil {
 			return 0, fmt.Errorf("%s: %w", c.Name, err)
+		}
+		if c.NextDue == "" && c.Until == "" {
+			return 0, fmt.Errorf("%s: нужен срок: next_due или until", c.Name)
 		}
 		switch c.Period {
 		case "month", "week", "once":

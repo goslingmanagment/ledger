@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"math"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -173,5 +174,82 @@ func TestPendingMovementLowersLiquid(t *testing.T) {
 	}
 	if !near(a.Liquid, 1000-101.3+50) {
 		t.Fatalf("liquid %v %+v", a.Liquid, a.LiquidItems)
+	}
+}
+
+func TestCommitmentDates(t *testing.T) {
+	at := func(s string) time.Time { v, _ := ts.Parse(s); return v }
+	now := at("2026-11-04T15:00:00+03:00")
+	to := at("2026-12-31T23:59:59+03:00")
+	dates := func(c commitment) string {
+		var out []string
+		for _, d := range occurrences(c, now, to) {
+			out = append(out, ts.Date(d))
+		}
+		return strings.Join(out, " ")
+	}
+	for name, tc := range map[string]struct {
+		c    commitment
+		want string
+	}{
+		"due today counts":      {commitment{period: "month", nextDue: "2026-11-04"}, "2026-11-04 2026-12-04"},
+		"month end is kept":     {commitment{period: "month", nextDue: "2026-10-31"}, "2026-11-30 2026-12-31"},
+		"overdue one-off owed":  {commitment{period: "once", nextDue: "2026-10-20"}, "2026-11-04"},
+		"only a term":           {commitment{period: "once", until: "2026-11-30"}, "2026-11-30"},
+		"recurring past skips":  {commitment{period: "week", nextDue: "2026-10-28"}, "2026-11-04 2026-11-11 2026-11-18 2026-11-25 2026-12-02 2026-12-09 2026-12-16 2026-12-23 2026-12-30"},
+		"nothing to go by":      {commitment{period: "once"}, ""},
+		"stops at its end date": {commitment{period: "month", nextDue: "2026-11-10", until: "2026-11-30"}, "2026-11-10"},
+	} {
+		if got := dates(tc.c); got != tc.want {
+			t.Errorf("%s: %q, want %q", name, got, tc.want)
+		}
+	}
+}
+
+// An advance to one person is not free money, and what cannot be withdrawn or has arrived is not expected.
+func TestAdvanceAndExpected(t *testing.T) {
+	s, ctx := openDB(t)
+	now, _ := ts.Parse("2026-11-04T12:00:00+03:00")
+	post(t, s, ctx, "2026-10-01", line("bybit", "1000.00"), line("opening", "-1000.00"))
+	post(t, s, ctx, "2026-10-02", line("payable:petr", "100.00"), line("bybit", "-100.00")) // an advance
+	post(t, s, ctx, "2026-10-02", line("expense:chatter_salary", "30.00"), line("payable:vasya", "-30.00"))
+	if _, err := s.RW.Exec(`INSERT INTO coverage_runs(as_of, started_at, finished_at, status) VALUES ('x', 'x', 'x', 'ok')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RW.Exec(`INSERT INTO coverage_pages(page_label, model, channel, min_payout, as_of) VALUES ('small', 'M', 'Fansly', 100, 'x'), ('big', 'M', 'Fansly', 0, 'x')`); err != nil {
+		t.Fatal(err)
+	}
+	ins := func(page, key, state string, transfer any, net, est float64) {
+		t.Helper()
+		if _, err := s.RW.Exec(`INSERT INTO coverage_parts(page_label, payment_key, paid_at, avail_at, net, part, state, rate, est, transfer_num)
+			VALUES (?, ?, 'x', '2026-11-01T00:00:00.000+03:00', ?, ?, ?, 1, ?, ?)`, page, key, net, net, state, est, transfer); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ins("small", "a", "page", nil, 10, 7)    // below the page's minimum: nothing leaves
+	ins("big", "b", "page", nil, 200, 140)   // leaves
+	ins("big", "c", "riding", nil, 100, 70)  // at the model
+	ins("big", "d", "riding", 55, 1000, 700) // its transfer has arrived
+	a, err := Compute(ctx, s.RO, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !near(a.Debts, 30) {
+		t.Errorf("debts %v: an advance must not reduce other debts", a.Debts)
+	}
+	if !near(a.Expected, 210) {
+		t.Errorf("expected %v, want 140 + 70", a.Expected)
+	}
+	// A deposit waiting for its row is in the cash already: it is not expected on top.
+	if _, err := s.RW.Exec(`INSERT INTO events(source, source_id, kind, occurred_at, received_at, payload) VALUES
+		('bybit', 'deposit:9', 'deposit', '2026-11-04T10:00:00.000+03:00', 'x', '{"direction":"income","amount":"70","coin":"USDT"}')`); err != nil {
+		t.Fatal(err)
+	}
+	b, err := Compute(ctx, s.RO, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !near(b.Liquid, a.Liquid+70) || !near(b.Expected, 140) {
+		t.Errorf("liquid %v → %v, expected %v", a.Liquid, b.Liquid, b.Expected)
 	}
 }
