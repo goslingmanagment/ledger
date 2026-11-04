@@ -5,8 +5,9 @@
 # VPS сам скачивает артефакт ledger-image-<sha> по короткой подписанной ссылке и грузит образ; коммит уходит
 # в bare-репозиторий на VPS; копия базы на мак; checkout и deploy.sh (--plan, затем по-настоящему); вторая копия.
 # --bootstrap — первая установка: bare-репозиторий, checkout и /etc/ledger/ledger.env создаются, если их нет,
-# вместо deploy.sh работает bootstrap.sh. --build-here — образ собирается на VPS из этого коммита (пока
-# GitHub Actions недоступны; гейт тогда — локальные проверки перед слиянием).
+# вместо deploy.sh работает bootstrap.sh. --build-here — образ собирается на VPS из этого коммита: так, пока CI
+# идёт на маке (CI_POOL=pc), там нет артефактов. Зелёный прогон CI нужен и тогда; LEDGER_SKIP_CI=1 — только когда
+# Actions не работают совсем, гейт тогда — локальные проверки перед слиянием.
 # Нужны git, gh (вход выполнен), curl и ssh; секретов не читает.
 set -Eeuo pipefail
 host=${LEDGER_HOST:-root@152.53.191.242}
@@ -33,8 +34,9 @@ sha=$(git rev-parse --verify "${ref:-origin/main}^{commit}")
 git merge-base --is-ancestor "$sha" origin/main || { printf 'Commit %s is not on origin/main.\n' "$sha" >&2; exit 1; }
 say "release ${sha:0:7}: $(git log -1 --format=%s "$sha")"
 image="ledger:$sha"
-load_ci_image() {
-  local run_id state artifact_id slug url label
+# green_run prints the id of the commit's push run of CI once it is green, waiting for it if it still runs.
+green_run() {
+  local run_id state
   say "CI ($workflow)"
   run_id=$(gh run list --workflow "$workflow" --commit "$sha" --event push --limit 1 --json databaseId --jq '.[0].databaseId')
   [[ -n $run_id ]] || { printf 'No %s push run for %s yet.\n' "$workflow" "$sha" >&2; exit 1; }
@@ -43,6 +45,11 @@ load_ci_image() {
     say "waiting for run $run_id ($state)"
     gh run watch "$run_id" --exit-status >&2 || { printf 'CI run %s is not green.\n' "$run_id" >&2; exit 1; }
   fi
+  printf '%s' "$run_id"
+}
+load_ci_image() {
+  local run_id artifact_id slug url label
+  run_id=$(green_run)
   say "image $image"
   if remote "docker image inspect '$image' >/dev/null 2>&1"; then
     printf 'already loaded on %s\n' "$host" >&2
@@ -69,7 +76,12 @@ REMOTE
   [[ $label == "$sha" ]] || { printf 'Loaded image is labelled %s, not %s.\n' "$label" "$sha" >&2; exit 1; }
 }
 if $build_here; then
-  say "image $image is built on $host (--build-here, CI skipped)"
+  if [[ ${LEDGER_SKIP_CI:-} == 1 ]]; then
+    say "CI skipped (LEDGER_SKIP_CI=1)"
+  else
+    green_run >/dev/null
+  fi
+  say "image $image is built on $host (--build-here)"
   how="--build-here"
 else
   load_ci_image

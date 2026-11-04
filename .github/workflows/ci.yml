@@ -1,5 +1,8 @@
 # Гейт слияния и выпуска: сборка, vet, тесты, gofmt. На push в main собирается образ linux/amd64 с меткой
 # коммита и кладётся артефактом ledger-image-<sha> на 7 дней: release.sh переносит его на VPS. Реестра нет.
+# CI_POOL=pc: джобы идут на раннерах ВМ ci на маке владельца (GitHub-hosted заблокированы биллингом, артефакты тоже).
+# Там образ собирается под arm64 только как проверка Dockerfile, без артефакта: выпуск — release.sh --build-here.
+# Перезапуск (attempt > 1) всегда идёт на GitHub.
 name: ci
 on:
   push:
@@ -16,7 +19,7 @@ defaults:
     shell: bash
 jobs:
   check:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.CI_POOL == 'pc' && github.run_attempt == '1' && fromJSON('["self-hosted","ci-pc"]') || 'ubuntu-24.04' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
@@ -33,17 +36,25 @@ jobs:
   image:
     needs: check
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.CI_POOL == 'pc' && github.run_attempt == '1' && fromJSON('["self-hosted","ci-pc"]') || 'ubuntu-24.04' }}
     timeout-minutes: 20
+    env:
+      PLATFORM: ${{ (vars.CI_POOL == 'pc' && github.run_attempt == '1') && 'linux/arm64' || 'linux/amd64' }}
     steps:
       - uses: actions/checkout@v5
-      - name: Build linux/amd64 image labelled with the commit
+      - name: Build the image labelled with the commit
         run: |
-          docker build --platform linux/amd64 --build-arg BUILD="$GITHUB_SHA" -f deploy/Dockerfile -t "ledger:$GITHUB_SHA" .
+          docker build --platform "$PLATFORM" --build-arg BUILD="$GITHUB_SHA" -f deploy/Dockerfile -t "ledger:$GITHUB_SHA" .
           test "$(docker image inspect "ledger:$GITHUB_SHA" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
           docker run --rm "ledger:$GITHUB_SHA" ledger version | grep -qx "$GITHUB_SHA"
-          docker save "ledger:$GITHUB_SHA" | gzip -1 > "ledger-$GITHUB_SHA.tar.gz"
+      - name: Save the image for the release
+        if: env.PLATFORM == 'linux/amd64'
+        run: docker save "ledger:$GITHUB_SHA" | gzip -1 > "ledger-$GITHUB_SHA.tar.gz"
+      - name: Drop the image from the runner
+        if: always() && env.PLATFORM == 'linux/arm64'
+        run: docker image rm -f "ledger:$GITHUB_SHA" >/dev/null 2>&1 || true
       - uses: actions/upload-artifact@v7
+        if: env.PLATFORM == 'linux/amd64'
         with:
           name: ledger-image-${{ github.sha }}
           path: ledger-${{ github.sha }}.tar.gz
