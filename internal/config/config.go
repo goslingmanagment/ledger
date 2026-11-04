@@ -33,18 +33,22 @@ type Client struct {
 	Key string
 }
 
-// LoadClient reads LEDGER_URL and LEDGER_KEY, falling back to ~/.config/ledger/credentials
-// (KEY=value lines, chmod 600).
+// LoadClient reads LEDGER_URL and LEDGER_KEY, falling back to the file LEDGER_CREDENTIALS or
+// ~/.config/ledger/credentials (KEY=value lines, chmod 600). The default file holds a read-only key;
+// a job that needs more names its own file.
 func LoadClient() (Client, error) {
 	c := Client{URL: os.Getenv("LEDGER_URL"), Key: os.Getenv("LEDGER_KEY")}
 	if c.URL != "" && c.Key != "" {
 		return c, nil
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return c, err
+	path := os.Getenv("LEDGER_CREDENTIALS")
+	if path == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return c, err
+		}
+		path = filepath.Join(home, ".config", "ledger", "credentials")
 	}
-	path := filepath.Join(home, ".config", "ledger", "credentials")
 	vals, err := ReadKV(path)
 	if err != nil {
 		if os.IsNotExist(err) && c.URL != "" {

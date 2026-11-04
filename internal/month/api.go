@@ -2,8 +2,10 @@ package month
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -108,6 +110,26 @@ func floatParam(r *http.Request, name string) (*float64, error) {
 	return &v, nil
 }
 
+// rateParam is the owner's salary rate of a request: the parameter, otherwise the setting owner_salary_rate.
+func rateParam(r *http.Request, q ledger.Querier) (*float64, error) {
+	rate, err := floatParam(r, "ceo_rate")
+	if err != nil || rate != nil {
+		return rate, err
+	}
+	var s string
+	switch err := q.QueryRowContext(r.Context(), `SELECT value FROM settings WHERE key = 'owner_salary_rate'`).Scan(&s); {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil, nil
+	case err != nil:
+		return nil, err
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return nil, fmt.Errorf("настройка owner_salary_rate: %w", err)
+	}
+	return &v, nil
+}
+
 func init() {
 	server.Every("month-cards", time.Hour, func(ctx context.Context, s *server.Server) error {
 		tx, err := s.Store.RW.BeginTx(ctx, nil)
@@ -143,7 +165,7 @@ func init() {
 				}
 				in.AsOf = t
 			}
-			rate, err := floatParam(r, "ceo_rate")
+			rate, err := rateParam(r, s.Store.RO)
 			if err != nil {
 				server.WriteError(w, http.StatusBadRequest, "ceo_rate: "+err.Error())
 				return
@@ -189,7 +211,7 @@ func init() {
 		})))
 		s.Mux.Handle("GET /v1/month-brief", auth.Require(s, "read", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx := r.Context()
-			rate, err := floatParam(r, "ceo_rate")
+			rate, err := rateParam(r, s.Store.RO)
 			if err != nil {
 				server.WriteError(w, http.StatusBadRequest, "ceo_rate: "+err.Error())
 				return
@@ -203,9 +225,9 @@ func init() {
 		})))
 		s.Mux.Handle("POST /v1/month/{month}/close", auth.Require(s, "decide", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx := r.Context()
-			rate, err := floatParam(r, "ceo_rate")
+			rate, err := rateParam(r, s.Store.RO)
 			if err != nil || rate == nil {
-				server.WriteError(w, http.StatusBadRequest, "нужен ceo_rate")
+				server.WriteError(w, http.StatusBadRequest, "нужен ceo_rate или настройка owner_salary_rate")
 				return
 			}
 			out, err := CloseNow(ctx, s, r.PathValue("month"), *rate)
