@@ -134,6 +134,13 @@ func importLedgerMD(ctx context.Context, args []string) error {
 	if opts.AccrualFrom == "" {
 		return fmt.Errorf("нет settings.accrual_from: ledger import business или --accrual-from")
 	}
+	var models string
+	_ = tx.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'models'`).Scan(&models)
+	for _, m := range strings.Split(models, ",") {
+		if m = strings.TrimSpace(m); m != "" {
+			opts.Models = append(opts.Models, m)
+		}
+	}
 	if *overrides != "" {
 		raw, err := os.ReadFile(*overrides)
 		if err != nil {

@@ -567,7 +567,7 @@ func MonthNet(ctx context.Context, q ledger.Querier, month string, asOf time.Tim
 			s = st
 		}
 		if s.Before(end) {
-			n, sum, err := plainSum(ctx, q, g.Label, s, end)
+			n, sum, err := PlainSum(ctx, q, g.Label, s, end)
 			if err != nil {
 				if !IsRefusal(err) {
 					return rep, err
@@ -585,8 +585,8 @@ func MonthNet(ctx context.Context, q ledger.Querier, month string, asOf time.Tim
 	return rep, nil
 }
 
-// plainSum is the summary of [from, to) from the mirror: every row, as the hub sums them.
-func plainSum(ctx context.Context, q ledger.Querier, page string, from, to time.Time) (int, int64, error) {
+// PlainSum is the summary of [from, to) from the mirror: every row, as the hub sums them.
+func PlainSum(ctx context.Context, q ledger.Querier, page string, from, to time.Time) (int, int64, error) {
 	if _, err := proven(ctx, q, page, "transactions", from, to); err != nil {
 		return 0, 0, err
 	}

@@ -12,6 +12,7 @@ import (
 
 // Context is what the mapping of one row needs to know about the rest of the journal.
 type Context struct {
+	Models      map[string]bool  // model names allowed in the «Модель» column (settings.models); empty = any single name
 	AccrualFrom string           // first day accounted by accrual (pages and people), e.g. 2026-09-01
 	FirstOfDeal map[string]int   // deal id → number of its first row in (date, num) order
 	Overrides   map[int]Override // rows whose money side the generic mapping cannot express
@@ -86,13 +87,15 @@ var expenseAccounts = map[string]string{
 	"AI и разработка": "expense:ai_dev", "Комиссии": "expense:fees", "Прочее": "expense:other",
 }
 
-var models = map[string]string{"Lora": "lora", "Ari": "ari", "Lily": "lily"}
-
-func modelSlug(r Row) (string, error) {
-	if s, ok := models[r.Model]; ok {
-		return s, nil
+func modelSlug(r Row, c *Context) (string, error) {
+	ok := c.Models[r.Model]
+	if len(c.Models) == 0 {
+		ok = r.Model != "" && r.Model != "—" && !strings.ContainsAny(r.Model, ", ")
 	}
-	return "", fmt.Errorf("модель «%s» — нужна одна из Lora, Ari, Lily", r.Model)
+	if !ok {
+		return "", fmt.Errorf("модель «%s» — нужна одна модель из settings.models", r.Model)
+	}
+	return ledger.Slug(r.Model), nil
 }
 
 // Entries maps a row to its balanced entries (none for a cancelled or pending row).
@@ -165,7 +168,7 @@ func Entries(r Row, t Tags, c *Context) ([]ledger.Entry, error) {
 			if accrual {
 				credit = "suspense:accrual" // resolved against pages and transfers (PR9)
 			} else {
-				s, err := modelSlug(r)
+				s, err := modelSlug(r, c)
 				if err != nil {
 					return nil, err
 				}
@@ -194,7 +197,7 @@ func Entries(r Row, t Tags, c *Context) ([]ledger.Entry, error) {
 			share = money.FromFloat(t.Deal.Share)
 		}
 		if share != 0 {
-			s, err := modelSlug(r)
+			s, err := modelSlug(r, c)
 			if err != nil {
 				return nil, err
 			}
@@ -207,7 +210,7 @@ func Entries(r Row, t Tags, c *Context) ([]ledger.Entry, error) {
 	case "expense":
 		debit, ok := expenseAccounts[r.Category]
 		if r.Category == "Доля модели" {
-			s, err := modelSlug(r)
+			s, err := modelSlug(r, c)
 			if err != nil {
 				return nil, err
 			}
@@ -220,7 +223,7 @@ func Entries(r Row, t Tags, c *Context) ([]ledger.Entry, error) {
 			return nil, fmt.Errorf("расход с категорией «%s»", r.Category)
 		}
 		if t.InsideShare && r.Category != "Доля модели" {
-			s, err := modelSlug(r)
+			s, err := modelSlug(r, c)
 			if err != nil {
 				return nil, err
 			}

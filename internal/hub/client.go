@@ -480,3 +480,6 @@ func sortedKeys(m map[string]bool) []string {
 func parseHubTime(s string) (time.Time, error) {
 	return time.Parse(time.RFC3339Nano, s)
 }
+
+// Refusef makes a refusal for callers outside this package: the data is not proven, the answer is «неизвестно».
+func Refusef(format string, args ...any) error { return &Refusal{Msg: fmt.Sprintf(format, args...)} }
