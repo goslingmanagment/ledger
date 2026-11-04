@@ -170,8 +170,8 @@ func Close(ctx context.Context, tx *sql.Tx, month string, asOf time.Time, ceoRat
 		return card, stop, nil
 	}
 	snap := card.Snapshot()
-	candidate := ceoRate + 500
-	verdict := Verdict(*tot.Decision, candidate, &tot.Transit)
+	candidate := ceoRate + cv.Cfg.GuardStep
+	verdict := Verdict(*tot.Decision, candidate, cv.Cfg.GuardShare, &tot.Transit)
 	snap["status"], snap["source"], snap["closed_at"] = "закрыт", source, ts.Format(now)
 	snap["ceo_rate"], snap["candidate"], snap["verdict"] = ceoRate, candidate, verdict
 	snap["checks"] = res
@@ -287,7 +287,7 @@ func Drift(ctx context.Context, q ledger.Querier, cv *Cover, tabs []Tab) ([]Drif
 		}
 		v := c.verdict
 		if cand, ok := c.snap["candidate"].(float64); ok {
-			v = Verdict(dec, cand, nil)
+			v = Verdict(dec, cand, card.Cover.Cfg.GuardShare, nil)
 		}
 		d := money.Round2(money.Round2(dec) - rep)
 		r := DriftRow{Month: c.month, AtClose: atClose, VerdictClose: c.verdict, Reported: rep, VerdictTold: rv, Now: money.Round2(dec), VerdictNow: v, Delta: d,

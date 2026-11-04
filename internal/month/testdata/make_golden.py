@@ -12,10 +12,19 @@ import month as M
 
 MSK = M.MSK
 rng = random.Random(7)
-ROUTES = {"alfa-1": ("Alfa", "Fansly", .962, 0, "model"), "alfa-2": ("Alfa", "Fansly", .962, 0, "model"),
-          "alfa-of": ("Alfa", "OF", .958, 0, "model"), "beta-1": ("Beta", "Fansly", .962, 0, "model"),
-          "gamma-1": ("Gamma", "Fansly", .908, 500, "agency")}
+ROUTES = {"alfa-1": ("Alfa", "Fansly", .95, 0, "model"), "alfa-2": ("Alfa", "Fansly", .95, 0, "model"),
+          "alfa-of": ("Alfa", "OF", .94, 0, "model"), "beta-1": ("Beta", "Fansly", .95, 0, "model"),
+          "gamma-1": ("Gamma", "Fansly", .89, 400, "agency")}
 M.ROUTES = ROUTES
+M.SHARE = .65
+M.PAXUM, M.USDT_RATE, M.USDT_RATE_FROM = .94, .96, datetime(2026, 10, 12, tzinfo=MSK)
+M.METHODS = {"usdt": None, "paxum": M.PAXUM, "unmapped:5": None}
+def rate_of(page, q):  # the script's rule with this file's rates
+    m = M.METHODS.get(q["method"]) if ROUTES[page][1] == "Fansly" and isinstance(q, dict) else None
+    if not m and ROUTES[page][2] == .95 and isinstance(q, dict) and q["t"] >= M.USDT_RATE_FROM:
+        return M.USDT_RATE
+    return m or ROUTES[page][2]
+M.rate_of = rate_of
 M.MODELS = ["Alfa", "Beta", "Gamma"]
 M.MODEL_ROUTE = {v[0]: v[4] for v in ROUTES.values()}
 M.NAME = {"Alfa": "Альфа", "Beta": "Бета", "Gamma": "Гамма"}
@@ -117,12 +126,12 @@ for mon in sorted(sessions):
             continue  # untagged old era
         if model == "Gamma":
             gross = round(total * noise, 2)
-            fee = round(gross * .09, 2)
+            fee = round(gross * .07, 2)
             note = f"выплата обменника {{перевод: срез {cut}; депозиты: {gross:.2f}; комиссия: {fee:.2f}}}"
             row(str(doc), "income", "Платформы", "Обменник", model, gross, "Internal Transfer (Bybit)", note)
             row(str(doc), "expense", "Комиссии", "Обменник", model, fee, "Удержано из вывода", "комиссия обменника")
         else:
-            amount = float(round(total * .7 * noise))
+            amount = float(round(total * M.SHARE * noise))
             held = float(rng.randint(10, 60)) if rng.random() < .3 else 0
             tag = f"срез {cut}; депозиты: {'+'.join(f'{x:.2f}' for x in dep)}" + (f"; удержано: {held:.2f}" if held else "")
             row(str(doc), "income", "Платформы", "Модель " + model, model, amount, "Internal Transfer (Bybit)", f"перевод {{перевод: {tag}}}")
@@ -137,7 +146,7 @@ def ex(dt, cat, who, model, amount, method, note, typ="expense"):
     ledger.append([len(ledger) + 1, dt, typ, cat, who, model, f"{amount:.2f}", "USDT", method, "paid", note])
 ex("2026-09-02", "Инструменты", "Сервис А", "—", 217.00, "USDT TRC-20", "на три месяца {предоплата 2026-09..2026-11}")
 ex("2026-09-05", "Комиссии", "Bybit", "—", 7.00, "USDT TRC-20", "сеть за август {за 2026-08: 6} {за 2026-09: 1}")
-ex("2026-09-07", "AI и разработка", "Сервис Б", "—", 110.25, "Карта CinCin 1234", "подписка")
+ex("2026-09-07", "AI и разработка", "Сервис Б", "—", 118.35, "Карта CinCin 1234", "подписка")
 ex("2026-09-10", "Подрядчик", "Подрядчик В", "Alfa", 150.00, "USDT TRC-20", "работа")
 ex("2026-09-11", "Чаттер зарплата", "Пётр", "Alfa", 300.00, "Internal Transfer (Bybit)", "выплата")
 ex("2026-09-12", "Чаттер зарплата", "Вася", "Alfa", 121.00, "Internal Transfer (Bybit)", "выплата и бонус {сверх таблицы: 21}")
@@ -149,7 +158,7 @@ ex("2026-09-18", "Owner зарплата", "Владелец", "—", 1000.00, "
 ex("2026-09-19", "Owner draw", "Владелец", "—", 500.00, "P2P (Bybit)", "личное")
 ex("2026-09-20", "Трафик", "Канал", "Alfa", 290.00, "USDT TRC-20", "закупка")
 ex("2026-10-06", "Инструменты", "Сервис Г", "—", 95.95, "BTC (Bybit)", "за 3 месяца {предоплата 2026-10..2026-12}")
-ex("2026-10-08", "КМ зарплата", "КМ", "Alfa", 579.64, "P2P (Bybit)", "выплата")
+ex("2026-10-08", "КМ зарплата", "КМ", "Alfa", 512.40, "P2P (Bybit)", "выплата")
 ex("2026-09-21", "Возврат расхода", "Сервис", "—", 49.50, "Карта CinCin 1234", "возврат", typ="income")
 ex("2026-09-22", "Возврат расхода", "Подрядчик", "—", 94.00, "USDT TRC-20", "старый {до 01.08}", typ="income")
 ex("2026-09-23", "Custom", "Фан", "Alfa", 250.00, "USDT TRC-20", "аванс {сделка: d1; цена 450; доля 135}", typ="income")

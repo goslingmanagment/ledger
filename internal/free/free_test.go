@@ -58,7 +58,7 @@ func TestFreeBreakdown(t *testing.T) {
 	post(t, s, ctx, "2026-10-02", line("expense:chatter_salary", "300.00"), line("payable:vasya", "-300.00"))
 	post(t, s, ctx, "2026-10-02", line("prepaid:svc", "999.00"), line("opening", "-999.00")) // not liquid
 	set(t, s, "frozen_accounts", `["card:2222"]`)
-	set(t, s, "owner_salary_rate", "3500")
+	set(t, s, "owner_salary_rate", "3100")
 	tx, _ := s.RW.BeginTx(ctx, nil)
 	if _, err := ImportCommitments(ctx, tx, []CommitmentSeed{
 		{Kind: "subscription", Name: "Сервис А", Amount: "200.00", Period: "month", NextDue: "2026-11-07"},
@@ -106,8 +106,8 @@ func TestFreeBreakdown(t *testing.T) {
 	if a.TransitStatus != "unknown" || a.Expected != 0 {
 		t.Fatalf("transit %s expected %v", a.TransitStatus, a.Expected)
 	}
-	// Later this month: Сервис Б 60, the contractor on 13, 20, 27 = 120, reinvest 2500, owner salary rest 3500 − 800 = 2700.
-	if !near(a.CommitmentsLate, 60+120+2500+2700) {
+	// Later this month: Сервис Б 60, the contractor on 13, 20, 27 = 120, reinvest 2500, owner salary rest 3100 − 800 = 2300.
+	if !near(a.CommitmentsLate, 60+120+2500+2300) {
 		t.Fatalf("later %v %+v", a.CommitmentsLate, a.LaterItems)
 	}
 	if !near(a.FreeAfter, a.FreeNow-a.CommitmentsLate) {

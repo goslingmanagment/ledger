@@ -129,7 +129,7 @@ func (f fakeSource) SummaryNet(string, time.Time, time.Time) (float64, error) { 
 func (f fakeSource) BybitIncomes(string) ([]float64, bool)                    { return nil, true }
 
 func goldenConfig(g *golden) Config {
-	c := Config{Models: []string{"Alfa", "Beta", "Gamma"}, Routes: map[string]Route{}, Share: 0.7, Hold: 7 * 24 * time.Hour,
+	c := Config{Models: []string{"Alfa", "Beta", "Gamma"}, Routes: map[string]Route{}, Share: 0.65, GuardShare: 0.55, GuardStep: 400, Hold: 7 * 24 * time.Hour,
 		KLow: 0.985, KHigh: 1.015, Lookback: 100 * 24 * time.Hour, FullLedger: parseT("2026-08-01T00:00:00+03:00"),
 		TabAliases: map[string]string{"Вася": "Василий"}, Names: map[string]string{"Alfa": "Альфа", "Beta": "Бета", "Gamma": "Гамма"}}
 	c.Exc.Starts = map[string]time.Time{"beta-1": parseT(g.StartBeta)}
@@ -143,10 +143,10 @@ func goldenConfig(g *golden) Config {
 		}
 		rt := Route{Page: r.Page, Model: r.Model, Channel: r.Channel, Rate: r.Rate, Min: r.Min, Payee: r.Payee, Lag: lag}
 		if r.Channel == "Fansly" {
-			rt.Rates = append(rt.Rates, MethodRate{"paxum", 0.958, old})
+			rt.Rates = append(rt.Rates, MethodRate{"paxum", 0.94, old})
 		}
-		if r.Rate == 0.962 {
-			rt.Rates = append(rt.Rates, MethodRate{"*", 0.973, parseT("2026-10-19T00:00:00+03:00")})
+		if r.Rate == 0.95 {
+			rt.Rates = append(rt.Rates, MethodRate{"*", 0.96, parseT("2026-10-12T00:00:00+03:00")})
 		}
 		rt.Rates = append(rt.Rates, MethodRate{"*", r.Rate, old})
 		c.Routes[r.Page] = rt

@@ -150,12 +150,12 @@ func cover() *month.Cover {
 	route := func(page, model, payee string, rate float64) month.Route {
 		return month.Route{Page: page, Model: model, Channel: "Fansly", Rate: rate, Payee: payee, Rates: []month.MethodRate{{Method: "*", Rate: rate, From: old}}}
 	}
-	cfg := month.Config{Models: []string{"Alfa", "Gamma"}, Pages: []string{"alfa-1", "gamma-1"}, Share: 0.7, KLow: 0.985, KHigh: 1.015,
+	cfg := month.Config{Models: []string{"Alfa", "Gamma"}, Pages: []string{"alfa-1", "gamma-1"}, Share: 0.65, KLow: 0.985, KHigh: 1.015,
 		Routes: map[string]month.Route{"alfa-1": route("alfa-1", "Alfa", "model", 1), "gamma-1": route("gamma-1", "Gamma", "agency", 1)}}
-	t := &month.Transfer{N: 10, Model: "Alfa", Date: "2026-10-20", Amount: 700, Deps: []float64{1000}, HasK: true, K: 1.0, ByMonth: map[string]float64{}}
+	t := &month.Transfer{N: 10, Model: "Alfa", Date: "2026-10-20", Amount: 650, Deps: []float64{1000}, HasK: true, K: 1.0, ByMonth: map[string]float64{}}
 	q := &month.Request{Page: "alfa-1", Key: "q1", T: at("2026-10-19T12:00:00+03:00"), Amount: 1000, Avail: 1000, Transfer: t}
 	return &month.Cover{Cfg: cfg, AsOf: now, Reqs: []*month.Request{q}, Transfers: map[string][]*month.Transfer{"Alfa": {t}},
-		Src: src{incomes: map[string][]float64{"2026-10-20": {700}}}}
+		Src: src{incomes: map[string][]float64{"2026-10-20": {650}}}}
 }
 
 func TestCoverageChecks(t *testing.T) {
