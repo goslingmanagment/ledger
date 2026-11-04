@@ -21,6 +21,7 @@
 bash deploy/release.sh            # origin/main: CI зелёный → образ на VPS → копия → deploy.sh → копия
 bash deploy/release.sh --plan     # только план на сервере
 bash deploy/release.sh --bootstrap   # первая установка
+bash deploy/release.sh --build-here  # пока CI на маке (CI_POOL=pc): зелёный CI, образ собирается на VPS
 ```
 
 Откат на VPS: `cd /opt/ledger && set -a && . /etc/ledger/ledger.env && set +a && bash deploy/rollback.sh`
