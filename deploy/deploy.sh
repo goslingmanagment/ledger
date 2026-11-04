@@ -78,7 +78,7 @@ on_failure() {
 trap on_failure ERR
 git checkout --quiet --detach "$target"
 if [[ $build_here == true ]]; then
-  LEDGER_COMPOSE_FILE="$repo/deploy/compose.yml" LEDGER_BUILD="$target" dc_build
+  LEDGER_COMPOSE_FILE="$repo/deploy/compose.yml" LEDGER_IMAGE="ledger:$target" LEDGER_BUILD="$target" dc_build
   resolve_image "$target"
 fi
 candidate_deployment="${target:0:12}-$(date -u +%Y%m%dT%H%M%SZ)-$RANDOM"
