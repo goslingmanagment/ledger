@@ -1,0 +1,7 @@
+{
+ "account": "someone@example.com",
+ "tables": {
+  "Alpha": "sheet-id-of-alpha",
+  "Beta": "sheet-id-of-beta"
+ }
+}

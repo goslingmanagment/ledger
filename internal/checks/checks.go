@@ -22,6 +22,7 @@ import (
 	"github.com/goslingmanagment/ledger/internal/ledger"
 	"github.com/goslingmanagment/ledger/internal/money"
 	"github.com/goslingmanagment/ledger/internal/month"
+	"github.com/goslingmanagment/ledger/internal/payroll"
 	"github.com/goslingmanagment/ledger/internal/ts"
 )
 
@@ -362,37 +363,33 @@ func Deposits(cv *month.Cover) Result {
 	return Result{Name: name, OK: true, Severity: "info", Summary: "пометки переводов сходятся с заявками и Bybit", Details: notes}
 }
 
-// Payables: the debt to each person against «К выплате» of their tabs, ±$1, and tabs that do not parse.
+// Payables: the debt to each person against «К выплате» of their tabs, ±$1, tabs that do not parse and
+// payout rows or tabs without a person.
 func Payables(ctx context.Context, e Env) Result {
 	const name = "долги равны «К выплате»"
-	rows, err := e.Q.QueryContext(ctx, `SELECT person, balance, to_pay, difference, tabs_status FROM v_payables WHERE to_pay IS NOT NULL`)
+	c, err := payroll.Check(ctx, e.Q)
 	if err != nil {
-		if strings.Contains(err.Error(), "no such table") {
-			return fail(name, "warn", "таблицы выплат ещё не собраны", nil)
-		}
 		return fail(name, "warn", err.Error(), nil)
 	}
-	defer rows.Close()
+	if c.TabsRead == 0 {
+		return fail(name, "warn", "таблицы выплат ещё не собраны", nil)
+	}
 	var bad []string
-	n := 0
-	for rows.Next() {
-		var person string
-		var bal, kv, diff sql.NullFloat64
-		var st sql.NullString
-		if err := rows.Scan(&person, &bal, &kv, &diff, &st); err != nil {
-			return fail(name, "warn", err.Error(), nil)
+	for _, p := range c.People {
+		if !p.OK {
+			bad = append(bad, p.Person+": "+p.Reason)
 		}
-		n++
-		if st.Valid && st.String != "ok" {
-			bad = append(bad, person+": вкладка не разобрана ("+st.String+")")
-		} else if math.Abs(diff.Float64) > 1 {
-			bad = append(bad, fmt.Sprintf("%s: долг %.2f, К выплате %.2f (Δ %+.2f)", person, bal.Float64, kv.Float64, diff.Float64))
-		}
+	}
+	for _, r := range c.Rows {
+		bad = append(bad, fmt.Sprintf("#%d %s: %s", r.Num, r.Name, r.Reason))
+	}
+	for _, t := range c.Tabs {
+		bad = append(bad, t.Model+"/"+t.Name+": "+t.Reason)
 	}
 	if len(bad) > 0 {
 		return fail(name, "warn", strings.Join(bad, "; "), nil)
 	}
-	return pass(name, fmt.Sprintf("%d человек: долг равен К выплате ±$1", n))
+	return pass(name, fmt.Sprintf("%d человек: долг равен К выплате ±$1", len(c.People)))
 }
 
 // DriftOf: a closed month whose figure now differs by $100 or more from what the owner knows.
