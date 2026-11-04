@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -109,6 +110,13 @@ func bybitCheckKey(ctx context.Context, args []string) error {
 }
 
 func bybitStatus(ctx context.Context, args []string) error {
+	if !local() {
+		st := map[string]any{}
+		if err := call(ctx, http.MethodGet, "/v1/bybit/status", nil, &st); err != nil {
+			return err
+		}
+		return printJSON(st)
+	}
 	store, err := OpenStore(ctx)
 	if err != nil {
 		return err

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/goslingmanagment/ledger/internal/brief"
+	"github.com/goslingmanagment/ledger/internal/bybit"
 	"github.com/goslingmanagment/ledger/internal/db"
 )
 
@@ -23,6 +24,8 @@ func init() {
 	Command(Cmd{Name: "pending", Summary: "открытые брифы, где ещё есть что решать [--json]", Run: pendingCmd})
 	Command(Cmd{Name: "decide", Summary: "решения владельца одним набором: --brief N --set 1=confirm --set 2=personal --set 3=custom:{…} --set 4=defer --set 5=recorded:388,389", Run: decideCmd})
 	Command(Cmd{Name: "propose", Summary: "своё предложение агента о деньгах мимо сборщиков: ledger propose <json|->", Run: proposeCmd})
+	Command(Cmd{Name: "rule add", Summary: "запомнить ответ: --kind counterparty|ignore|merchant --uid|--address|--prefix --suffix|--merchant --direction --name --category [--model] [--note]", Run: ruleAdd})
+	Command(Cmd{Name: "note add", Summary: "заметка для расследований: [--status confirmed|hypothesis|refuted|info] \"текст\"", Run: noteAdd})
 	Command(Cmd{Name: "evidence add", Summary: "улика по движению: --key K [--source S] \"факт\"", Run: evidenceAdd})
 	Command(Cmd{Name: "evidence show", Summary: "улики по движению: --key K", Run: evidenceShow})
 	Command(Cmd{Name: "dispute open", Summary: "открыть спор: --subject … [--account счёт] [--amount N] [--evidence …]", Run: disputeOpen})
@@ -234,6 +237,47 @@ func proposeCmd(ctx context.Context, args []string) error {
 			return refused(err)
 		}
 	} else if err := call(ctx, http.MethodPost, "/v1/proposals", in, &out); err != nil {
+		return err
+	}
+	return printJSON(out)
+}
+
+func ruleAdd(ctx context.Context, args []string) error {
+	fs := Flags("rule add")
+	var in bybit.RuleInput
+	fs.StringVar(&in.Kind, "kind", "", "counterparty, ignore или merchant")
+	fs.StringVar(&in.UID, "uid", "", "uid контрагента")
+	fs.StringVar(&in.Address, "address", "", "адрес кошелька")
+	fs.StringVar(&in.Prefix, "prefix", "", "начало меняющегося адреса")
+	fs.StringVar(&in.Suffix, "suffix", "", "конец меняющегося адреса")
+	fs.StringVar(&in.Merchant, "merchant", "", "шаблон мерчанта в сообщениях бота")
+	fs.StringVar(&in.Direction, "direction", "", "income, expense или any")
+	fs.StringVar(&in.Name, "name", "", "кому/откуда в журнале")
+	fs.StringVar(&in.Category, "category", "", "категория в журнале")
+	fs.StringVar(&in.Model, "model", "", "модель в журнале")
+	fs.StringVar(&in.Note, "note", "", "заметка к правилу")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	out := map[string]any{}
+	if err := call(ctx, http.MethodPost, "/v1/rules", in, &out); err != nil {
+		return err
+	}
+	return printJSON(out)
+}
+
+func noteAdd(ctx context.Context, args []string) error {
+	fs := Flags("note add")
+	status := fs.String("status", "info", "confirmed, hypothesis, refuted или info")
+	pos, err := ParseArgs(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) != 1 {
+		return Exit{Code: 2, Msg: `нужен текст: ledger note add "что узнали, без цитат"`}
+	}
+	out := map[string]any{}
+	if err := call(ctx, http.MethodPost, "/v1/notes", map[string]any{"text": pos[0], "status": *status}, &out); err != nil {
 		return err
 	}
 	return printJSON(out)

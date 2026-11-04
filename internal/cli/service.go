@@ -3,10 +3,12 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -31,6 +33,11 @@ func init() {
 // OpenStore opens LEDGER_DB and applies migrations.
 func OpenStore(ctx context.Context) (*db.Store, error) {
 	cfg := config.LoadServer()
+	if !local() {
+		if _, err := os.Stat(filepath.Dir(cfg.DB)); err != nil {
+			return nil, errors.New("эта команда работает рядом с базой: контейнер на сервере или LEDGER_DB; с машины агента — ledger sql и ledger schema")
+		}
+	}
 	s, err := db.Open(cfg.DB)
 	if err != nil {
 		return nil, err

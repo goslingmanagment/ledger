@@ -2,10 +2,12 @@ package bybit
 
 import (
 	"encoding/json"
+	"github.com/goslingmanagment/ledger/internal/ts"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const syntheticCounterparties = `# UID/адрес -> контрагент
@@ -224,5 +226,37 @@ func TestImportedRulesClassify(t *testing.T) {
 	}
 	if _, _, _, c := proposalOf(t, s, "withdrawal:3"); c.Rule.Name != "Гамма" {
 		t.Fatalf("prefix + suffix: %+v", c.Rule)
+	}
+}
+
+func TestAddRuleFromAnAnswer(t *testing.T) {
+	s, ctx := openDB(t)
+	now := time.Date(2026, 11, 4, 12, 0, 0, 0, ts.MSK)
+	in := RuleInput{Kind: "counterparty", Address: "TaddrNew", Direction: "expense", Name: "Сервис", Category: "Инструменты"}
+	if _, err := AddRule(ctx, s.RW, in, "main", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AddRule(ctx, s.RW, in, "main", now); err == nil {
+		t.Fatal("a repeat must be refused")
+	}
+	rules, err := LoadRules(ctx, s.RO)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := Classify(Movement{Kind: "withdrawal", Coin: "USDT", Direction: "expense", CounterpartyKind: "address", Counterparty: "TaddrNew", Date: "2026-11-04"}, rules)
+	if v.Block != "auto" || v.Rule == nil || v.Rule.Name != "Сервис" || v.Rule.Model != "—" {
+		t.Fatalf("verdict %+v", v)
+	}
+	for name, bad := range map[string]RuleInput{
+		"no identity":  {Kind: "counterparty", Direction: "expense", Name: "x", Category: "y"},
+		"two ids":      {Kind: "counterparty", UID: "1", Address: "T", Direction: "expense", Name: "x", Category: "y"},
+		"half address": {Kind: "counterparty", Prefix: "T", Direction: "expense", Name: "x", Category: "y"},
+		"no direction": {Kind: "counterparty", UID: "1", Name: "x", Category: "y"},
+		"bad pattern":  {Kind: "merchant", Merchant: "(", Name: "x", Category: "y"},
+		"bad kind":     {Kind: "merchant_bot", UID: "1", Name: "x"},
+	} {
+		if _, err := AddRule(ctx, s.RW, bad, "main", now); err == nil {
+			t.Errorf("%s must be refused", name)
+		}
 	}
 }
