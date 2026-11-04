@@ -25,6 +25,8 @@ if command -v sqlite3 >/dev/null; then
   check=$(sqlite3 "file:$target/ledger.db?mode=ro" 'PRAGMA integrity_check;')
   [[ $check == ok ]] || { printf 'Backup %s fails integrity_check: %s\n' "$target" "$check" >&2; exit 1; }
 fi
+# Отметка для проверки «копии базы»; не критична, копия уже на маке.
+ssh -o BatchMode=yes "$host" "$app ledger mark-backup" || true
 copies=("$base"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z/)
 printf '%s\n' "${copies[@]}" | sort -r | tail -n +"$((keep + 1))" | while read -r old; do rm -rf "$old"; done
 printf '{"ok":true,"path":"%s","dbBytes":%s}\n' "$target" "$size"
