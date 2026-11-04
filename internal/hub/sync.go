@@ -117,6 +117,11 @@ type runCtx struct {
 func (s *Syncer) Run(ctx context.Context, pages []string) (rep Report, err error) {
 	now := s.Now()
 	rep = Report{At: ts.Format(now)}
+	release, err := s.lease(ctx, now)
+	if err != nil {
+		return rep, err
+	}
+	defer release()
 	set, err := LoadSettings(ctx, s.Store.RW)
 	if err != nil {
 		return rep, err
@@ -202,6 +207,42 @@ func (s *Syncer) Run(ctx context.Context, pages []string) (rep Report, err error
 		}
 	}
 	return rep, nil
+}
+
+// leaseFor outlives any sync: a run that died gives way after it.
+const leaseFor = time.Hour
+
+// lease lets one sync run at a time, across processes: a sync reads the mirror before its transaction, so
+// a slower run applying its answer after a newer one would write older figures over newer ones.
+func (s *Syncer) lease(ctx context.Context, now time.Time) (func(), error) {
+	const name = "hub:sync:lease"
+	err := s.write(ctx, func(tx *sql.Tx) error {
+		var held string
+		switch err := tx.QueryRowContext(ctx, `SELECT value FROM cursors WHERE name = ?`, name).Scan(&held); {
+		case err == sql.ErrNoRows:
+		case err != nil:
+			return err
+		default:
+			if t, err := ts.Parse(held); err == nil && now.Before(t.Add(leaseFor)) {
+				return refusef("идёт другая выгрузка хаба, начата %s", held)
+			}
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO cursors(name, value, updated_at) VALUES (?, ?, ?)
+			ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`, name, ts.Format(now), ts.Format(now))
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return func() {
+		// The job's context may be gone by now; the lease must still go.
+		lctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = s.write(lctx, func(tx *sql.Tx) error {
+			_, err := tx.ExecContext(lctx, `DELETE FROM cursors WHERE name = ?`, name)
+			return err
+		})
+	}, nil
 }
 
 func (s *Syncer) write(ctx context.Context, fn func(*sql.Tx) error) error {

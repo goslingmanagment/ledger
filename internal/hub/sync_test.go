@@ -444,3 +444,24 @@ func TestGrantChanges(t *testing.T) {
 		t.Fatalf("%+v %v", pages, err)
 	}
 }
+
+// Two syncs at once: the second waits its turn instead of writing over the first.
+func TestOneSyncAtATime(t *testing.T) {
+	b := newBench(t)
+	ctx := b.ctx
+	sy := &Syncer{Store: b.store, Now: func() time.Time { return mustTime("2026-11-04") }}
+	release, err := sy.lease(ctx, sy.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sy.lease(ctx, sy.Now().Add(time.Minute)); err == nil || !IsRefusal(err) {
+		t.Fatalf("a second sync must wait: %v", err)
+	}
+	if _, err := sy.lease(ctx, sy.Now().Add(2*leaseFor)); err != nil {
+		t.Fatalf("a dead run's lease must give way: %v", err)
+	}
+	release()
+	if _, err := sy.lease(ctx, sy.Now()); err != nil {
+		t.Fatalf("after release: %v", err)
+	}
+}

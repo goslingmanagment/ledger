@@ -7,7 +7,7 @@ repo=$(cd "$(dirname "$0")/.." && pwd)
 src=${1:-$(ls -1d "${LEDGER_BACKUP_DIR:-$HOME/Backups/ledger}"/*Z/ledger.db 2>/dev/null | sort | tail -n1)}
 [[ -n $src && -f $src ]] || { printf 'No backup found.\n' >&2; exit 1; }
 work=$(mktemp -d)
-trap 'kill "${pid:-0}" 2>/dev/null || true; rm -rf "$work"' EXIT
+trap '[[ -z ${pid:-} ]] || kill "$pid" 2>/dev/null || true; rm -rf "$work"' EXIT
 cp "$src" "$work/ledger.db"
 (cd "$repo" && go build -o "$work/ledger" ./cmd/ledger)
 verify=$("$work/ledger" verify "$work/ledger.db")

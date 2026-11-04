@@ -63,7 +63,7 @@ install_job() {  # declarationKey, имя, cron, таймаут, файл про
     id=$(openclaw cron add --declaration-key "$decl" "${common[@]}" --json |
       python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("id") or d.get("job",{}).get("id"))')
   fi
-  openclaw cron edit "$id" --failure-alert --failure-alert-mode announce --failure-alert-channel telegram \
+  openclaw cron edit "$id" --enable --failure-alert --failure-alert-mode announce --failure-alert-channel telegram \
     --failure-alert-to "$CHAT_ID" --failure-alert-after 1 --failure-alert-cooldown 6h >/dev/null
   echo "готово: $name ($id)"
 }
