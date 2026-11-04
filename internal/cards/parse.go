@@ -153,15 +153,16 @@ func amountOf(s string) (money.Micros, error) {
 	return money.Parse(t)
 }
 
-// loadGross is what a load of net took from the wallet: the 4.3% are held back before crediting, so
-// their base is the charge, not what the bot printed. A calculation by the tariff, not an observation.
-func loadGross(net money.Micros) money.Micros {
-	return roundCentsUp(money.Micros(int64(net) * 1000 / 957))
+// loadGross is what a load of net took from the wallet: the fee is held back before crediting, so its
+// base is the charge, not what the bot printed. A calculation by the tariff (settings.cards_load_fee, in
+// thousandths here to keep whole numbers), not an observation.
+func loadGross(net money.Micros, permille int64) money.Micros {
+	return roundCentsUp(money.Micros(int64(net) * 1000 / (1000 - permille)))
 }
 
 // loadFee is what the load cost, so the chain closes to the cent.
-func loadFee(net money.Micros) (fee, gross money.Micros) {
-	gross = loadGross(net)
+func loadFee(net money.Micros, permille int64) (fee, gross money.Micros) {
+	gross = loadGross(net, permille)
 	return gross - roundCentsUp(net), gross
 }
 

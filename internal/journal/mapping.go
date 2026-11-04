@@ -67,7 +67,7 @@ func MethodAccount(method, date string) (string, error) {
 	return "", fmt.Errorf("неизвестный метод «%s»", method)
 }
 
-// PlaceAccount maps a side of an internal transfer («Bybit → CinCin •3427») or a starting balance.
+// PlaceAccount maps a side of an internal transfer («Bybit → CinCin •1111») or a starting balance.
 func PlaceAccount(name string) (string, error) {
 	switch {
 	case name == "Bybit":

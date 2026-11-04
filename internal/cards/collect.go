@@ -86,6 +86,9 @@ func TgReader(dir string) Reader {
 	}
 }
 
+// maxPages bounds one run of the collector; the next run goes on from what was read.
+const maxPages = 50
+
 // Collected is what one read of the chat gave.
 type Collected struct {
 	Since    string
@@ -94,31 +97,51 @@ type Collected struct {
 	Last     time.Time // the newest message read
 }
 
-// Collect reads and parses the bot's chat since a date.
+// Collect reads and parses the bot's chat since a date. tg history gives the oldest messages first and
+// stops at the limit, so a full page means there is more: the next page starts at the newest message read.
 func Collect(ctx context.Context, cfg Config, read Reader, since string, limit int) (Collected, error) {
 	got := Collected{Since: since}
-	raw, err := read(ctx, cfg.Peer.String(), cfg.Account, since, limit)
-	if err != nil {
-		return got, err
-	}
-	var h History
-	if err := json.Unmarshal(raw, &h); err != nil {
-		return got, fmt.Errorf("tg history: ответ не JSON: %w", err)
-	}
-	got.Messages = len(h.Messages)
-	for _, m := range h.Messages {
-		if t, err := ts.Parse(m.Date); err == nil && t.After(got.Last) {
-			got.Last = t
-		}
-		p, err := ParseMessage(m)
+	seen := map[int64]bool{}
+	from := since
+	for page := 0; page < maxPages; page++ {
+		raw, err := read(ctx, cfg.Peer.String(), cfg.Account, from, limit)
 		if err != nil {
 			return got, err
 		}
-		if p != nil {
-			got.Events = append(got.Events, *p)
+		var h History
+		if err := json.Unmarshal(raw, &h); err != nil {
+			return got, fmt.Errorf("tg history: ответ не JSON: %w", err)
 		}
+		before := got.Last
+		fresh := 0
+		for _, m := range h.Messages {
+			if seen[m.ID] {
+				continue
+			}
+			seen[m.ID] = true
+			fresh++
+			got.Messages++
+			if t, err := ts.Parse(m.Date); err == nil && t.After(got.Last) {
+				got.Last = t
+			}
+			p, err := ParseMessage(m)
+			if err != nil {
+				return got, err
+			}
+			if p != nil {
+				got.Events = append(got.Events, *p)
+			}
+		}
+		if len(h.Messages) < limit {
+			return got, nil
+		}
+		if fresh == 0 || !got.Last.After(before) {
+			limit *= 2 // one second holds a whole page: a bigger page gets past it
+			continue
+		}
+		from = ts.Format(got.Last)
 	}
-	return got, nil
+	return got, fmt.Errorf("tg history: за %d страниц история не кончилась, прочитано %d сообщений", maxPages, got.Messages)
 }
 
 // state is what the collector remembers between runs: where to read from next.
