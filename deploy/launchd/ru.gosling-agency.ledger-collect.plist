@@ -3,25 +3,27 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>ru.gosling-agency.ledger-sheets</string>
+	<string>__LABEL__</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>__DEST__/bin/ledger</string>
 		<string>collect</string>
-		<string>sheets</string>
+		<string>__WHAT__</string>
 	</array>
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>PATH</key>
-		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+		<string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+		<key>LEDGER_CREDENTIALS</key>
+		<string>__CREDENTIALS__</string>
 	</dict>
 	<key>StartInterval</key>
-	<integer>3600</integer>
+	<integer>__INTERVAL__</integer>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>StandardOutPath</key>
-	<string>__DEST__/logs/sheets.log</string>
+	<string>__LOGS__/__WHAT__.log</string>
 	<key>StandardErrorPath</key>
-	<string>__DEST__/logs/sheets.err</string>
+	<string>__LOGS__/__WHAT__.err</string>
 </dict>
 </plist>

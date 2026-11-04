@@ -82,7 +82,7 @@ func TestLinkNotesLinksAndClosesProposals(t *testing.T) {
 	if err := s.RW.QueryRow(`SELECT status, decision, decision_text FROM proposals WHERE key = 'withdrawal:22'`).Scan(&status, &decision, &text); err != nil {
 		t.Fatal(err)
 	}
-	if status != "superseded" || decision != "linked" || text != "note_key:recorded #100, note_key:recorded #101" {
+	if status != "superseded" || decision != "recorded" || text != "note_key:recorded #100, note_key:recorded #101" {
 		t.Fatalf("proposal %s %s %s", status, decision, text)
 	}
 	// The other one stays open and is listed.

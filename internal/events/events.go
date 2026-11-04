@@ -60,6 +60,9 @@ type Source struct {
 	Name   string
 	Arrive func(ctx context.Context, tx *sql.Tx, a Arrival) (changed bool, err error)
 	Settle func(ctx context.Context, store *db.Store, now time.Time) error
+	// FirstWins: the first record of a fact stays and a later one with other text is a repeat, not a
+	// conflict. For a source with two doors (a collector and a one-off import) describing one message.
+	FirstWins bool
 }
 
 var (
@@ -152,10 +155,14 @@ func Accept(ctx context.Context, store *db.Store, batch []Event, now time.Time) 
 	for _, e := range batch {
 		id, inserted, err := ledger.AddEvent(ctx, tx, ledger.Event{Source: e.Source, SourceID: e.SourceID, Kind: e.Kind,
 			OccurredAt: e.OccurredAt, Payload: e.Payload}, now)
+		src, _ := lookup(e.Source)
 		if errors.Is(err, ledger.ErrEventConflict) {
-			ans.OK = false
-			ans.Results = append(ans.Results, Result{SourceID: e.SourceID, ID: id, Conflict: err.Error()})
-			continue
+			if !src.FirstWins {
+				ans.OK = false
+				ans.Results = append(ans.Results, Result{SourceID: e.SourceID, ID: id, Conflict: err.Error()})
+				continue
+			}
+			err = nil
 		}
 		if err != nil {
 			return ans, err
@@ -166,7 +173,6 @@ func Accept(ctx context.Context, store *db.Store, batch []Event, now time.Time) 
 			ans.Repeated++
 		}
 		ans.Results = append(ans.Results, Result{SourceID: e.SourceID, ID: id, Inserted: inserted})
-		src, _ := lookup(e.Source)
 		if src.Arrive == nil {
 			continue
 		}
