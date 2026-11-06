@@ -115,6 +115,9 @@ type Answer struct {
 	Settle   []string `json:"settle,omitempty"` // failures of the sources' follow-up work
 }
 
+// ContactCursor names the cursor holding the last time a collector of the source reached the server.
+func ContactCursor(source string) string { return "contact:" + source }
+
 // BadRequest is an event refused before anything was stored.
 type BadRequest struct{ Msg string }
 
@@ -186,6 +189,20 @@ func Accept(ctx context.Context, store *db.Store, batch []Event, now time.Time) 
 		}
 		if ch {
 			changed[e.Source] = true
+		}
+	}
+	// A repeat is still a sign of life: a quiet source (no new bot messages for a day) must not look
+	// like a sleeping Mac. «источники живы» reads contact:<source>.
+	contacted := map[string]bool{}
+	for _, e := range batch {
+		if contacted[e.Source] {
+			continue
+		}
+		contacted[e.Source] = true
+		if _, err := tx.ExecContext(ctx, `INSERT INTO cursors(name, value, updated_at) VALUES (?, ?, ?)
+			ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+			ContactCursor(e.Source), ts.Format(now), ts.Format(now)); err != nil {
+			return ans, err
 		}
 	}
 	if err := tx.Commit(); err != nil {

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/goslingmanagment/ledger/internal/bybit"
+	"github.com/goslingmanagment/ledger/internal/events"
 	"github.com/goslingmanagment/ledger/internal/hub"
 	"github.com/goslingmanagment/ledger/internal/ledger"
 	"github.com/goslingmanagment/ledger/internal/money"
@@ -493,8 +494,10 @@ func Sources(ctx context.Context, e Env) Result {
 		problems = append(problems, "Bybit ещё не собирался")
 	}
 	for _, src := range []string{"sheets", "cincin_bot"} {
+		// The last new fact or the last batch of repeats, whichever is later: a quiet bot is not a dead collector.
 		var at sql.NullString
-		_ = e.Q.QueryRowContext(ctx, `SELECT MAX(received_at) FROM events WHERE source = ?`, src).Scan(&at)
+		_ = e.Q.QueryRowContext(ctx, `SELECT MAX(at) FROM (SELECT MAX(received_at) AS at FROM events WHERE source = ?
+			UNION ALL SELECT value FROM cursors WHERE name = ?)`, src, events.ContactCursor(src)).Scan(&at)
 		if at.Valid {
 			if t, err := ts.Parse(at.String); err == nil && e.Now.Sub(t) > 24*time.Hour {
 				problems = append(problems, fmt.Sprintf("%s молчит с %s (мак спит?)", src, at.String))

@@ -253,6 +253,16 @@ func TestSources(t *testing.T) {
 	if r := Sources(ctx, e); !r.OK {
 		t.Fatalf("all alive: %+v", r)
 	}
+	// The bot has said nothing for two days, but the collector still sends the last day as repeats.
+	exec(t, s, `INSERT INTO events(source, source_id, kind, received_at, payload) VALUES ('cincin_bot', '1', 'message', ?, '{}')`,
+		ts.Format(now.Add(-48*time.Hour)))
+	if r := Sources(ctx, e); r.OK || !strings.Contains(r.Summary, "cincin_bot молчит") {
+		t.Fatalf("collector silent for two days: %+v", r)
+	}
+	exec(t, s, `INSERT INTO cursors(name, value, updated_at) VALUES ('contact:cincin_bot', ?, 'x')`, ts.Format(now.Add(-time.Hour)))
+	if r := Sources(ctx, e); !r.OK {
+		t.Fatalf("quiet bot, live collector: %+v", r)
+	}
 	raw, _ = json.Marshal(map[string]any{"at": ts.Format(now), "ok": false, "errors": map[string]string{"deposit": "retCode 10003"}})
 	exec(t, s, `UPDATE cursors SET value = ? WHERE name = 'bybit:status'`, string(raw))
 	if r := Sources(ctx, e); r.OK || !strings.Contains(r.Summary, "retCode") {
