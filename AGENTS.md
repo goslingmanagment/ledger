@@ -40,8 +40,8 @@
 
 ## Выкатка
 
-- `bash deploy/release.sh` с мака после зелёного main (образ из CI → VPS → `deploy.sh`, копии до и после). Пока CI идёт на маке
-  (переменная репозитория `CI_POOL=pc`, раннер `mac-ledger-1` в ВМ `ci`, скилл ci-pool), артефакта образа нет: `--build-here`,
+- `bash deploy/release.sh` с мака после зелёного main (образ из CI → VPS → `deploy.sh`, копии до и после). С 04.11 CI снова на
+  GitHub-hosted (переменной `CI_POOL` нет, скилл ci-pool). Если CI вернётся на мак (`CI_POOL=pc`), артефакта образа нет: `--build-here`,
   зелёный CI проверяется, образ собирается на VPS.
   Первая установка: `--bootstrap`. Откат: `deploy/rollback.sh` на VPS. Подробно — `deploy/README.md`.
 - Прод: `agency-de`, checkout `/opt/ledger`, том `ledger_data`, порт `127.0.0.1:3300`, сайт

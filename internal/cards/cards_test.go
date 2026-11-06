@@ -982,6 +982,10 @@ func TestCollectorAndImportDescribeOneMessage(t *testing.T) {
 	if err := s.RW.QueryRow(`SELECT payload FROM events WHERE source = ? AND source_id = '5'`, Source).Scan(&payload); err != nil || !strings.Contains(payload, "ledger_sync") {
 		t.Fatal("the first record stays", err)
 	}
+	var contact string
+	if err := s.RW.QueryRow(`SELECT value FROM cursors WHERE name = ?`, events.ContactCursor(Source)).Scan(&contact); err != nil || contact != "2026-09-10T12:00:00+03:00" {
+		t.Fatalf("a repeat is a contact of the collector: %q %v", contact, err)
+	}
 }
 
 // Two messages of one load: the books stand on the one posted first, whichever is earlier, and only once.
