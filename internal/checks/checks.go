@@ -108,6 +108,27 @@ func BybitBalance(ctx context.Context, e Env) Result {
 	return pass(name, fmt.Sprintf("по книгам %.2f, движения без строки журнала %+.2f, по API %.2f", b, pending, api))
 }
 
+// Coins: every coin on the exchange stands on an account. A stable coin is cash on `bybit`; any other coin
+// without its own account bybit:<coin> is money the books do not see.
+func Coins(ctx context.Context, e Env) Result {
+	const name = "монеты Bybit на счетах"
+	b, at, ok, err := bybit.LatestBalance(ctx, e.Q)
+	if err != nil {
+		return fail(name, "warn", err.Error(), nil)
+	}
+	if !ok {
+		return fail(name, "warn", "баланса Bybit API ещё нет", nil)
+	}
+	missing, err := bybit.CoinsWithoutAccount(ctx, e.Q, b)
+	if err != nil {
+		return fail(name, "warn", err.Error(), nil)
+	}
+	if len(missing) > 0 {
+		return fail(name, "warn", fmt.Sprintf("монета без счёта на %s: %s — в книгах её нет", at, strings.Join(missing, "; ")), missing)
+	}
+	return pass(name, "у каждой монеты на бирже есть счёт")
+}
+
 // frozenAccounts are accounts of closed or frozen cards: their balance is history, not cash.
 func frozenAccounts(ctx context.Context, q ledger.Querier) map[string]bool {
 	out := map[string]bool{}
@@ -551,7 +572,7 @@ func Sources(ctx context.Context, e Env) Result {
 
 // Run executes every check. A coverage that cannot be built fails its own checks, not the rest.
 func Run(ctx context.Context, e Env) []Result {
-	out := []Result{Balanced(ctx, e), BybitBalance(ctx, e), CardAnchors(ctx, e), Unlinked(ctx, e), Payables(ctx, e), Copies(ctx, e), Sources(ctx, e)}
+	out := []Result{Balanced(ctx, e), BybitBalance(ctx, e), Coins(ctx, e), CardAnchors(ctx, e), Unlinked(ctx, e), Payables(ctx, e), Copies(ctx, e), Sources(ctx, e)}
 	cv, tabs, _, err := month.PrepareCover(ctx, e.Q, month.Inputs{})
 	if err != nil {
 		for _, n := range []string{"заявки равны покрытому net", "k переводов в норме", "переводы не просрочены", "депозиты сходятся с заявками", "дрейф закрытых месяцев"} {

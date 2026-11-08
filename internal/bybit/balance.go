@@ -2,9 +2,11 @@ package bybit
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/goslingmanagment/ledger/internal/db"
@@ -154,4 +156,43 @@ func CollectBalance(ctx context.Context, store *db.Store, c *Client, now time.Ti
 		return b, errors.Join(readErr, err)
 	}
 	return b, readErr
+}
+
+// LatestBalance is the last reading of the wallets and when it was taken; ok is false before the first one.
+func LatestBalance(ctx context.Context, q ledger.Querier) (b Balance, at string, ok bool, err error) {
+	var payload string
+	err = q.QueryRowContext(ctx, `SELECT payload, observed_at FROM observations WHERE kind = ? AND subject = ?
+		ORDER BY observed_at DESC, id DESC LIMIT 1`, balanceObservation, balanceSubject).Scan(&payload, &at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return b, "", false, nil
+	}
+	if err != nil {
+		return b, "", false, err
+	}
+	if err := json.Unmarshal([]byte(payload), &b); err != nil {
+		return b, at, false, fmt.Errorf("баланс Bybit на %s: %w", at, err)
+	}
+	return b, at, true, nil
+}
+
+// CoinsWithoutAccount lists the coins of a reading that no account of the books holds: a stable coin is cash
+// on `bybit`, any other coin needs its own account bybit:<coin>. Each is «COIN amount (wallet)».
+func CoinsWithoutAccount(ctx context.Context, q ledger.Querier, b Balance) ([]string, error) {
+	var out []string
+	for wallet, coins := range b.Wallets {
+		for coin, amount := range coins {
+			if stableCoins[coin] {
+				continue
+			}
+			var known int
+			if err := q.QueryRowContext(ctx, `SELECT count(*) FROM accounts WHERE code = ?`, "bybit:"+lower(coin)).Scan(&known); err != nil {
+				return nil, err
+			}
+			if known == 0 {
+				out = append(out, fmt.Sprintf("%s %s (%s)", coin, amount, wallet))
+			}
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }
