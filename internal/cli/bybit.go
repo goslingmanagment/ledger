@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"database/sql"
 	"flag"
 	"fmt"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"github.com/goslingmanagment/ledger/internal/brief"
 	"github.com/goslingmanagment/ledger/internal/bybit"
 	"github.com/goslingmanagment/ledger/internal/cards"
+	"github.com/goslingmanagment/ledger/internal/db"
 	"github.com/goslingmanagment/ledger/internal/ts"
 )
 
@@ -24,6 +26,7 @@ func init() {
 	Command(Cmd{Name: "bybit unlinked", Summary: "движения без строки журнала и без решения personal/ignore: [--since 2026-08-01] [--json]", Run: bybitUnlinked})
 	Command(Cmd{Name: "bybit link-notes", Summary: "связать события со строками журнала по ключам в примечаниях", Run: bybitLinkNotes})
 	Command(Cmd{Name: "bybit link", Summary: "вручную: <ключ> --doc 387,388 | --decision personal|ignore [--note]", Run: bybitLink})
+	Command(Cmd{Name: "bybit coin-cost", Summary: "счета монет по средней цене покупки и поправки платежей монетой: [--from ГГГГ-ММ-ДД] [--apply] (рядом с базой)", Run: bybitCoinCost})
 	Command(Cmd{Name: "rules import", Summary: "правила и заметки из каталога config ledger-sync: <каталог>", Run: rulesImport})
 	Command(Cmd{Name: "import bybit-state", Summary: "состояние ledger-sync: история, Funding, карты, отметки брифов: <bybit.sqlite>", Run: importBybitState})
 }
@@ -300,6 +303,9 @@ func importBybitState(ctx context.Context, args []string) error {
 	if _, err := bybit.PostConverts(ctx, tx, now); err != nil {
 		return err
 	}
+	if _, err := bybit.PostCoinCost(ctx, tx, now); err != nil {
+		return err
+	}
 	evidence, err := brief.ImportEvidence(ctx, tx, source, now)
 	if err != nil {
 		return err
@@ -332,4 +338,55 @@ func importBybitState(ctx context.Context, args []string) error {
 		}
 	}
 	return printJSON(map[string]any{"ok": true, "dryRun": *dry, "report": rep, "evidence": evidence, "cards": cardsRep, "proposals": proposals, "sweep": sweep})
+}
+
+// bybitCoinCost shows every coin account at its average purchase price and the entries that bring it there
+// after each payment in the coin. --apply turns them on from --from (setting coin_cost_from) and posts them.
+func bybitCoinCost(ctx context.Context, args []string) error {
+	fs := Flags("bybit coin-cost")
+	from := fs.String("from", "", "с какого платежа приводить счёт к цене покупки (МСК); по умолчанию — настройка coin_cost_from")
+	apply := fs.Bool("apply", false, "включить поправки с --from и провести их сейчас")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if !local() {
+		return Exit{Code: 2, Msg: "только рядом с базой (LEDGER_DB)"}
+	}
+	if *apply {
+		if *from == "" {
+			return Exit{Code: 2, Msg: "--apply нужен --from"}
+		}
+		var plan bybit.CoinCostPlan
+		var posted int
+		err := writeLocal(ctx, func(tx *sql.Tx) error {
+			var err error
+			plan, posted, err = bybit.StartCoinCost(ctx, tx, *from, time.Now())
+			return err
+		})
+		if err != nil {
+			return err
+		}
+		return printJSON(map[string]any{"applied": true, "posted": posted, "plan": plan})
+	}
+	return readLocal(ctx, func(store *db.Store) error {
+		start := *from
+		if start == "" {
+			var err error
+			if start, err = bybit.CoinCostFrom(ctx, store.RO); err != nil {
+				return err
+			}
+		}
+		if start == "" {
+			coins, err := bybit.CoinCosts(ctx, store.RO)
+			if err != nil {
+				return err
+			}
+			return printJSON(map[string]any{"applied": false, "from": "", "coins": coins, "note": "поправки выключены: --from ГГГГ-ММ-ДД покажет, что они проведут"})
+		}
+		plan, err := bybit.PlanCoinCost(ctx, store.RO, start)
+		if err != nil {
+			return err
+		}
+		return printJSON(map[string]any{"applied": false, "plan": plan})
+	})
 }

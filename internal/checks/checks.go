@@ -129,6 +129,58 @@ func Coins(ctx context.Context, e Env) Result {
 	return pass(name, "у каждой монеты на бирже есть счёт")
 }
 
+// CoinsAtCost: each coin account against the coin left on the exchange at its average purchase price,
+// ±$1. A payment in the coin is written at the market price of its day, so the account drifts from what
+// the coin left cost; `ledger bybit coin-cost` shows the entries that bring it back.
+func CoinsAtCost(ctx context.Context, e Env) Result {
+	const name = "монеты Bybit по цене покупки"
+	costs, err := bybit.CoinCosts(ctx, e.Q)
+	if err != nil {
+		return fail(name, "warn", err.Error(), nil)
+	}
+	reading, at, read, err := bybit.LatestBalance(ctx, e.Q)
+	if err != nil {
+		return fail(name, "warn", err.Error(), nil)
+	}
+	held := func(wallet, coin string) float64 {
+		v, _ := strconv.ParseFloat(reading.Wallets[wallet][coin], 64)
+		return v
+	}
+	var bad []string
+	for _, c := range costs {
+		if c.Unknown != "" {
+			bad = append(bad, c.Account+": "+c.Unknown)
+			continue
+		}
+		if read && reading.AllCoins {
+			fund, unified := held("FUND", c.Coin), held("UNIFIED", c.Coin)
+			price := 0.0
+			if c.Qty > 1e-9 {
+				price = c.Cost.Float() / c.Qty
+			}
+			switch {
+			case unified > 0:
+				bad = append(bad, fmt.Sprintf("%s: в UNIFIED %g %s, журнала Funding у него нет — цены покупки не знаю", c.Account, unified, c.Coin))
+			case c.Rows == 0 && fund > 0:
+				bad = append(bad, fmt.Sprintf("%s: на бирже %g %s, строк Funding нет — цены покупки не знаю", c.Account, fund, c.Coin))
+			case math.Abs(fund-c.Qty)*price > 1:
+				bad = append(bad, fmt.Sprintf("%s: остаток по Funding %g %s, на бирже %g на %s", c.Account, c.Qty, c.Coin, fund, at))
+			}
+		}
+		if d := c.Book - c.Cost; math.Abs(d.Float()) > 1 {
+			bad = append(bad, fmt.Sprintf("%s: по книгам %.2f, по средней цене покупки %.2f (%g %s), Δ %+.2f — разница цены платежей монетой, поправки: ledger bybit coin-cost",
+				c.Account, c.Book.Float(), c.Cost.Float(), c.Qty, c.Coin, d.Float()))
+		}
+	}
+	if len(bad) > 0 {
+		return fail(name, "warn", strings.Join(bad, "; "), bad)
+	}
+	if len(costs) == 0 {
+		return pass(name, "счетов монет нет")
+	}
+	return pass(name, fmt.Sprintf("%d счетов монет по цене покупки ±$1", len(costs)))
+}
+
 // frozenAccounts are accounts of closed or frozen cards: their balance is history, not cash.
 func frozenAccounts(ctx context.Context, q ledger.Querier) map[string]bool {
 	out := map[string]bool{}
@@ -572,7 +624,7 @@ func Sources(ctx context.Context, e Env) Result {
 
 // Run executes every check. A coverage that cannot be built fails its own checks, not the rest.
 func Run(ctx context.Context, e Env) []Result {
-	out := []Result{Balanced(ctx, e), BybitBalance(ctx, e), Coins(ctx, e), CardAnchors(ctx, e), Unlinked(ctx, e), Payables(ctx, e), Copies(ctx, e), Sources(ctx, e)}
+	out := []Result{Balanced(ctx, e), BybitBalance(ctx, e), Coins(ctx, e), CoinsAtCost(ctx, e), CardAnchors(ctx, e), Unlinked(ctx, e), Payables(ctx, e), Copies(ctx, e), Sources(ctx, e)}
 	cv, tabs, _, err := month.PrepareCover(ctx, e.Q, month.Inputs{})
 	if err != nil {
 		for _, n := range []string{"заявки равны покрытому net", "k переводов в норме", "переводы не просрочены", "депозиты сходятся с заявками", "дрейф закрытых месяцев"} {

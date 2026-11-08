@@ -305,7 +305,7 @@ func TestFundingCheckGoesToStatus(t *testing.T) {
 func TestBalanceObservation(t *testing.T) {
 	s, ctx := openDB(t)
 	f, c := newFake(t)
-	f.unified = []map[string]any{{"coin": "USDT", "walletBalance": "100.1234567"}, {"coin": "BTC", "walletBalance": "0.5"}, {"coin": "USDC", "walletBalance": "0.009"}}
+	f.unified = []map[string]any{{"coin": "USDT", "walletBalance": "100.1234567"}, {"coin": "BTC", "walletBalance": "0.5"}, {"coin": "USDC", "walletBalance": "0.009"}, {"coin": "ETH", "walletBalance": "0.0004"}}
 	f.fund = []map[string]any{{"coin": "USDT", "walletBalance": "50"}, {"coin": "USDC", "walletBalance": "25.5"}, {"coin": "XRP", "walletBalance": ""}}
 	now := at("2026-09-05T14:00:00+03:00")
 	b, err := CollectBalance(ctx, s, c, now)
@@ -328,7 +328,9 @@ func TestBalanceObservation(t *testing.T) {
 	if err := json.Unmarshal([]byte(payload), &detail); err != nil {
 		t.Fatal(err)
 	}
-	if detail.Wallets["UNIFIED"]["BTC"] != "0.5" || detail.Wallets["FUND"]["USDC"] != "25.5" || detail.Wallets["UNIFIED"]["USDC"] != "" {
+	// A coin that is not stable stays at any size: a small quantity can be dollars.
+	if detail.Wallets["UNIFIED"]["BTC"] != "0.5" || detail.Wallets["FUND"]["USDC"] != "25.5" || detail.Wallets["UNIFIED"]["USDC"] != "" ||
+		detail.Wallets["UNIFIED"]["ETH"] != "0.0004" || !detail.AllCoins {
 		t.Fatalf("detail %+v", detail)
 	}
 

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/goslingmanagment/ledger/internal/bybit"
 	"github.com/goslingmanagment/ledger/internal/db"
 	"github.com/goslingmanagment/ledger/internal/hub"
 	"github.com/goslingmanagment/ledger/internal/ledger"
@@ -456,6 +457,57 @@ func TestCoinsWithoutAccount(t *testing.T) {
 	if r.OK || r.Severity != "warn" || !strings.Contains(r.Summary, "монета без счёта") ||
 		!strings.Contains(r.Summary, "ABC 0.0123 (FUND); DEF 7 (UNIFIED)") || strings.Contains(r.Summary, "XYZ") {
 		t.Fatalf("coins without an account: %+v", r)
+	}
+}
+
+// The coin account against the coin left at its purchase price: a payment written at a lower market price
+// leaves the account above it, and a quantity the exchange does not hold is no cost at all.
+func TestCoinsAtCost(t *testing.T) {
+	s, ctx := openDB(t)
+	e := Env{Q: s.RO, Now: now}
+	add := func(ev ledger.Event) int64 {
+		t.Helper()
+		id, _, err := ledger.AddEvent(ctx, s.RW, ev, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	add(bybit.FundingRow{ID: "u", Coin: "USDT", Signed: "-100", After: "900", Type: "Convert", At: "2026-11-01T10:00:00+03:00"}.Event())
+	add(bybit.FundingRow{ID: "b", Coin: "BTC", Signed: "0.002", After: "0.002", Type: "Convert", At: "2026-11-01T10:00:00+03:00"}.Event())
+	if _, err := bybit.PostConverts(ctx, s.RW, now); err != nil {
+		t.Fatal(err)
+	}
+	if r := CoinsAtCost(ctx, e); !r.OK {
+		t.Fatalf("bought, nothing spent: %+v", r)
+	}
+	add(bybit.FundingRow{ID: "w", Coin: "BTC", Signed: "-0.001", After: "0.001", Type: "Withdraw", At: "2026-11-02T12:00:00+03:00"}.Event())
+	w := add(bybit.Movement{Key: "withdrawal:1", Kind: "withdrawal", TimeMs: at("2026-11-02T12:00:00+03:00").UnixMilli(), Coin: "BTC", Amount: "0.001"}.Event())
+	d, _, err := ledger.PutDocument(ctx, s.RW, ledger.Document{Num: 1, Date: "2026-11-02", Type: "expense", Category: "c", Counterparty: "x", Model: "—",
+		Amount: "45.00", Currency: "USD", Method: "BTC (Bybit)", Status: "paid", Note: "withdrawal:1", Author: "t", Origin: "t"}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := money.MustParse("45.00")
+	if _, err := ledger.Post(ctx, s.RW, ledger.Entry{EffectiveAt: "2026-11-02", Kind: "document", Author: "t", DocumentID: d.ID,
+		Lines: []ledger.Line{{Account: "bybit:btc", Amount: -v}, {Account: "expense:other", Amount: v}}}, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bybit.AddLink(ctx, s.RW, bybit.Link{EventID: w, DocumentNum: 1, How: "note_key", Decision: "recorded"}, now); err != nil {
+		t.Fatal(err)
+	}
+	reading := func(at, btc string) {
+		t.Helper()
+		exec(t, s, `INSERT INTO observations(kind, subject, value, observed_at, source, payload) VALUES ('bybit_balance', 'bybit', 0, ?, 't', ?)`,
+			at, `{"wallets":{"FUND":{"USDT":"900","BTC":"`+btc+`"}},"all_coins":true}`)
+	}
+	reading("2026-11-03T10:00:00+03:00", "0.001")
+	if r := CoinsAtCost(ctx, e); r.OK || !strings.Contains(r.Summary, "по книгам 55.00, по средней цене покупки 50.00") || strings.Contains(r.Summary, "остаток") {
+		t.Fatalf("a payment below the purchase price: %+v", r)
+	}
+	reading("2026-11-03T11:00:00+03:00", "0.0015")
+	if r := CoinsAtCost(ctx, e); r.OK || !strings.Contains(r.Summary, "остаток по Funding 0.001 BTC, на бирже 0.0015") {
+		t.Fatalf("the exchange holds another quantity: %+v", r)
 	}
 }
 
