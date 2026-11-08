@@ -156,19 +156,23 @@ func CardAnchors(ctx context.Context, e Env) Result {
 			continue
 		}
 		if a.subject == "cincin_wallet" {
-			// The bot prints the wallet only when asked, so the anchor may be old: the books at its day, and the
-			// load fees not decided yet. Money on its way through the wallet can show here for a day: a warning.
-			var b, fees float64
-			var micros int64
-			if err := e.Q.QueryRowContext(ctx, `SELECT COALESCE(SUM(l.amount), 0) FROM lines l JOIN entries e ON e.id = l.entry_id
-				WHERE l.account = ? AND substr(e.effective_at, 1, 10) <= ?`, a.subject, a.at[:10]).Scan(&micros); err != nil {
+			// The bot prints the wallet only when asked, so the anchor may be old: the books at its moment, and the
+			// load fees by then not decided yet. Money on its way through the wallet can show here: a warning.
+			at, err := ts.Parse(a.at)
+			if err != nil {
 				return fail(name, "urgent", err.Error(), nil)
 			}
-			b = money.Micros(micros).Float()
-			_ = e.Q.QueryRowContext(ctx, `SELECT COALESCE(SUM(CAST(json_extract(content, '$.fee') AS REAL)), 0) FROM proposals
-				WHERE status = 'open' AND json_extract(content, '$.loaded_card') IS NOT NULL`).Scan(&fees)
+			micros, err := ledger.BalanceAt(ctx, e.Q, a.subject, at)
+			if err != nil {
+				return fail(name, "urgent", err.Error(), nil)
+			}
+			fees, err := loadFeesBy(ctx, e.Q, at)
+			if err != nil {
+				return fail(name, "urgent", err.Error(), nil)
+			}
+			b := micros.Float()
 			if d := a.value - (b - fees); math.Abs(d) > 1 {
-				wallet = append(wallet, fmt.Sprintf("кошелёк: по книгам %.2f (комиссии ждут решения %.2f), бот %.2f на %s, Δ %+.2f", b, fees, a.value, a.at, d))
+				wallet = append(wallet, fmt.Sprintf("кошелёк: по книгам на момент анкора %.2f (комиссии ждут решения %.2f), бот %.2f на %s, Δ %+.2f", b, fees, a.value, a.at, d))
 			}
 			continue
 		}
@@ -195,6 +199,29 @@ func CardAnchors(ctx context.Context, e Env) Result {
 		return fail(name, "warn", "анкоров карт ещё нет", nil)
 	}
 	return pass(name, fmt.Sprintf("%d карт и кошелёк сходятся с ботом ±$1", seen))
+}
+
+// loadFeesBy sums the fees of card loads made by t that wait for the owner: the wallet paid them, the books not yet.
+func loadFeesBy(ctx context.Context, q ledger.Querier, t time.Time) (float64, error) {
+	rows, err := q.QueryContext(ctx, `SELECT COALESCE(CAST(json_extract(content, '$.fee') AS REAL), 0), COALESCE(json_extract(content, '$.at'), '')
+		FROM proposals WHERE status = 'open' AND json_extract(content, '$.loaded_card') IS NOT NULL`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	sum := 0.0
+	for rows.Next() {
+		var fee float64
+		var at string
+		if err := rows.Scan(&fee, &at); err != nil {
+			return 0, err
+		}
+		if loaded, err := ts.Parse(at); err == nil && loaded.After(t) {
+			continue
+		}
+		sum += fee
+	}
+	return sum, rows.Err()
 }
 
 // Unlinked: a Bybit movement since the full journal is closed within 3 days (a row or an explicit personal).

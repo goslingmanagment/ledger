@@ -68,6 +68,9 @@ func cardsBalances(ctx context.Context, args []string) error {
 	for _, b := range list {
 		line := fmt.Sprintf("%-14s журнал %10s", b.Account, b.Ledger)
 		if b.Anchor != "" {
+			if b.LedgerAtAnchor != b.Ledger {
+				line += fmt.Sprintf(" (на момент анкора %s)", b.LedgerAtAnchor)
+			}
 			line += fmt.Sprintf("  анкор %10s (%s)  разница %s", b.Anchor, b.AnchorAt, b.Difference)
 		} else {
 			line += "  анкора нет"
