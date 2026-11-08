@@ -12,6 +12,7 @@ import (
 
 	"github.com/goslingmanagment/ledger/internal/ledger"
 	"github.com/goslingmanagment/ledger/internal/money"
+	"github.com/goslingmanagment/ledger/internal/ts"
 )
 
 // A conversion of a coin into USDT on Bybit moves money inside the account and has no journal row of
@@ -20,34 +21,49 @@ import (
 // the difference is a gain or loss of the price. A journal row written with the method «… → Convert USDT»
 // already counted the USDT, so that conversion has no entry. Rows are written later than the movement, so
 // every run compares what the conversion should post now with what stands: a change is a reversal and a
-// new entry.
+// new entry. A purchase of a coin for USDT is the mirror: the USDT paid leaves bybit and stands on the
+// coin's account as its book value, so the journal's payments in the coin come off what was paid for it.
+
+// convertGap is how far apart the two legs of one conversion may stand in the Funding log: Bybit writes
+// them in one second or in neighbouring ones.
+const convertGap = 2 * time.Second
 
 type convertRow struct {
 	id    string
 	at    string
+	t     time.Time
 	coin  string
 	delta float64
 }
 
-// convertPair is a conversion of the Funding log: in one second a coin went out and USDT came in.
+// convertPair is a conversion of the Funding log: a coin went out and USDT came in (a sale), or USDT went
+// out and a coin came in (a purchase).
 type convertPair struct {
-	at      string
+	at      string // the later leg: the conversion is done
 	usdt    convertRow
-	spent   string
-	sold    float64
+	coin    string
+	qty     float64 // how much of the coin was sold or bought
+	buy     bool
 	account string // the coin's book account; empty when there is none and the owner decides
 	ids     []string
 }
 
-// convertPairs reads the conversions of the Funding log in time order. Anything else (USDC swaps, sales
-// for another coin) is not a pair and stays for the owner.
+// convertLegs tells whether two Funding rows can be the legs of one conversion: opposite signs, one of them
+// USDT and the other a coin.
+func convertLegs(a, b convertRow) bool {
+	return a.delta*b.delta < 0 && (a.coin == "USDT") != (b.coin == "USDT")
+}
+
+// convertPairs reads the conversions of the Funding log in time order. The legs of one second pair first,
+// then a leg left alone pairs with the next lone leg at most convertGap later. Anything else (USDC swaps,
+// sales for another coin) is not a pair or has no book account and stays for the owner.
 func convertPairs(ctx context.Context, q ledger.Querier) ([]convertPair, error) {
 	rows, err := q.QueryContext(ctx, `SELECT source_id, occurred_at, payload FROM events WHERE source = 'bybit' AND kind = 'funding'
-		AND json_extract(payload, '$.type') = 'Convert' ORDER BY occurred_at`)
+		AND json_extract(payload, '$.type') = 'Convert' ORDER BY occurred_at, source_id`)
 	if err != nil {
 		return nil, err
 	}
-	bySecond := map[string][]convertRow{}
+	var legs []convertRow
 	for rows.Next() {
 		var id, at, payload string
 		if err := rows.Scan(&id, &at, &payload); err != nil {
@@ -67,40 +83,51 @@ func convertPairs(ctx context.Context, q ledger.Querier) ([]convertPair, error) 
 			rows.Close()
 			return nil, fmt.Errorf("funding %s: signed %s", id, p.Signed)
 		}
-		bySecond[at] = append(bySecond[at], convertRow{id: id, at: at, coin: p.Coin, delta: s})
+		t, err := ts.Parse(at)
+		if err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("funding %s: %w", id, err)
+		}
+		legs = append(legs, convertRow{id: id, at: at, t: t, coin: p.Coin, delta: s})
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	seconds := make([]string, 0, len(bySecond))
-	for s := range bySecond {
-		seconds = append(seconds, s)
-	}
-	sort.Strings(seconds)
-	var pairs []convertPair
-	for _, s := range seconds {
-		p := convertPair{at: s}
-		var usdt *convertRow
-		for i := range bySecond[s] {
-			r := &bySecond[s][i]
-			p.ids = append(p.ids, r.id)
-			if r.coin == "USDT" && r.delta > 0 {
-				usdt = r
-			} else if r.delta < 0 {
-				p.spent, p.sold = r.coin, p.sold-r.delta
+	used := make([]bool, len(legs))
+	var found [][2]int
+	pairUp := func(gap time.Duration) {
+		for i := range legs {
+			if used[i] {
+				continue
+			}
+			for k := i + 1; k < len(legs) && legs[k].t.Sub(legs[i].t) <= gap; k++ {
+				if !used[k] && convertLegs(legs[i], legs[k]) {
+					used[i], used[k] = true, true
+					found = append(found, [2]int{i, k})
+					break
+				}
 			}
 		}
-		if usdt == nil || p.spent == "" {
-			continue
+	}
+	pairUp(0)
+	pairUp(convertGap)
+	// Time order matters: a later sale of the same coin takes its book value after the earlier one.
+	sort.Slice(found, func(a, b int) bool { return found[a][1] < found[b][1] })
+	var pairs []convertPair
+	for _, f := range found {
+		a, b := legs[f[0]], legs[f[1]]
+		usdt, coin := a, b
+		if b.coin == "USDT" {
+			usdt, coin = b, a
 		}
-		p.usdt = *usdt
+		p := convertPair{at: b.at, usdt: usdt, coin: coin.coin, qty: math.Abs(coin.delta), buy: usdt.delta < 0, ids: []string{a.id, b.id}}
 		var known int
-		if err := q.QueryRowContext(ctx, `SELECT count(*) FROM accounts WHERE code = ?`, "bybit:"+lower(p.spent)).Scan(&known); err != nil {
+		if err := q.QueryRowContext(ctx, `SELECT count(*) FROM accounts WHERE code = ?`, "bybit:"+lower(p.coin)).Scan(&known); err != nil {
 			return nil, err
 		}
 		if known > 0 {
-			p.account = "bybit:" + lower(p.spent)
+			p.account = "bybit:" + lower(p.coin)
 		}
 		pairs = append(pairs, p)
 	}
@@ -108,8 +135,8 @@ func convertPairs(ctx context.Context, q ledger.Querier) ([]convertPair, error) 
 }
 
 // ConvertedFunding is the set of Funding row ids that PostConverts answers for: a coin with a book account
-// sold for USDT, posted by PostConverts or counted by a journal row «… → Convert USDT». The Funding check
-// does not raise them as movements without an operation.
+// sold for USDT or bought for it, posted by PostConverts or counted by a journal row «… → Convert USDT».
+// The Funding check does not raise them as movements without an operation.
 func ConvertedFunding(ctx context.Context, q ledger.Querier) (map[string]bool, error) {
 	pairs, err := convertPairs(ctx, q)
 	if err != nil {
@@ -138,10 +165,13 @@ func PostConverts(ctx context.Context, q ledger.Querier, now time.Time) (int, er
 		if p.account == "" {
 			continue // a coin without a book account stays for the owner
 		}
-		s, usdt, spent, sold, coinAccount := p.at, p.usdt, p.spent, p.sold, p.account
-		key := "bybit:convert:" + usdt.id
-		want, err := convertLines(ctx, q, key, s, spent, coinAccount, sold, money.FromFloat(usdt.delta))
-		if err != nil {
+		key := "bybit:convert:" + p.usdt.id
+		memo, changed := "продажа "+p.coin+" за USDT на Bybit", "сторно: журнал изменил продажу "+p.coin
+		var want []ledger.Line
+		if p.buy {
+			memo, changed = "покупка "+p.coin+" за USDT на Bybit", "сторно: изменилась покупка "+p.coin
+			want = buyLines(p)
+		} else if want, err = convertLines(ctx, q, key, p.at, p.coin, p.account, p.qty, money.FromFloat(p.usdt.delta)); err != nil {
 			return posted, fmt.Errorf("%s: %w", key, err)
 		}
 		active, revisions, err := activeConvert(ctx, q, key)
@@ -156,7 +186,7 @@ func PostConverts(ctx context.Context, q ledger.Querier, now time.Time) (int, er
 			if same {
 				continue
 			}
-			if _, err := ledger.Reverse(ctx, q, active, ledger.Reversal{Author: "bybit", Memo: "сторно: журнал изменил продажу " + spent}, now); err != nil {
+			if _, err := ledger.Reverse(ctx, q, active, ledger.Reversal{Author: "bybit", Memo: changed}, now); err != nil {
 				return posted, fmt.Errorf("%s: %w", key, err)
 			}
 		}
@@ -167,13 +197,26 @@ func PostConverts(ctx context.Context, q ledger.Querier, now time.Time) (int, er
 		if revisions > 0 {
 			next = fmt.Sprintf("%s:r%d", key, revisions+1)
 		}
-		if _, err := ledger.Post(ctx, q, ledger.Entry{EffectiveAt: s, Kind: "bybit:convert", Memo: "продажа " + spent + " за USDT на Bybit",
+		if _, err := ledger.Post(ctx, q, ledger.Entry{EffectiveAt: p.at, Kind: "bybit:convert", Memo: memo,
 			Author: "bybit", SourceKey: next, Lines: want}, now); err != nil {
 			return posted, fmt.Errorf("%s: %w", next, err)
 		}
 		posted++
 	}
 	return posted, nil
+}
+
+// buyLines is what a purchase posts: the USDT paid moves from bybit to the coin's account, where it is the
+// coin's book value; there is no difference of the price until the coin is spent.
+func buyLines(p convertPair) []ledger.Line {
+	paid := money.FromFloat(-p.usdt.delta)
+	if paid <= 0 {
+		return nil
+	}
+	return []ledger.Line{
+		{Account: "bybit", Amount: -paid, Currency: "USDT", Memo: "покупка " + p.coin},
+		{Account: p.account, Amount: paid, Memo: "книжная стоимость купленного"},
+	}
 }
 
 // convertLines is what a conversion should post now: nothing when a journal row already counted the USDT.

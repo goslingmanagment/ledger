@@ -178,3 +178,80 @@ func TestConvertPartialSale(t *testing.T) {
 		}
 	}
 }
+
+// Bybit may write the two legs of a conversion in neighbouring seconds, and a purchase of a coin for USDT
+// is the mirror of a sale: the USDT paid moves from bybit to the coin's account. A repeat posts nothing.
+func TestConvertLegsInNeighbouringSecondsAndPurchase(t *testing.T) {
+	ctx := context.Background()
+	s, err := db.Open(filepath.Join(t.TempDir(), "l.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	v := money.MustParse("80.00")
+	if _, err := ledger.Post(ctx, s.RW, ledger.Entry{EffectiveAt: "2026-10-01", Kind: "test", Author: "t",
+		Lines: []ledger.Line{{Account: "bybit:btc", Amount: v}, {Account: "income:custom", Amount: -v}}}, now); err != nil {
+		t.Fatal(err)
+	}
+	rows := []FundingRow{
+		{ID: "1", Coin: "BTC", Signed: "0.002", Type: "Deposit", At: "2026-10-01T10:00:00+03:00"},
+		// A sale, its legs one second apart.
+		{ID: "2", Coin: "BTC", Signed: "-0.002", Type: "Convert", At: "2026-10-20T12:00:00+03:00"},
+		{ID: "3", Coin: "USDT", Signed: "85.00", Type: "Convert", At: "2026-10-20T12:00:01+03:00"},
+		// A lone leg one second before a sale of one second: the sale keeps its own legs.
+		{ID: "4", Coin: "XRP", Signed: "-5", Type: "Convert", At: "2026-10-21T09:59:59+03:00"},
+		{ID: "5", Coin: "BTC", Signed: "0.001", Type: "Deposit", At: "2026-10-21T09:00:00+03:00"},
+		{ID: "6", Coin: "USDT", Signed: "41.00", Type: "Convert", At: "2026-10-21T10:00:00+03:00"},
+		{ID: "7", Coin: "BTC", Signed: "-0.001", Type: "Convert", At: "2026-10-21T10:00:00+03:00"},
+		// A purchase, its legs one second apart.
+		{ID: "8", Coin: "USDT", Signed: "-250", Type: "Convert", At: "2026-11-02T18:30:30+03:00"},
+		{ID: "9", Coin: "BTC", Signed: "0.0031", Type: "Convert", At: "2026-11-02T18:30:31+03:00"},
+		// Legs three seconds apart are two separate movements for the owner.
+		{ID: "10", Coin: "USDT", Signed: "-10", Type: "Convert", At: "2026-11-03T08:00:00+03:00"},
+		{ID: "11", Coin: "BTC", Signed: "0.0001", Type: "Convert", At: "2026-11-03T08:00:03+03:00"},
+	}
+	addAll := func() {
+		t.Helper()
+		for _, r := range rows {
+			if _, _, err := ledger.AddEvent(ctx, s.RW, r.Event(), now); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	addAll()
+	if n, err := PostConverts(ctx, s.RW, now); err != nil || n != 3 {
+		t.Fatalf("posted %d %v, want 3", n, err)
+	}
+	// The collector reads the same rows again and runs again: nothing is posted twice.
+	addAll()
+	if n, err := PostConverts(ctx, s.RW, now); err != nil || n != 0 {
+		t.Fatalf("repeat posted %d %v", n, err)
+	}
+	// bybit: +85 − 250 + 41; bybit:btc: 80 − 80 (the whole coin sold) + 250 (bought); the second sale's book value is 0.
+	for acct, want := range map[string]string{"bybit": "-124.00", "bybit:btc": "250.00", "income:other": "-46.00"} {
+		got, err := ledger.Balance(ctx, s.RO, acct, "", "")
+		if err != nil || got != money.MustParse(want) {
+			t.Errorf("%s = %s (%v), want %s", acct, got, err, want)
+		}
+	}
+	var memo, at string
+	if err := s.RO.QueryRowContext(ctx, `SELECT memo, effective_at FROM entries WHERE source_key = 'bybit:convert:funding:8'`).Scan(&memo, &at); err != nil {
+		t.Fatal(err)
+	}
+	if memo != "покупка BTC за USDT на Bybit" || at != "2026-11-02T18:30:31+03:00" {
+		t.Errorf("purchase entry: %q at %s", memo, at)
+	}
+	conv, err := ConvertedFunding(ctx, s.RO)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]bool{"2": true, "3": true, "4": false, "6": true, "7": true, "8": true, "9": true, "10": false, "11": false} {
+		if conv[id] != want {
+			t.Errorf("converted[%s] = %v, want %v", id, conv[id], want)
+		}
+	}
+}
