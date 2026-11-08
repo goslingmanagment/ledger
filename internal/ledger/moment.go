@@ -20,6 +20,7 @@ type TimedLine struct {
 	Day       string    // the MSK day of the entry
 	At        time.Time // the moment; zero when only the day is known
 	SourceKey string
+	Reverses  string // the source key of the entry a reversal undoes
 }
 
 // By says whether the line's money had moved by t.
@@ -32,11 +33,12 @@ func (l TimedLine) By(t time.Time) bool {
 
 // AccountLines reads the lines of an account with their moments.
 func AccountLines(ctx context.Context, q Querier, account string) ([]TimedLine, error) {
-	rows, err := q.QueryContext(ctx, `SELECT e.id, l.amount, e.effective_at, COALESCE(e.source_key, ''),
+	rows, err := q.QueryContext(ctx, `SELECT e.id, l.amount, e.effective_at, COALESCE(e.source_key, ''), COALESCE(o.source_key, ''),
 		COALESCE((SELECT group_concat(COALESCE(v.occurred_at, v.received_at), '|') FROM events v WHERE v.id IN (
 			SELECT ee.event_id FROM entry_events ee WHERE ee.entry_id = e.id
 			UNION SELECT el.event_id FROM event_links el JOIN documents d ON d.num = el.document_num WHERE d.id = e.document_id)), '')
-		FROM lines l JOIN entries e ON e.id = l.entry_id WHERE l.account = ? ORDER BY e.effective_at, e.id, l.id`, account)
+		FROM lines l JOIN entries e ON e.id = l.entry_id LEFT JOIN entries o ON o.id = e.reverses_id
+		WHERE l.account = ? ORDER BY e.effective_at, e.id, l.id`, account)
 	if err != nil {
 		return nil, err
 	}
@@ -46,7 +48,7 @@ func AccountLines(ctx context.Context, q Querier, account string) ([]TimedLine, 
 		var l TimedLine
 		var v int64
 		var effective, events string
-		if err := rows.Scan(&l.Entry, &v, &effective, &l.SourceKey, &events); err != nil {
+		if err := rows.Scan(&l.Entry, &v, &effective, &l.SourceKey, &l.Reverses, &events); err != nil {
 			return nil, err
 		}
 		l.Amount, l.Day = money.Micros(v), effective[:10]

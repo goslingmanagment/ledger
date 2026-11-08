@@ -17,6 +17,8 @@
   Funding — `ledger bybit status`, без строки журнала — `ledger bybit unlinked`. Перенос из `ledger-sync`: `ledger rules import <config>`,
   затем `ledger import bybit-state <bybit.sqlite>`; после первого прогона сбора, тогда у событий истории есть сырая запись Bybit.
   Настройки `mode` (shadow: документы не создаются, live: `ledger mode live`) и `bybit_start`.
+  Счета монет (`bybit:btc`) — по средней цене покупки: `ledger bybit coin-cost` показывает цену и поправки платежей монетой,
+  `--from ГГГГ-ММ-ДД --apply` (рядом с базой) включает их с этой даты (настройка `coin_cost_from`) и проводит; дальше их ведёт сбор.
 - Долги людям: `ledger import people <папка people>`, затем `ledger collect sheets [--dry-run] [--local-db]` (конфиг `~/.config/ledger/sheets.json`,
   очередь `~/.config/ledger/spool`, только `gog --readonly`); `ledger payroll open --dry-run` — стартовые долги таблицей, без `--dry-run` они замораживаются
   навсегда; `ledger payroll rebuild` — свести сейчас, `ledger payables` — что вышло. Строки вкладок, которые не пишутся как страница хаба, — в `settings.sheet_pages`.

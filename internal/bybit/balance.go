@@ -26,10 +26,12 @@ var (
 	dustLimit   = mustRat("0.01")
 )
 
-// Balance is what the wallets hold: FUND + UNIFIED, coin by coin.
+// Balance is what the wallets hold: FUND + UNIFIED, coin by coin. A stable coin under a cent is dust; any
+// other coin is kept at any size, a small quantity of BTC is dollars. AllCoins marks readings made so.
 type Balance struct {
 	Wallets     map[string]map[string]string `json:"wallets"`
 	StableTotal string                       `json:"stable_total"`
+	AllCoins    bool                         `json:"all_coins,omitempty"`
 	Micros      money.Micros                 `json:"-"`
 }
 
@@ -46,7 +48,7 @@ func ReadBalance(ctx context.Context, c *Client) (Balance, error) {
 	add := func(wallet string, coins []walletCoin) error {
 		for _, coin := range coins {
 			v, ok := rat(coin.WalletBalance)
-			if !ok || v.Cmp(dustLimit) <= 0 {
+			if !ok || v.Sign() <= 0 || (stableCoins[coin.Coin] && v.Cmp(dustLimit) <= 0) {
 				continue
 			}
 			if b.Wallets[wallet] == nil {
@@ -93,7 +95,7 @@ func ReadBalance(ctx context.Context, c *Client) (Balance, error) {
 	if err := add("FUND", fund.Balance); err != nil {
 		return b, err
 	}
-	b.Micros, b.StableTotal = total, total.String()
+	b.Micros, b.StableTotal, b.AllCoins = total, total.String(), true
 	return b, nil
 }
 

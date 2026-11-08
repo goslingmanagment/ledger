@@ -274,6 +274,9 @@ func (c *Collector) Run(ctx context.Context, opt RunOptions) (Status, error) {
 	if _, err := PostConverts(ctx, tx, now); err != nil {
 		return st, err
 	}
+	if _, err := PostCoinCost(ctx, tx, now); err != nil {
+		return st, err
+	}
 	report, err := fundingReport(ctx, tx, until)
 	if err != nil {
 		return st, err
