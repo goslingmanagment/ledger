@@ -435,6 +435,30 @@ func TestWalletAtTheAnchorMoment(t *testing.T) {
 	}
 }
 
+// A coin on the exchange that no account holds is money the books do not see: a warning, never silence.
+func TestCoinsWithoutAccount(t *testing.T) {
+	s, ctx := openDB(t)
+	e := Env{Q: s.RO, Now: now}
+	if r := Coins(ctx, e); r.OK {
+		t.Fatalf("no reading yet: %+v", r)
+	}
+	reading := func(at, payload string) {
+		t.Helper()
+		exec(t, s, `INSERT INTO observations(kind, subject, value, observed_at, source, payload) VALUES ('bybit_balance', 'bybit', 0, ?, 't', ?)`, at, payload)
+	}
+	exec(t, s, `INSERT INTO accounts(code, name, kind, grp, opened_at) VALUES ('bybit:xyz', 'XYZ', 'asset', 'money', '2026-01-01')`)
+	reading("2026-11-04T10:00:00+03:00", `{"wallets":{"FUND":{"USDT":"10","USDC":"1","XYZ":"0.5"}}}`)
+	if r := Coins(ctx, e); !r.OK {
+		t.Fatalf("stable coins and a coin with its account: %+v", r)
+	}
+	reading("2026-11-04T11:00:00+03:00", `{"wallets":{"FUND":{"USDT":"10","XYZ":"0.5","ABC":"0.0123"},"UNIFIED":{"DEF":"7"}}}`)
+	r := Coins(ctx, e)
+	if r.OK || r.Severity != "warn" || !strings.Contains(r.Summary, "монета без счёта") ||
+		!strings.Contains(r.Summary, "ABC 0.0123 (FUND); DEF 7 (UNIFIED)") || strings.Contains(r.Summary, "XYZ") {
+		t.Fatalf("coins without an account: %+v", r)
+	}
+}
+
 func TestRatesAgainstCards(t *testing.T) {
 	s, ctx := openDB(t)
 	e := Env{Q: s.RO, Now: now}
