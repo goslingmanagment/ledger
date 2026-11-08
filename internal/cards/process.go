@@ -956,17 +956,42 @@ func LinkDeposit(ctx context.Context, q ledger.Querier, msgID int64, withdrawalK
 	return Process(ctx, q, now)
 }
 
-// Balance is a card on the books against what the bot printed last.
+// Balance is a card on the books against what the bot printed last. The difference is at the anchor's
+// moment: what moved after it the bot has not printed yet.
 type Balance struct {
-	Account    string `json:"account"`
-	Ledger     string `json:"ledger"`
-	Anchor     string `json:"anchor,omitempty"`
-	AnchorAt   string `json:"anchor_at,omitempty"`
-	Difference string `json:"difference,omitempty"`
+	Account        string `json:"account"`
+	Ledger         string `json:"ledger"`
+	LedgerAtAnchor string `json:"ledger_at_anchor,omitempty"`
+	Anchor         string `json:"anchor,omitempty"`
+	AnchorAt       string `json:"anchor_at,omitempty"`
+	Difference     string `json:"difference,omitempty"`
+	anchor         money.Micros
 }
 
 // Balances compares every card and the wallet with their last anchors.
 func Balances(ctx context.Context, q ledger.Querier) ([]Balance, error) {
+	list, err := balances(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	for i, b := range list {
+		if b.AnchorAt == "" {
+			continue
+		}
+		t, err := ts.Parse(b.AnchorAt)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", b.Account, err)
+		}
+		v, err := ledger.BalanceAt(ctx, q, b.Account, t)
+		if err != nil {
+			return nil, err
+		}
+		list[i].LedgerAtAnchor, list[i].Difference = v.Cents(), (v - b.anchor).Cents()
+	}
+	return list, nil
+}
+
+func balances(ctx context.Context, q ledger.Querier) ([]Balance, error) {
 	rows, err := q.QueryContext(ctx, `SELECT a.code, COALESCE((SELECT SUM(l.amount) FROM lines l WHERE l.account = a.code), 0),
 		(SELECT o.value FROM observations o WHERE o.subject = a.code AND o.kind IN ('card_anchor', 'wallet_anchor') ORDER BY o.observed_at DESC, o.id DESC LIMIT 1),
 		(SELECT o.observed_at FROM observations o WHERE o.subject = a.code AND o.kind IN ('card_anchor', 'wallet_anchor') ORDER BY o.observed_at DESC, o.id DESC LIMIT 1)
@@ -986,8 +1011,8 @@ func Balances(ctx context.Context, q ledger.Querier) ([]Balance, error) {
 		}
 		b.Ledger = money.Micros(v).Cents()
 		if anchor.Valid {
-			b.Anchor, b.AnchorAt = money.Micros(anchor.Int64).Cents(), at.String
-			b.Difference = (money.Micros(v) - money.Micros(anchor.Int64)).Cents()
+			b.anchor = money.Micros(anchor.Int64)
+			b.Anchor, b.AnchorAt = b.anchor.Cents(), at.String
 		}
 		out = append(out, b)
 	}

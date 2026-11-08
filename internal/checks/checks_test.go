@@ -390,6 +390,51 @@ func TestWalletAgainstTheBot(t *testing.T) {
 	}
 }
 
+// The bot printed the wallet at a moment; a journal row of that day whose money came later is not in it.
+func TestWalletAtTheAnchorMoment(t *testing.T) {
+	s, ctx := openDB(t)
+	e := Env{Q: s.RO, Now: now}
+	event := func(id int64, at string) {
+		t.Helper()
+		exec(t, s, `INSERT INTO events(id, source, source_id, kind, occurred_at, received_at, payload) VALUES (?, 'test', ?, 'x', ?, ?, '{}')`, id, id, at, at)
+	}
+	post := func(v string, doc int64, events ...int64) {
+		t.Helper()
+		if _, err := ledger.Post(ctx, s.RW, ledger.Entry{EffectiveAt: "2026-10-20", Kind: "test", Author: "t", DocumentID: doc, EventIDs: events,
+			Lines: []ledger.Line{{Account: "cincin_wallet", Amount: money.MustParse(v)}, {Account: "opening", Amount: -money.MustParse(v)}}}, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fee := func(fee, at string) {
+		t.Helper()
+		exec(t, s, `INSERT INTO proposals(key, kind, summary, content, created_at, author) VALUES (?, 'card_load', 's', ?, 'x', 't')`,
+			"card:"+at, `{"loaded_card":"1111","fee":"`+fee+`","at":"`+at+`"}`)
+	}
+	event(1, "2026-10-19T23:50:00+03:00") // the day before: an entry of 20.10 is not moved to it
+	event(2, "2026-10-20T22:00:00+03:00")
+	event(3, "2026-10-20T23:40:00+03:00")
+	event(4, "2026-10-20T23:57:00+03:00")
+	post("10.00", 0)    // no event: counts on its day
+	post("5.00", 0, 1)  // its only event is another day's: counts on its day
+	post("20.00", 0, 2) // in before the anchor
+	post("300.00", 0, 3)
+	exec(t, s, `INSERT INTO documents(id, num, date, type, category, counterparty, model, amount, amount_micros, currency, method, status, note, recorded_at, author, origin)
+		VALUES (9, 9, '2026-10-20', 'transfer', 'c', 'c', '—', '400.00', 400000000, 'USD', 'm', 'paid', '', 'x', 't', 't')`)
+	exec(t, s, `INSERT INTO event_links(event_id, document_num, how, decision, created_at) VALUES (2, 9, 'rule', 'recorded', 'x'), (4, 9, 'rule', 'recorded', 'x')`)
+	post("400.00", 9) // a top-up: the withdrawal before the anchor, the deposit after it
+	fee("1.00", "2026-10-20T22:00:00+03:00")
+	fee("13.00", "2026-10-20T23:40:00+03:00")
+	exec(t, s, `INSERT INTO observations(kind, subject, value, observed_at, source) VALUES ('wallet_anchor', 'cincin_wallet', ?, '2026-10-20T23:20:00+03:00', 'test'),
+		('card_anchor', 'card:1111', 0, '2026-10-20T23:20:00+03:00', 'test')`, int64(money.MustParse("34.00")))
+	if r := CardAnchors(ctx, e); !r.OK {
+		t.Fatalf("the books at the anchor's moment: %+v", r)
+	}
+	post("7.00", 0, 2)
+	if r := CardAnchors(ctx, e); r.OK || r.Severity != "warn" || !strings.Contains(r.Summary, "на момент анкора 42.00") {
+		t.Fatalf("a difference before the anchor: %+v", r)
+	}
+}
+
 func TestRatesAgainstCards(t *testing.T) {
 	s, ctx := openDB(t)
 	e := Env{Q: s.RO, Now: now}
