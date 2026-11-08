@@ -4,6 +4,7 @@
 #   LEDGER_TG_CHAT_ID=<чат владельца> deploy/openclaw/install.sh            новые рутины ledger
 #   deploy/openclaw/install.sh --retire-old                                  выключить рутины ledger-sync и month.py
 #   deploy/openclaw/install.sh --restore-old                                 откат: старые включить, новые выключить
+# Агент OpenClaw — LEDGER_OPENCLAW_AGENT (по умолчанию main): шлюз с несколькими агентами без --agent рутину не примет.
 set -euo pipefail
 HERE=${0:A:h}
 OLD=(bybit-nightly:v2 bybit-health:v1 bybit-health-flush:v1 month-weekly:v1 month-close:v1)
@@ -46,6 +47,7 @@ install_job() {  # declarationKey, имя, cron, таймаут, файл про
   existing=$(job_id "$decl")
   local -a common
   common=(
+    --agent "${LEDGER_OPENCLAW_AGENT:-main}"
     --cron "$cron" --tz Europe/Moscow --exact
     --session isolated --wake now
     --announce --channel telegram --to "$CHAT_ID"
