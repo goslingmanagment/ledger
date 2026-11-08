@@ -224,3 +224,25 @@ func TestEntryAfterCloseIsRecordedAfterIt(t *testing.T) {
 		t.Fatalf("at close %s, now %s", atClose["expense:tools"], now["expense:tools"])
 	}
 }
+
+// A coin account opens on first use; a stable coin has none, it is cash on bybit.
+func TestCoinAccountOpensOnFirstUse(t *testing.T) {
+	s, ctx := open(t)
+	if err := EnsureAccount(ctx, s.RW, CoinAccount("xyz"), "2026-11-01"); err != nil {
+		t.Fatal(err)
+	}
+	var name, kind, grp string
+	var liquid int
+	if err := s.RO.QueryRow(`SELECT name, kind, grp, liquid FROM accounts WHERE code = 'bybit:xyz'`).Scan(&name, &kind, &grp, &liquid); err != nil {
+		t.Fatal(err)
+	}
+	if kind != "asset" || grp != "money" || liquid != 0 || name != "Bybit, XYZ (в долларах по цене покупки)" {
+		t.Fatalf("coin account: %s %s %s %d", name, kind, grp, liquid)
+	}
+	if CoinAccount("usdc") != "bybit" {
+		t.Fatalf("a stable coin is cash: %s", CoinAccount("usdc"))
+	}
+	if err := EnsureAccount(ctx, s.RW, "bybit:usdt", "2026-11-01"); err == nil {
+		t.Fatal("a stable coin got its own account")
+	}
+}

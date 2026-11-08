@@ -22,7 +22,7 @@ const (
 )
 
 var (
-	stableCoins = map[string]bool{"USDT": true, "USDC": true, "USD": true, "DAI": true}
+	stableCoins = ledger.StableCoins
 	dustLimit   = mustRat("0.01")
 )
 

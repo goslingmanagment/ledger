@@ -131,7 +131,9 @@ func Coins(ctx context.Context, e Env) Result {
 
 // CoinsAtCost: each coin account against the coin left on the exchange at its average purchase price,
 // ±$1. A payment in the coin is written at the market price of its day, so the account drifts from what
-// the coin left cost; `ledger bybit coin-cost` shows the entries that bring it back.
+// the coin left cost; `ledger bybit coin-cost` shows the entries that bring it back. A coin that never
+// moved through Funding (FUND or UNIFIED) and has a starting balance stands at that balance: it fails only
+// when the quantity on the exchange moved away from the one read when the balance was posted.
 func CoinsAtCost(ctx context.Context, e Env) Result {
 	const name = "монеты Bybit по цене покупки"
 	costs, err := bybit.CoinCosts(ctx, e.Q)
@@ -158,11 +160,20 @@ func CoinsAtCost(ctx context.Context, e Env) Result {
 			if c.Qty > 1e-9 {
 				price = c.Cost.Float() / c.Qty
 			}
-			switch {
+			switch o := c.Opened; { // set only for a coin without Funding rows
+			case o != nil && !o.Known():
+				bad = append(bad, fmt.Sprintf("%s: остаток на старте проведён %s, а полного показания биржи до него нет — с чем сверять количество, не знаю", c.Account, o.Posted))
+			case o != nil && o.Qty <= 1e-9:
+				bad = append(bad, fmt.Sprintf("%s: остаток на старте проведён %s, а %s на бирже тогда не было", c.Account, o.Posted, c.Coin))
+			case o != nil:
+				if qty := fund + unified; math.Abs(qty-o.Qty)*c.Cost.Float()/o.Qty > 1 {
+					bad = append(bad, fmt.Sprintf("%s: на старте %g %s (%s, показание %s), на бирже %g на %s — монета двигалась мимо журнала Funding",
+						c.Account, o.Qty, c.Coin, o.Wallets, o.At, qty, at))
+				}
 			case unified > 0:
 				bad = append(bad, fmt.Sprintf("%s: в UNIFIED %g %s, журнала Funding у него нет — цены покупки не знаю", c.Account, unified, c.Coin))
 			case c.Rows == 0 && fund > 0:
-				bad = append(bad, fmt.Sprintf("%s: на бирже %g %s, строк Funding нет — цены покупки не знаю", c.Account, fund, c.Coin))
+				bad = append(bad, fmt.Sprintf("%s: на бирже %g %s, строк Funding и остатка на старте нет — цены покупки не знаю", c.Account, fund, c.Coin))
 			case math.Abs(fund-c.Qty)*price > 1:
 				bad = append(bad, fmt.Sprintf("%s: остаток по Funding %g %s, на бирже %g на %s", c.Account, c.Qty, c.Coin, fund, at))
 			}
