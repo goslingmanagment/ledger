@@ -97,4 +97,8 @@ nginx -t && systemctl reload nginx
 
 Только после «да» владельца. `bash deploy/switch.sh check` до ночи: режим, ключи сбора, API, журнал равен экспорту, проверки зелёные, кроме кассы и
 карт, их выравнивает финальный импорт. `LEDGER_TG_CHAT_ID=<чат> bash deploy/switch.sh go --aligns <файл вне репозитория>`: финальный импорт, `ledger mode live`,
-задания мака и рутины OpenClaw. Откат: `bash deploy/switch.sh back`. `ledger-sync` неделю остаётся запасным путём: его джобы только выключены.
+задания мака и рутины OpenClaw. Откат: `bash deploy/switch.sh back [--os-commit <коммит правок /OS>]`: сначала проверки и зеркало журнала в /OS,
+пока ledger в боевом режиме, потом тень, последнее зеркало, задания мака, рутины OpenClaw и AGENTS.md OpenClaw из копии
+`~/.config/ledger/switch/<дата>/openclaw-AGENTS.before-switch.md` (прежний файл остаётся рядом, `openclaw-AGENTS.before-back.md`).
+При сбое печатает, какие шаги сделаны, а какие нет; шаги повторяемы. Правки /OS этой ночи откат не возвращает: в конце он печатает `git revert` их коммита.
+`ledger-sync` неделю остаётся запасным путём: его джобы только выключены.
