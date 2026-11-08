@@ -12,6 +12,7 @@ import (
 	"github.com/goslingmanagment/ledger/internal/bybit"
 	"github.com/goslingmanagment/ledger/internal/db"
 	"github.com/goslingmanagment/ledger/internal/hub"
+	"github.com/goslingmanagment/ledger/internal/journal"
 	"github.com/goslingmanagment/ledger/internal/ledger"
 	"github.com/goslingmanagment/ledger/internal/money"
 	"github.com/goslingmanagment/ledger/internal/month"
@@ -508,6 +509,55 @@ func TestCoinsAtCost(t *testing.T) {
 	reading("2026-11-03T11:00:00+03:00", "0.0015")
 	if r := CoinsAtCost(ctx, e); r.OK || !strings.Contains(r.Summary, "остаток по Funding 0.001 BTC, на бирже 0.0015") {
 		t.Fatalf("the exchange holds another quantity: %+v", r)
+	}
+}
+
+// A coin that never moved through Funding stands at its starting balance: it is checked by its quantity
+// against the reading the balance was posted after, in FUND or UNIFIED, ±$1 at the starting price.
+func TestCoinAtItsStartingBalance(t *testing.T) {
+	s, ctx := openDB(t)
+	e := Env{Q: s.RO, Now: now}
+	reading := func(at, xyz, abc string) {
+		t.Helper()
+		exec(t, s, `INSERT INTO observations(kind, subject, value, observed_at, source, payload) VALUES ('bybit_balance', 'bybit', 0, ?, 't', ?)`,
+			at, `{"wallets":{"FUND":{"USDT":"900","XYZ":"`+xyz+`"},"UNIFIED":{"ABC":"`+abc+`"}},"all_coins":true}`)
+	}
+	for i, r := range []journal.Row{
+		{Num: 1, Date: "2026-11-04", Type: "transfer", Category: "Остаток на старте", Counterparty: "XYZ (Bybit)", Model: "—",
+			Amount: "5.00", Currency: "USDT", Method: "XYZ (Bybit)", Status: "paid"},
+		{Num: 2, Date: "2026-11-04", Type: "transfer", Category: "Остаток на старте", Counterparty: "ABC (Bybit)", Model: "—",
+			Amount: "0.02", Currency: "USDT", Method: "ABC (Bybit)", Status: "paid"},
+	} {
+		es, err := journal.Entries(r, journal.Tags{}, &journal.Context{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, en := range es {
+			en.Author = "t"
+			if _, err := ledger.Post(ctx, s.RW, en, now.Add(time.Duration(i)*time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	reading("2026-11-04T13:00:00+03:00", "0.05", "0.00001")
+	if r := Coins(ctx, e); !r.OK {
+		t.Fatalf("both coins have their accounts: %+v", r)
+	}
+	if r := CoinsAtCost(ctx, e); r.OK || !strings.Contains(r.Summary, "bybit:xyz: остаток на старте проведён") || !strings.Contains(r.Summary, "показания биржи до него нет") {
+		t.Fatalf("no reading before the starting balance: %+v", r)
+	}
+	reading("2026-11-04T11:00:00+03:00", "0.05", "0.00001") // bybit:btc of the chart is the third
+	if r := CoinsAtCost(ctx, e); !r.OK || r.Summary != "3 счетов монет по цене покупки ±$1" {
+		t.Fatalf("the quantity read before the starting balance is still there: %+v", r)
+	}
+	reading("2026-11-04T14:00:00+03:00", "0.041", "0")
+	if r := CoinsAtCost(ctx, e); !r.OK {
+		t.Fatalf("0.009 XYZ at 100 and the whole 0.02 of ABC are under a dollar: %+v", r)
+	}
+	reading("2026-11-04T15:00:00+03:00", "0.03", "0")
+	r := CoinsAtCost(ctx, e)
+	if r.OK || !strings.Contains(r.Summary, "bybit:xyz: на старте 0.05 XYZ (FUND, показание 2026-11-04T11:00:00+03:00), на бирже 0.03") || strings.Contains(r.Summary, "bybit:abc") {
+		t.Fatalf("0.02 XYZ at 100 left without a Funding row: %+v", r)
 	}
 }
 

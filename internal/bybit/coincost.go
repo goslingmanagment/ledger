@@ -54,9 +54,68 @@ type CoinCost struct {
 	Unknown  string        `json:"unknown,omitempty"` // why the cost is not known
 	Rows     int           `json:"funding_rows"`
 	Outflows []CoinOutflow `json:"outflows,omitempty"`
+	Opened   *CoinOpening  `json:"opened,omitempty"` // a coin without Funding rows that has a starting balance
 	CostUSD  string        `json:"cost"`
 	BookUSD  string        `json:"book"`
 }
+
+// CoinOpening is what the exchange held of a coin when its starting balance («Остаток на старте», SOL (Bybit))
+// was posted: the last balance reading by then. A coin without Funding rows stands at that value, and only its
+// quantity moving away from this one says the books no longer see it. At is "" when there was no reading.
+type CoinOpening struct {
+	Qty       float64 `json:"qty"`
+	At        string  `json:"reading_at,omitempty"`
+	Posted    string  `json:"posted_at"`
+	Wallets   string  `json:"wallets,omitempty"`
+	unreadAll bool
+}
+
+// openingOf finds the starting balance in force on a coin account and the reading it was posted against.
+func openingOf(ctx context.Context, q ledger.Querier, account, coin string) (*CoinOpening, error) {
+	o := &CoinOpening{}
+	err := q.QueryRowContext(ctx, `SELECT e.recorded_at FROM entries e WHERE e.kind = 'document:opening'
+		AND EXISTS (SELECT 1 FROM lines l WHERE l.entry_id = e.id AND l.account = ?)
+		AND NOT EXISTS (SELECT 1 FROM entries r WHERE r.reverses_id = e.id)
+		ORDER BY e.recorded_at DESC, e.id DESC LIMIT 1`, account).Scan(&o.Posted)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var payload string
+	err = q.QueryRowContext(ctx, `SELECT payload, observed_at FROM observations WHERE kind = ? AND subject = ? AND observed_at <= ?
+		ORDER BY observed_at DESC, id DESC LIMIT 1`, balanceObservation, balanceSubject, o.Posted).Scan(&payload, &o.At)
+	if errors.Is(err, sql.ErrNoRows) {
+		return o, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var b Balance
+	if err := json.Unmarshal([]byte(payload), &b); err != nil {
+		return nil, fmt.Errorf("баланс Bybit на %s: %w", o.At, err)
+	}
+	o.unreadAll = !b.AllCoins
+	var where []string
+	for _, wallet := range []string{"FUND", "UNIFIED"} {
+		raw, ok := b.Wallets[wallet][coin]
+		if !ok {
+			continue
+		}
+		v, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return nil, fmt.Errorf("баланс Bybit на %s: %s %s %q", o.At, wallet, coin, raw)
+		}
+		o.Qty += v
+		where = append(where, wallet)
+	}
+	o.Wallets = strings.Join(where, "+")
+	return o, nil
+}
+
+// Known says whether the reading at the opening can be compared with: taken, and of all the coins.
+func (o *CoinOpening) Known() bool { return o.At != "" && !o.unreadAll }
 
 type coinRow struct {
 	id, at, typ   string
@@ -224,6 +283,11 @@ func CoinCosts(ctx context.Context, q ledger.Querier) ([]CoinCost, error) {
 		if err := c.walk(ctx, q, rows, lines, byLeg); err != nil {
 			return nil, err
 		}
+		if len(rows) == 0 {
+			if c.Opened, err = openingOf(ctx, q, account, c.Coin); err != nil {
+				return nil, err
+			}
+		}
 		c.Rows, c.CostUSD, c.BookUSD = len(rows), c.Cost.String(), c.Book.String()
 		for i := range c.Outflows {
 			c.Outflows[i].CostUSD = c.Outflows[i].Cost.String()
@@ -234,7 +298,7 @@ func CoinCosts(ctx context.Context, q ledger.Querier) ([]CoinCost, error) {
 }
 
 func (c *CoinCost) walk(ctx context.Context, q ledger.Querier, rows []coinRow, lines []ledger.TimedLine, byLeg map[string]convertPair) error {
-	if len(rows) == 0 {
+	if len(rows) == 0 { // the coin never moved through Funding: its starting balance is what it cost
 		c.Cost = c.Book
 		return nil
 	}

@@ -23,9 +23,25 @@ type pattern struct {
 	name   func(m []string) string
 }
 
-// Accounts named after a page, a person, a card or a service are opened on first use; their
-// names live only in the database.
+// StableCoins are cash on `bybit`; any other coin of the exchange stands on its own account bybit:<coin>.
+var StableCoins = map[string]bool{"USDT": true, "USDC": true, "USD": true, "DAI": true}
+
+// CoinAccount is the account of a coin on Bybit: `bybit` for a stable coin, bybit:<coin> for any other.
+func CoinAccount(coin string) string {
+	coin = strings.ToUpper(strings.TrimSpace(coin))
+	if StableCoins[coin] {
+		return "bybit"
+	}
+	return "bybit:" + strings.ToLower(coin)
+}
+
+// Accounts named after a page, a person, a card, a service or a coin are opened on first use; their
+// names live only in the database. A coin account holds the coin in dollars at what it cost (bybit:btc
+// came with the chart; SOL, ETH and the next coins open here, a stable coin is cash on `bybit`).
 var patterns = []pattern{
+	{regexp.MustCompile(`^bybit:([a-z][a-z0-9]*)$`), "asset", "money", 0, func(m []string) string {
+		return "Bybit, " + strings.ToUpper(m[1]) + " (в долларах по цене покупки)"
+	}},
 	{regexp.MustCompile(`^card:(\d{4})$`), "asset", "money", 1, func(m []string) string { return "Карта CinCin " + m[1] }},
 	{regexp.MustCompile(`^prepaid:([a-z0-9_.-]+)$`), "asset", "prepaid", 0, func(m []string) string { return "Предоплата сервису " + m[1] }},
 	{regexp.MustCompile(`^page:([a-z0-9-]+):hold$`), "asset", "page", 0, func(m []string) string { return "Страница " + m[1] + ": в холде" }},
@@ -48,6 +64,9 @@ func EnsureAccount(ctx context.Context, q Querier, code, openedAt string) error 
 	}
 	if err != sql.ErrNoRows {
 		return err
+	}
+	if coin, ok := strings.CutPrefix(code, "bybit:"); ok && StableCoins[strings.ToUpper(coin)] {
+		return fmt.Errorf("счёт %q: стейблкоин — деньги на счёте bybit, своего счёта у него нет", code)
 	}
 	for _, p := range patterns {
 		if m := p.re.FindStringSubmatch(code); m != nil {

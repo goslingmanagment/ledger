@@ -36,7 +36,18 @@ var (
 	walletRe   = regexp.MustCompile(`^CinCin \(кошел[её]к\)$`)
 	cardNameRe = regexp.MustCompile(`^CinCin •(\d{4})$`)
 	arrowRe    = regexp.MustCompile(`^(.+?) → (.+)$`)
+	coinRe     = regexp.MustCompile(`^([A-Z][A-Z0-9]*) \(Bybit\)`)
 )
+
+// coinAccount reads «SOL (Bybit)» at the start of a method or a place: the coin's account (bybit:sol,
+// opened on first use; a stable coin is cash on bybit) and what follows the coin.
+func coinAccount(s string) (account, rest string, ok bool) {
+	m := coinRe.FindStringSubmatch(s)
+	if m == nil || m[1] == "P2P" { // «P2P (Bybit)» is a sale of USDT, not a coin
+		return "", "", false
+	}
+	return ledger.CoinAccount(m[1]), s[len(m[0]):], true
+}
 
 // MethodAccount maps the «Метод» column to the money account the row moves.
 func MethodAccount(method, date string) (string, error) {
@@ -51,23 +62,29 @@ func MethodAccount(method, date string) (string, error) {
 		return "card:" + cardRe.FindStringSubmatch(method)[1], nil
 	case strings.HasPrefix(method, "Зачёт"):
 		return "clearing:offset", nil
-	case strings.HasPrefix(method, "BTC (Bybit)") && strings.Contains(method, "Convert USDT"):
-		return "bybit", nil
-	case strings.HasPrefix(method, "BTC (Bybit)"):
-		return "bybit:btc", nil
 	case method == "—":
 		if date < fullLedger {
 			return "cash:unknown", nil
 		}
 		return "", fmt.Errorf("метод «—» после %s", fullLedger)
-	case strings.Contains(method, "Bybit") || strings.HasPrefix(method, "USDT") || strings.HasPrefix(method, "USDC") ||
+	case strings.HasPrefix(method, "Bybit") || strings.HasPrefix(method, "USDT") || strings.HasPrefix(method, "USDC") ||
 		strings.HasPrefix(method, "Internal Transfer") || strings.HasPrefix(method, "P2P"):
 		return "bybit", nil
 	}
-	return "", fmt.Errorf("неизвестный метод «%s»", method)
+	// A coin: «BTC (Bybit)», «SOL (Bybit) → Сервис». Its sale for USDT is the row of the USDT side.
+	if acct, rest, ok := coinAccount(method); ok {
+		if strings.Contains(rest, "Convert USDT") {
+			return "bybit", nil
+		}
+		return acct, nil
+	}
+	// Anything else that names Bybit is not guessed onto the cash account: a coin paid at its dollar value
+	// from USDT would leave both accounts wrong.
+	return "", fmt.Errorf("неизвестный метод «%s» (монета пишется «SOL (Bybit)», деньги Bybit — «USDT …», «Internal Transfer (Bybit)», «P2P (Bybit)»)", method)
 }
 
-// PlaceAccount maps a side of an internal transfer («Bybit → CinCin •1111») or a starting balance.
+// PlaceAccount maps a side of an internal transfer («Bybit → CinCin •1111») or a starting balance
+// («CinCin •1111», a coin on the exchange: «SOL (Bybit)»).
 func PlaceAccount(name string) (string, error) {
 	switch {
 	case name == "Bybit":
@@ -76,6 +93,9 @@ func PlaceAccount(name string) (string, error) {
 		return "cincin_wallet", nil
 	case cardNameRe.MatchString(name):
 		return "card:" + cardNameRe.FindStringSubmatch(name)[1], nil
+	}
+	if acct, rest, ok := coinAccount(name); ok && rest == "" {
+		return acct, nil
 	}
 	return "", fmt.Errorf("неизвестный счёт «%s»", name)
 }

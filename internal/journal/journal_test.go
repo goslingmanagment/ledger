@@ -293,3 +293,38 @@ func TestDealShareMovesToTheFirstPaidRow(t *testing.T) {
 		t.Fatalf("share after a pending row: %s", got)
 	}
 }
+
+// A coin is named «XYZ (Bybit)» in a method or a starting balance and stands on its own account; a stable
+// coin is cash. A method that names Bybit in any other way is an error, not the cash account.
+func TestCoinMethodsAndPlaces(t *testing.T) {
+	for method, want := range map[string]string{
+		"BTC (Bybit)": "bybit:btc", "XYZ (Bybit)": "bybit:xyz", "XYZ (Bybit) → Сервис": "bybit:xyz",
+		"XYZ (Bybit) → Convert USDT": "bybit", "USDT (Bybit)": "bybit", "DAI (Bybit)": "bybit", "P2P (Bybit)": "bybit",
+		"Internal Transfer (Bybit)": "bybit", "Bybit → CinCin": "bybit", "USDT TRC-20": "bybit",
+		"Earn (Bybit)": "", "Перевод с Bybit": "", "xyz (Bybit)": "",
+	} {
+		got, err := MethodAccount(method, "2026-11-01")
+		if got != want || (want == "") != (err != nil) {
+			t.Errorf("method %q: got %q, %v; want %q", method, got, err, want)
+		}
+	}
+	for place, want := range map[string]string{
+		"XYZ (Bybit)": "bybit:xyz", "USDC (Bybit)": "bybit", "Bybit": "bybit",
+		"P2P (Bybit)": "", "XYZ (Bybit) → Сервис": "", "XYZ": "",
+	} {
+		got, err := PlaceAccount(place)
+		if got != want || (want == "") != (err != nil) {
+			t.Errorf("place %q: got %q, %v; want %q", place, got, err, want)
+		}
+	}
+	es, err := Entries(Row{Num: 7, Date: "2026-11-01", Type: "transfer", Category: "Остаток на старте", Counterparty: "XYZ (Bybit)",
+		Model: "—", Amount: "5.31", Currency: "USDT", Method: "XYZ (Bybit)", Status: "paid"}, Tags{}, &Context{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := money.MustParse("5.31")
+	if len(es) != 1 || es[0].Kind != "document:opening" || len(es[0].Lines) != 2 ||
+		es[0].Lines[0].Account != "bybit:xyz" || es[0].Lines[0].Amount != v || es[0].Lines[1].Account != "opening" || es[0].Lines[1].Amount != -v {
+		t.Fatalf("a coin's starting balance: %+v", es)
+	}
+}
