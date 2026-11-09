@@ -17,7 +17,8 @@ func init() {
 	Command(Cmd{Name: "import hub-exceptions", Summary: "решения по строкам хаба из hub-exceptions.md: <файл> [--source]", Run: importHubExceptions})
 	Command(Cmd{Name: "import business", Summary: "маршруты, ставки маршрутов и параметры учёта из JSON: <файл>", Run: importBusiness})
 	Command(Cmd{Name: "hub sync", Summary: "выгрузить хаб сейчас: [--page страница]…", Run: hubSync})
-	Command(Cmd{Name: "hub status", Summary: "что хаб доказал по каждой странице и датасету", Run: hubStatus})
+	Command(Cmd{Name: "hub status", Summary: "что хаб доказал по каждой странице и датасету и по неделям фактов команды", Run: hubStatus})
+	Command(Cmd{Name: "hub team-sync", Summary: "прочитать факты смен и продаж хаба по неделям: [--from ГГГГ-ММ-ДД] [--to ГГГГ-ММ-ДД]", Run: hubTeamSync})
 	Command(Cmd{Name: "hub net", Summary: "оборот страниц месяца по зеркалу хаба: --month ГГГГ-ММ [--as-of]", Run: hubNet})
 }
 
@@ -159,7 +160,66 @@ func hubStatus(ctx context.Context, args []string) error {
 	if sts == nil {
 		sts = []hub.SyncStatus{}
 	}
-	return printJSON(map[string]any{"ok": unknown == 0 && len(sts) > 0, "unknown": unknown, "datasets": sts})
+	team, err := hub.TeamStatuses(ctx, store.RO)
+	if err != nil {
+		return err
+	}
+	return printJSON(map[string]any{"ok": unknown == 0 && len(sts) > 0, "unknown": unknown, "datasets": sts,
+		"team": hub.TeamSummary(team)})
+}
+
+func hubTeamSync(ctx context.Context, args []string) error {
+	fs := Flags("hub team-sync")
+	from := fs.String("from", "", "с какого дня (МСК); по умолчанию — 14 дней назад, как часовой джоб")
+	to := fs.String("to", "", "до какого дня, не включая (МСК); по умолчанию — сейчас")
+	quiet := fs.Bool("quiet", false, "без строк хода в stderr")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := hub.ConfigFromEnv()
+	if err != nil {
+		return err
+	}
+	store, err := OpenStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	sy := hub.NewTeamSyncer(store, cfg)
+	if !*quiet {
+		sy.Log = func(msg string) { fmt.Fprintf(os.Stderr, "%s %s\n", time.Now().In(ts.MSK).Format("15:04:05"), msg) }
+	}
+	now := sy.Now()
+	a, b := now.Add(-14*24*time.Hour), now
+	if *from != "" {
+		if a, err = ts.Parse(*from); err != nil {
+			return err
+		}
+	}
+	if *to != "" {
+		if b, err = ts.Parse(*to); err != nil {
+			return err
+		}
+	}
+	if !a.Before(b) {
+		return fmt.Errorf("--from должен быть раньше --to")
+	}
+	rep, err := sy.Run(ctx, a, b)
+	if err != nil {
+		return err
+	}
+	if hub.AfterTeam != nil {
+		if err := hub.AfterTeam(ctx, store, sy.Now()); err != nil {
+			return err
+		}
+	}
+	if err := printJSON(rep); err != nil {
+		return err
+	}
+	if n := rep.Unknown(); n > 0 {
+		return Exit{Code: 3, Msg: fmt.Sprintf("хаб не доказал %d окон из %d — «неизвестно», см. reasons", n, len(rep.Windows))}
+	}
+	return nil
 }
 
 func hubNet(ctx context.Context, args []string) error {

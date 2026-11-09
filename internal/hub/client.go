@@ -59,8 +59,11 @@ func ConfigFromEnv() (Config, error) {
 }
 
 // Refusal is a hub answer the reading rules do not accept as data, or no answer at all. The page's
-// money stays «неизвестно».
-type Refusal struct{ Msg string }
+// money stays «неизвестно». Status is the HTTP status of a refused call (0 — not an HTTP refusal).
+type Refusal struct {
+	Msg    string
+	Status int
+}
 
 func (r *Refusal) Error() string { return r.Msg }
 
@@ -217,7 +220,7 @@ func (c *Client) do(ctx context.Context, what string, dataset bool, method, path
 			}
 			continue
 		}
-		return nil, refusef("хаб %s: %s", what, cerr)
+		return nil, &Refusal{Msg: fmt.Sprintf("хаб %s: %s", what, cerr), Status: cerr.status}
 	}
 }
 

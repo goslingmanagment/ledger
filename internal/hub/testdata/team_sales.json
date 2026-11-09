@@ -1,0 +1,112 @@
+{
+ "from": "2026-11-01T21:00:00.000Z",
+ "to": "2026-11-08T21:00:00.000Z",
+ "workFrom": "2026-10-31T21:00:00.000Z",
+ "workTo": "2026-11-15T21:00:00.000Z",
+ "pages": ["alfa-1", "alfa-of"],
+ "works": [
+  {
+   "ref": "101:2026-11-05T10:00:00.000Z",
+   "userId": 101,
+   "username": "user101",
+   "role": "chatter",
+   "kind": "shift",
+   "startedAt": "2026-11-05T10:00:00.000Z",
+   "endedAt": "2026-11-05T17:00:00.000Z",
+   "ongoing": false,
+   "workedMinutes": 405,
+   "pages": [
+    {"pageLabel": "alfa-1", "messages": 120, "salesFrom": "2026-11-05T10:00:00.000Z"},
+    {"pageLabel": "alfa-of", "messages": 2, "salesFrom": null}
+   ]
+  },
+  {
+   "ref": "102:2026-11-05T09:00:00.000Z",
+   "userId": 102,
+   "username": "user102",
+   "role": "chatter",
+   "kind": "visit",
+   "startedAt": "2026-11-05T09:00:00.000Z",
+   "endedAt": "2026-11-05T09:40:00.000Z",
+   "ongoing": false,
+   "workedMinutes": 35,
+   "pages": [{"pageLabel": "alfa-1", "messages": 9, "salesFrom": "2026-11-05T09:05:00.000Z"}]
+  },
+  {
+   "ref": "201:2026-11-05T06:00:00.000Z",
+   "userId": 201,
+   "username": "lead201",
+   "role": "team_lead",
+   "kind": "shift",
+   "startedAt": "2026-11-05T06:00:00.000Z",
+   "endedAt": "2026-11-05T14:00:00.000Z",
+   "ongoing": true,
+   "workedMinutes": 470,
+   "pages": [{"pageLabel": "alfa-of", "messages": 60, "salesFrom": "2026-11-05T06:00:00.000Z"}]
+  }
+ ],
+ "sales": [
+  {
+   "transactionRef": "9001",
+   "pageLabel": "alfa-1",
+   "platform": "fansly",
+   "fanRef": "fan-11",
+   "kind": "ppv",
+   "netMills": 24000,
+   "occurredAt": "2026-11-05T11:00:00.000Z",
+   "holders": ["101:2026-11-05T10:00:00.000Z"],
+   "ppvSender": {"userId": 102, "username": "user102", "role": "chatter"},
+   "ppvSentAt": "2026-11-05T09:20:00.000Z",
+   "ppvWithoutAuthor": false,
+   "postTip": false,
+   "campaign": false,
+   "lastWriterUserId": 102,
+   "writers": [{"userId": 102, "username": "user102", "messages": 4}, {"userId": 101, "username": "user101", "messages": 1}],
+   "marks": [],
+   "resolution": null
+  },
+  {
+   "transactionRef": "9002",
+   "pageLabel": "alfa-of",
+   "platform": "onlyfans",
+   "fanRef": null,
+   "kind": "tip",
+   "netMills": 30001,
+   "occurredAt": "2026-11-05T12:00:00.000Z",
+   "holders": ["201:2026-11-05T06:00:00.000Z"],
+   "ppvSender": null,
+   "ppvSentAt": null,
+   "ppvWithoutAuthor": false,
+   "postTip": false,
+   "campaign": true,
+   "lastWriterUserId": null,
+   "writers": [],
+   "marks": [
+    {"userId": 101, "mark": "share", "shareWithUserId": 201, "amountMills": null, "confirmed": true},
+    {"userId": 201, "mark": "not_mine", "shareWithUserId": null, "amountMills": null, "confirmed": false},
+    {"userId": 102, "mark": "mine", "shareWithUserId": null, "amountMills": 10000}
+   ],
+   "resolution": [{"userId": 101, "percent": 40}, {"userId": 201, "percent": 60}]
+  },
+  {
+   "transactionRef": "9003",
+   "pageLabel": "alfa-1",
+   "platform": "fansly",
+   "fanRef": "fan-12",
+   "kind": "subscription",
+   "netMills": 8000,
+   "occurredAt": "2026-11-05T13:30:00.000Z",
+   "holders": ["101:2026-11-05T10:00:00.000Z"],
+   "ppvSender": null,
+   "ppvSentAt": null,
+   "ppvWithoutAuthor": true,
+   "postTip": false,
+   "campaign": false,
+   "lastWriterUserId": 101,
+   "writers": [{"userId": 101, "username": "user101", "messages": 2}],
+   "marks": [],
+   "resolution": null
+  }
+ ],
+ "serverNow": "2026-11-16T09:00:00.000Z"
+}
