@@ -328,7 +328,176 @@ func computeUnentered(ctx context.Context, q ledger.Querier, now time.Time) ([]u
 			}
 		}
 	}
+	return sharedSlots(ctx, q, out)
+}
+
+// sharedSlots settles the page-window money two or more people's empty cells claim at once: their cards put them
+// on the same slot of the page, and nobody entered it. Where Hub's team facts prove the week, it is theirs whose
+// shift Hub saw on the page in the window (others drop out: they did not work it); otherwise it is «неизвестно»
+// for each of them — never the same money counted twice.
+func sharedSlots(ctx context.Context, q ledger.Querier, rows []unenteredRow) ([]unenteredRow, error) {
+	type slotKey struct {
+		model, page string
+		from, to    int64
+	}
+	claims := map[slotKey][]int{}
+	for i, r := range rows {
+		if r.status == "ok" {
+			k := slotKey{r.model, r.page, r.from.Unix(), r.to.Unix()}
+			claims[k] = append(claims[k], i)
+		}
+	}
+	var shared []slotKey
+	for k, idx := range claims {
+		people := map[string]bool{}
+		for _, i := range idx {
+			people[rows[i].person] = true
+		}
+		if len(people) > 1 {
+			shared = append(shared, k)
+		}
+	}
+	if len(shared) == 0 {
+		return rows, nil
+	}
+	worked, err := provenWorks(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	drop := map[int]bool{}
+	for _, k := range shared {
+		from, to := time.Unix(k.from, 0), time.Unix(k.to, 0)
+		proven, who := worked.on(k.page, from, to)
+		var keep []int
+		if proven {
+			for _, i := range claims[k] {
+				if who[rows[i].person] {
+					keep = append(keep, i)
+				}
+			}
+		}
+		for _, i := range claims[k] {
+			switch {
+			case proven && len(keep) > 0 && !slices.Contains(keep, i):
+				drop[i] = true
+			case proven && len(keep) > 0:
+				// theirs: Hub saw their shift on the page
+			case proven:
+				rows[i].status, rows[i].net, rows[i].share = "unknown", nil, nil
+				rows[i].reason = "на этом слоте страницы по графику несколько человек, а хаб не видел смены ни у кого из них"
+			default:
+				rows[i].status, rows[i].net, rows[i].share = "unknown", nil, nil
+				rows[i].reason = "на этом слоте страницы по графику несколько человек; кто работал, хаб ещё не доказал"
+			}
+		}
+	}
+	out := rows[:0:0]
+	for i, r := range rows {
+		if !drop[i] {
+			out = append(out, r)
+		}
+	}
 	return out, nil
+}
+
+// teamWorks are the shifts and look-ins of the weeks Hub's team facts proved (hub_team_sync ok), by ledger person.
+type teamWorks struct {
+	windows []struct{ from, to time.Time }
+	works   []struct {
+		person   string
+		pages    []string
+		from, to time.Time
+	}
+}
+
+func provenWorks(ctx context.Context, q ledger.Querier) (teamWorks, error) {
+	var tw teamWorks
+	rows, err := q.QueryContext(ctx, `SELECT window_from, window_to FROM hub_team_sync WHERE status = 'ok'`)
+	if err != nil {
+		return tw, err
+	}
+	for rows.Next() {
+		var f, t string
+		if err := rows.Scan(&f, &t); err != nil {
+			rows.Close()
+			return tw, err
+		}
+		from, err1 := ts.Parse(f)
+		to, err2 := ts.Parse(t)
+		if err1 != nil || err2 != nil {
+			rows.Close()
+			return tw, fmt.Errorf("hub_team_sync %s: bad window", f)
+		}
+		tw.windows = append(tw.windows, struct{ from, to time.Time }{from, to})
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return tw, err
+	}
+	if len(tw.windows) == 0 {
+		return tw, nil
+	}
+	res, err := NewResolver(ctx, q)
+	if err != nil {
+		return tw, err
+	}
+	wr, err := q.QueryContext(ctx, `SELECT w.user_id, w.username, w.payload FROM hub_works w
+		JOIN hub_team_sync s ON s.window_from = w.window_from AND s.status = 'ok'`)
+	if err != nil {
+		return tw, err
+	}
+	defer wr.Close()
+	for wr.Next() {
+		var user int64
+		var username, payload string
+		if err := wr.Scan(&user, &username, &payload); err != nil {
+			return tw, err
+		}
+		var w hub.TeamWork
+		if err := json.Unmarshal([]byte(payload), &w); err != nil {
+			return tw, fmt.Errorf("hub_works %d: %w", user, err)
+		}
+		person, err := res.Resolve("", "hub:"+strconv.FormatInt(user, 10))
+		if err != nil {
+			if person, err = res.Resolve("", username); err != nil {
+				card, ok := res.BySlug(strings.ToLower(strings.TrimSpace(username)))
+				if !ok {
+					continue // a Hub user without a card claims no one's cell
+				}
+				person = card.Slug
+			}
+		}
+		pages := make([]string, 0, len(w.Pages))
+		for _, p := range w.Pages {
+			pages = append(pages, p.PageLabel)
+		}
+		tw.works = append(tw.works, struct {
+			person   string
+			pages    []string
+			from, to time.Time
+		}{person, pages, w.StartedAt, w.EndedAt})
+	}
+	return tw, wr.Err()
+}
+
+// on says whether Hub's facts prove the window [from, to), and whose work on the page overlaps it.
+func (tw teamWorks) on(page string, from, to time.Time) (bool, map[string]bool) {
+	proven := false
+	for _, w := range tw.windows {
+		if !from.Before(w.from) && !to.After(w.to) {
+			proven = true
+		}
+	}
+	if !proven {
+		return false, nil
+	}
+	who := map[string]bool{}
+	for _, w := range tw.works {
+		if w.from.Before(to) && from.Before(w.to) && slices.Contains(w.pages, page) {
+			who[w.person] = true
+		}
+	}
+	return true, who
 }
 
 func refreshUnentered(ctx context.Context, store *db.Store, now time.Time) (int, error) {
