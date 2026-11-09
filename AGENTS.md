@@ -15,6 +15,9 @@
   Лимит запросов к датасетам (`hub_rpm`) у хаба на адрес: `hub sync` и `month.py` с одного мака не запускать одновременно.
   Факты смен и продаж (выпуск 2, ключу нужны `read:team` и `read:money`): джоб `hub-team` раз в час, вручную —
   `ledger hub team-sync [--from ГГГГ-ММ-ДД] [--to …]`; окна по неделям МСК — в `ledger hub status`, поле `team`.
+  Начисления из фактов в тени (ничего не проводят) пересчитываются после каждого чтения: `fact_homes`, `fact_accruals`,
+  `v_accrual_diff`; было — стало — `ledger accruals diff [--week понедельник]` (API `GET /v1/accruals/diff?week=`).
+  Человек хаба — по `people.aliases` (имя хаба или `hub:<id>`), ставка — шапка его вкладки модели («Ставка %», «Фикс/см»).
 - Bybit локально: `LEDGER_BYBIT_API_KEY=… LEDGER_BYBIT_API_SECRET=… ledger bybit fetch --since ГГГГ-ММ-ДД`; статус прогона и
   Funding — `ledger bybit status`, без строки журнала — `ledger bybit unlinked`. Перенос из `ledger-sync`: `ledger rules import <config>`,
   затем `ledger import bybit-state <bybit.sqlite>`; после первого прогона сбора, тогда у событий истории есть сырая запись Bybit.
