@@ -25,7 +25,7 @@ import (
 	"github.com/goslingmanagment/ledger/internal/ts"
 )
 
-// Synthetic agency: chatters Альфа (alfa, Hub user101) and Браво (bravo, Hub user 102 by hub:102), an unknown Hub
+// Synthetic agency: chatters Альфа (alfa, Hub «Alfa» by the card's code) and Браво (bravo, Hub user 102 by hub:102), an unknown Hub
 // user 103; model Alpha with pages page-a and page-b; the week of Monday 2026-11-09.
 
 func at(s string) time.Time {
@@ -55,7 +55,7 @@ func open(t *testing.T) (*db.Store, context.Context) {
 		exec(t, s, `INSERT INTO hub_pages(page_label, platform, model_slug, model_name, seen_at) VALUES (?, 'fansly', 'alpha-hub', 'Alpha', '2026-11-01')`, p)
 	}
 	if err := payroll.PutPeople(ctx, s.RW, []payroll.Person{
-		{Slug: "alfa", Name: "Альфа", Aliases: []string{"user101"}, Status: "active", Models: []string{"Alpha"}},
+		{Slug: "alfa", Name: "Альфа", Aliases: []string{}, Status: "active", Models: []string{"Alpha"}},
 		{Slug: "bravo", Name: "Браво", Aliases: []string{"hub:102"}, Status: "active", Models: []string{"Alpha"}},
 	}, "test", at("2026-11-01")); err != nil {
 		t.Fatal(err)
@@ -150,10 +150,18 @@ func sheets(t *testing.T, s *db.Store, ctx context.Context, tabs map[string][][]
 
 // ---- the facts ----
 
+// username is the Hub login: 101 has the card's code in another case, the others a login no card names.
+func username(user int64) string {
+	if user == 101 {
+		return "Alfa"
+	}
+	return fmt.Sprintf("user%d", user)
+}
+
 func work(user int64, kind, from, to string, pages ...string) hub.TeamWork {
 	a, b := at(from), at(to)
 	w := hub.TeamWork{Ref: fmt.Sprintf("%d:%s", user, a.UTC().Format("2006-01-02T15:04:05.000Z")), UserID: user,
-		Username: fmt.Sprintf("user%d", user), Role: split.RoleChatter, Kind: kind, StartedAt: a, EndedAt: b,
+		Username: username(user), Role: split.RoleChatter, Kind: kind, StartedAt: a, EndedAt: b,
 		WorkedMinutes: int(b.Sub(a).Minutes()), Pages: []hub.TeamWorkPage{}}
 	for _, p := range pages {
 		from := a
