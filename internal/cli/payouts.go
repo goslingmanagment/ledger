@@ -9,7 +9,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/goslingmanagment/ledger/internal/money"
 	"github.com/goslingmanagment/ledger/internal/payroll"
 	"github.com/goslingmanagment/ledger/internal/ts"
 )
@@ -59,8 +58,6 @@ func payouts(ctx context.Context, args []string) error {
 	printPayouts(out, ans, *person != "")
 	return out.Flush()
 }
-
-func usd(v int64) string { return money.Micros(v).Cents() }
 
 // printPayouts renders the window's pay per person; with one person, also the days and what is unpaid.
 func printPayouts(out *bufio.Writer, ans payroll.PayoutsAnswer, detail bool) {
