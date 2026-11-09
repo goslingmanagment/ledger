@@ -14,6 +14,8 @@
 //     it: the look-in whose person last wrote, else Nobody.
 //  4. A sale before Rules.Since, or one that by the old rule is the money of a shift of a Moscow day before it (the
 //     night of 1 November past midnight), is BeforeRule: the weeks before the rule do not move by a cent.
+//  5. A Nobody's sale someone claimed, by the owner's word (Sale.ClaimedBy, ledger's sale_claims), is the claimer's
+//     whole, on no work (the owner, 2026-11-09, decision 3). A claim moves no other home.
 //
 // Pure: no database and no clock, `now` is an argument. Money is Hub's mills (1/1000 USD), split as Hub splits it.
 package split
@@ -78,6 +80,7 @@ const (
 	ReasonMarksDisagree      = "marks_disagree" // the marks are a dispute (`judgeMarks`): the owner splits it
 	ReasonMarks              = "marks"          // the chatters' confirmed marks agree
 	ReasonOwnerSplit         = "owner_split"    // the owner's split of a disputed sale
+	ReasonOwnerClaim         = "owner_claim"    // a nobody's sale the owner gave the person who claimed it
 )
 
 // Rules are the rule's dates and wait; Default is the seeded split_rules rows'.
@@ -132,6 +135,8 @@ type Sale struct {
 	Marks []Mark `json:"marks"`
 	// Resolution is the owner's split of a disputed sale; nil — none.
 	Resolution []OwnerShare `json:"resolution"`
+	// ClaimedBy is the user the owner gives the sale if it is nobody's (ledger's sale_claims, not Hub's); nil — none.
+	ClaimedBy *int64 `json:"-"`
 }
 
 // Person is the PPV's sender with their role now.
@@ -220,6 +225,15 @@ func indexOf(works []Work) index {
 }
 
 func (r Rules) home(sale Sale, ix index, now time.Time) Home {
+	h := r.ruleHome(sale, ix, now)
+	if h.Kind == Nobody && sale.ClaimedBy != nil {
+		return Home{Kind: Shift, Reason: ReasonOwnerClaim, Shares: []Share{{UserID: *sale.ClaimedBy, Percent: 100, Mills: sale.NetMills}}}
+	}
+	return h
+}
+
+// ruleHome is the home by the rule alone, the claims aside.
+func (r Rules) ruleHome(sale Sale, ix index, now time.Time) Home {
 	at := sale.OccurredAt
 	if at.Before(r.Since) {
 		return Home{Kind: BeforeRule, Reason: ReasonSaleBeforeRule}

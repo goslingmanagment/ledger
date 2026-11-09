@@ -73,7 +73,9 @@ type PersonDiff struct {
 	Days           []DayDiff  `json:"days"`
 	Notes          []string   `json:"notes,omitempty"`
 	Sales          []SaleLine `json:"sales"` // of the days that differ
-	terms          map[key]rate
+	// Claimed are the nobody's sales of the week the owner gave the person by a claim (sale_claims), every one.
+	Claimed []SaleLine `json:"claimed,omitempty"`
+	terms   map[key]rate
 }
 
 type key struct {
@@ -108,6 +110,7 @@ type SaleLine struct {
 	AmountMicros *int64 `json:"amountMicros,omitempty"`
 	To           string `json:"to,omitempty"` // where it went
 	Reason       string `json:"reason"`
+	Note         string `json:"note,omitempty"` // the owner's word of a claimed sale
 }
 
 // Group is the sales of one kind of home in the week.
@@ -191,11 +194,16 @@ func WeekDiff(ctx context.Context, q ledger.Querier, week string) (Diff, error) 
 	if err != nil {
 		return d, err
 	}
+	claims, err := loadClaims(ctx, q)
+	if err != nil {
+		return d, err
+	}
 	for i := range d.People {
 		if err := personDays(ctx, q, &d.People[i], week, d.Until, known); err != nil {
 			return d, err
 		}
 		p := &d.People[i]
+		p.Claimed = claimedOf(p, week, d.Until, homes, claims)
 		if !known || p.DiffMicros == nil || !differs(*p.DiffMicros) {
 			continue
 		}
@@ -383,6 +391,25 @@ func salesOf(p *PersonDiff, day string, homes []homeRow, names map[string]string
 	return out
 }
 
+// claimedOf are the person's claimed sales of the week, with the amount at their rate and the owner's word.
+func claimedOf(p *PersonDiff, week, until string, homes []homeRow, claims map[string]claim) []SaleLine {
+	var out []SaleLine
+	for _, h := range homes {
+		if h.person != p.Person || h.reason != split.ReasonOwnerClaim || h.day < week || h.day > until {
+			continue
+		}
+		var amount *int64
+		if r := p.terms[key{h.user, h.model, h.page, h.day}]; r.v != nil {
+			v := int64(money.FromFloat(float64(float64(h.share)/money.Scale) * *r.v))
+			amount = &v
+		}
+		l := line("+", h, amount, "")
+		l.Note = claims[h.ref].note
+		out = append(out, l)
+	}
+	return out
+}
+
 func whereTo(h homeRow, names map[string]string) string {
 	switch h.home {
 	case split.Shift, split.Visit:
@@ -443,15 +470,25 @@ var reasonText = map[string]string{
 	split.ReasonMarksDisagree:      "метки чаттеров не сходятся",
 	split.ReasonMarks:              "по меткам чаттеров",
 	split.ReasonOwnerSplit:         "решение владельца",
+	split.ReasonOwnerClaim:         "ничья, заявка по слову владельца",
 }
+
+const homeColumns = `SELECT transaction_ref, seq, window_from, occurred_at, page_label, model, sale_kind, net_micros, home,
+	reason, COALESCE(pot, ''), COALESCE(waits_until, ''), COALESCE(hub_user_id, 0), COALESCE(username, ''), COALESCE(person, ''),
+	COALESCE(work_ref, ''), share_micros, day, holders FROM fact_homes`
 
 // loadHomes reads fact_homes of the sales whose days or holders' days may fall in [from, to].
 func loadHomes(ctx context.Context, q ledger.Querier, from, to string) ([]homeRow, error) {
-	rows, err := q.QueryContext(ctx, `SELECT transaction_ref, seq, window_from, occurred_at, page_label, model, sale_kind, net_micros, home,
-		reason, COALESCE(pot, ''), COALESCE(waits_until, ''), COALESCE(hub_user_id, 0), COALESCE(username, ''), COALESCE(person, ''),
-		COALESCE(work_ref, ''), share_micros, day, holders
-		FROM fact_homes WHERE day BETWEEN ? AND ? OR substr(occurred_at, 1, 10) BETWEEN ? AND ? ORDER BY occurred_at, transaction_ref, seq`,
-		from, to, from, to)
+	return scanHomes(q.QueryContext(ctx, homeColumns+` WHERE day BETWEEN ? AND ? OR substr(occurred_at, 1, 10) BETWEEN ? AND ?
+		ORDER BY occurred_at, transaction_ref, seq`, from, to, from, to))
+}
+
+// saleHomes reads the rows of one sale.
+func saleHomes(ctx context.Context, q ledger.Querier, ref string) ([]homeRow, error) {
+	return scanHomes(q.QueryContext(ctx, homeColumns+` WHERE transaction_ref = ? ORDER BY seq`, ref))
+}
+
+func scanHomes(rows *sql.Rows, err error) ([]homeRow, error) {
 	if err != nil {
 		return nil, err
 	}
