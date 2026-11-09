@@ -297,6 +297,16 @@ func NewResolver(ctx context.Context, q ledger.Querier) (*Resolver, error) {
 	return r, nil
 }
 
+// BySlug is the card with this code, if any.
+func (r *Resolver) BySlug(slug string) (Person, bool) {
+	for _, p := range r.people {
+		if p.Slug == slug {
+			return p, true
+		}
+	}
+	return Person{}, false
+}
+
 var parenthetical = regexp.MustCompile(`\s*\([^()]*\)\s*$`)
 
 // Resolve maps (model, name) to a slug. A name matches a card by its title, the title without a trailing

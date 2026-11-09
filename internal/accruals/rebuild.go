@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/goslingmanagment/ledger/internal/db"
@@ -654,7 +655,9 @@ func newPeople(ctx context.Context, q ledger.Querier) (*people, error) {
 }
 
 // person is the card of a Hub user: one whose aliases name `hub:<id>`, else their Hub username (the payroll Resolver:
-// title, alias, tab_aliases; the model decides between two cards of one name). "" and why — nobody to credit.
+// title, alias, tab_aliases; the model decides between two cards of one name), else the card whose code is the
+// username, case aside (Hub's «Grisha» is the card grisha: the agency's logins are the cards' codes). "" and why —
+// nobody to credit.
 func (p *people) person(user int64, username, model string) (string, string) {
 	key := strconv.FormatInt(user, 10) + "\x00" + username + "\x00" + model
 	if v, ok := p.cache[key]; ok {
@@ -664,8 +667,12 @@ func (p *people) person(user int64, username, model string) (string, string) {
 	reason := ""
 	if err != nil {
 		if slug, err = p.res.Resolve(model, username); err != nil {
-			slug, reason = "", "не сопоставлен с people: "+err.Error()+"; добавьте в aliases карточки имя хаба или hub:"+
-				strconv.FormatInt(user, 10)
+			if card, ok := p.res.BySlug(strings.ToLower(strings.TrimSpace(username))); ok {
+				slug = card.Slug
+			} else {
+				slug, reason = "", "не сопоставлен с people: "+err.Error()+"; добавьте в aliases карточки имя хаба или hub:"+
+					strconv.FormatInt(user, 10)
+			}
 		}
 	}
 	p.cache[key] = [2]string{slug, reason}
