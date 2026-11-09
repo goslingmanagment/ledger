@@ -29,8 +29,8 @@ const (
 	ScopeDecide  = "decide"  // the owner's decisions from the brief: openclaw-main only
 	ScopeCollect = "collect" // collectors on the Mac send events
 	ScopeImport  = "import"  // one-off imports
-	// ScopePayouts opens GET /v1/payouts and nothing else: Hub's server reads the chatters' pay with it
-	// and sees no owner draws, no other expenses, no cash and no SQL.
+	// ScopePayouts opens GET /v1/payouts and GET /v1/payouts/prepare and nothing else: Hub's server reads
+	// the chatters' pay with it and sees no owner draws, no other expenses, no cash and no SQL.
 	ScopePayouts = "payouts"
 )
 

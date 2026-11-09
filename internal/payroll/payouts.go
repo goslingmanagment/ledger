@@ -237,6 +237,22 @@ type sheetDay struct {
 	pages  []PayoutPage
 }
 
+// sheetPages reads payroll_days.pages: the cells that hold a number, by page.
+func sheetPages(pages string) ([]PayoutPage, error) {
+	cells := map[string]*float64{}
+	if err := json.Unmarshal([]byte(pages), &cells); err != nil {
+		return nil, err
+	}
+	var out []PayoutPage
+	for page, v := range cells {
+		if v != nil {
+			out = append(out, PayoutPage{Page: page, RevenueMicros: int64(money.FromFloat(*v))})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Page < out[j].Page })
+	return out, nil
+}
+
 func payoutDays(ctx context.Context, q ledger.Querier, from, to, accrualFrom string, people map[string]*PayoutPerson) error {
 	rows, err := q.QueryContext(ctx, `SELECT model, name, person, date, amount, worked, pages FROM payroll_days
 		WHERE person IS NOT NULL AND date >= ? AND date <= ?`, from, to)
@@ -253,17 +269,10 @@ func payoutDays(ctx context.Context, q ledger.Querier, from, to, accrualFrom str
 			return err
 		}
 		d.amount = money.FromFloat(amount)
-		cells := map[string]*float64{}
-		if err := json.Unmarshal([]byte(pages), &cells); err != nil {
+		if d.pages, err = sheetPages(pages); err != nil {
 			rows.Close()
 			return fmt.Errorf("payroll_days %s/%s %s: pages: %w", model, name, date, err)
 		}
-		for page, v := range cells {
-			if v != nil {
-				d.pages = append(d.pages, PayoutPage{Page: page, RevenueMicros: int64(money.FromFloat(*v))})
-			}
-		}
-		sort.Slice(d.pages, func(i, j int) bool { return d.pages[i].Page < d.pages[j].Page })
 		sheet[model+"/"+name+":"+date] = &d
 	}
 	if err := rows.Err(); err != nil {
