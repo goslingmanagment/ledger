@@ -35,7 +35,8 @@
   `cli.Command` в `init`); `internal/server` — HTTP и планировщик (`server.Register`, `server.Every`);
   `internal/db` — SQLite (modernc, без cgo) и миграции `internal/db/migrations/NNNN_*.sql`, только вперёд;
   `internal/auth` — ключи агентов и `auth.Require(s, scope, h)` для маршрутов; `internal/client` — HTTP-клиент CLI;
-  `internal/agentsql` — `POST /v1/sql` и `GET /v1/schema`.
+  `internal/agentsql` — `POST /v1/sql` и `GET /v1/schema`; `internal/split` — чья продажа хаба (порт hub `sale-rule.ts`),
+  чистая логика: дата и ожидание в `split.Default` и в строках `split_rules` меняются вместе.
 - Новая таблица или колонка получает русское описание в `schema_docs` той же миграцией: агенты пишут запросы по `ledger schema`.
 - `internal/payroll/parse.go` — порт `payroll.py` до бита: свой `pySum` (встроенный `sum()` Питона считает с компенсацией) и `float64(x*y)` перед сложением
   (на arm64 Go иначе склеит округление). Эталон — `internal/payroll/testdata/golden.json`, генератор рядом.
