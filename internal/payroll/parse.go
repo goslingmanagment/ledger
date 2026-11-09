@@ -158,6 +158,18 @@ func truthy(c Cell) bool {
 	return ok && n.v != 0
 }
 
+// headerTerms are the pay terms of a tab's header: «Ставка %» in M2 (a share of the revenue; nil — none) and
+// «Фикс/см» in N2 (a fix per shift; 0 — none).
+func headerTerms(first, second []Cell) (rate *float64, shiftFix float64) {
+	if r, ok := asNum(at(second, 12)); ok && cellEq(at(first, 12), "Ставка %") {
+		rate = &r.v
+	}
+	if s, ok := asNum(at(second, 13)); ok && strings.HasPrefix(pyStr(at(first, 13)), "Фикс/см") {
+		shiftFix = s.v
+	}
+	return rate, shiftFix
+}
+
 // ParseTab is payroll.py parse_tab: the tab from A1 with UNFORMATTED_VALUE cells; today is the calendar
 // date of the given time in its own location. It refuses (*Fail)
 // on a date that is not a serial number, weeks out of order, days after today, a copied week, a «З/П»
@@ -184,14 +196,7 @@ func ParseTab(rows [][]Cell, where string, today time.Time) (*Tab, error) {
 	if !paidOK {
 		return nil, failf("%s: в шапке нет числа «Выплачено:» — формат вкладки сменился", where)
 	}
-	var rate *float64
-	if r, ok := asNum(at(second, 12)); ok && cellEq(at(first, 12), "Ставка %") {
-		rate = &r.v
-	}
-	shift := 0.0
-	if s, ok := asNum(at(second, 13)); ok && strings.HasPrefix(pyStr(at(first, 13)), "Фикс/см") {
-		shift = s.v
-	}
+	rate, shift := headerTerms(first, second)
 
 	tab := &Tab{Days: map[string]float64{}, Worked: []string{}, KV: kv.v, Paid: paid.v, Notes: []string{}, Blocks: []Block{}, Rate: rate}
 	var errs []string
