@@ -88,6 +88,17 @@ type PayoutPerson struct {
 	ToPayMicros      *int64      `json:"toPayMicros"`      // «К выплате» of all the person's tabs; null — unknown
 	OldestUnpaidDate *string     `json:"oldestUnpaidDate"` // now
 	UnpaidDays       []UnpaidDay `json:"unpaidDays"`       // now, oldest first
+	// Unentered is «не занесено» now (v_payables): the tab's empty days on which Hub shows money in the
+	// person's scheduled shift — pay the sheet has not got yet, so not in the debt.
+	Unentered PayoutUnentered `json:"unentered"`
+}
+
+// PayoutUnentered is «не занесено» of a person: days, the share estimated at the tab's rate, and the days Hub
+// could not prove (unknown, not zero).
+type PayoutUnentered struct {
+	Days        int   `json:"days"`
+	ShareMicros int64 `json:"shareMicros"`
+	Unknown     int   `json:"unknown"`
 }
 
 // PayoutChecks says how fresh the inputs are.
@@ -179,7 +190,8 @@ func ReadPayouts(ctx context.Context, db *sql.DB, from, to string, now time.Time
 // payoutPeople reads the people with at least one payout tab and their debt from v_payables. A model's
 // share and anybody without a tab (the owner among them) stay out.
 func payoutPeople(ctx context.Context, q ledger.Querier) ([]PayoutPerson, error) {
-	rows, err := q.QueryContext(ctx, `SELECT p.slug, p.name, p.aliases, p.status, v.balance_micros, v.to_pay, v.oldest_unpaid
+	rows, err := q.QueryContext(ctx, `SELECT p.slug, p.name, p.aliases, p.status, v.balance_micros, v.to_pay, v.oldest_unpaid,
+		v.unentered_days, v.unentered_share, v.unentered_unknown
 		FROM people p JOIN v_payables v ON v.person = p.slug
 		WHERE EXISTS (SELECT 1 FROM payroll_tabs t WHERE t.person = p.slug)
 		ORDER BY p.slug`)
@@ -193,7 +205,9 @@ func payoutPeople(ctx context.Context, q ledger.Querier) ([]PayoutPerson, error)
 		var aliases string
 		var toPay sql.NullFloat64
 		var oldest sql.NullString
-		if err := rows.Scan(&p.Slug, &p.Name, &aliases, &p.Status, &p.BalanceMicros, &toPay, &oldest); err != nil {
+		var share float64
+		if err := rows.Scan(&p.Slug, &p.Name, &aliases, &p.Status, &p.BalanceMicros, &toPay, &oldest,
+			&p.Unentered.Days, &share, &p.Unentered.Unknown); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(aliases), &p.Aliases); err != nil {
@@ -209,6 +223,7 @@ func payoutPeople(ctx context.Context, q ledger.Querier) ([]PayoutPerson, error)
 		if oldest.Valid {
 			p.OldestUnpaidDate = &oldest.String
 		}
+		p.Unentered.ShareMicros = int64(money.FromFloat(share))
 		out = append(out, p)
 	}
 	return out, rows.Err()
