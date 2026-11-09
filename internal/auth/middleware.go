@@ -19,8 +19,18 @@ type ctxKey struct{}
 // carries scope: 401 without a key or with an unknown or revoked one, 403 without the scope.
 // h finds the caller with FromContext or KeyName.
 func Require(s *server.Server, scope string, h http.Handler) http.Handler {
-	if !slices.Contains(Scopes, scope) {
-		panic("auth.Require: unknown scope " + scope)
+	return RequireAny(s, []string{scope}, h)
+}
+
+// RequireAny is Require for a route open to several scopes: a key with any one of them passes.
+func RequireAny(s *server.Server, scopes []string, h http.Handler) http.Handler {
+	if len(scopes) == 0 {
+		panic("auth.Require: no scope")
+	}
+	for _, scope := range scopes {
+		if !slices.Contains(Scopes, scope) {
+			panic("auth.Require: unknown scope " + scope)
+		}
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token, ok := bearer(r.Header.Get("Authorization"))
@@ -41,8 +51,8 @@ func Require(s *server.Server, scope string, h http.Handler) http.Handler {
 			server.WriteError(w, http.StatusServiceUnavailable, "ключ не проверить: база недоступна")
 			return
 		}
-		if !k.Has(scope) {
-			server.WriteError(w, http.StatusForbidden, fmt.Sprintf("у ключа %s нет права %s", k.Name, scope))
+		if !slices.ContainsFunc(scopes, k.Has) {
+			server.WriteError(w, http.StatusForbidden, fmt.Sprintf("у ключа %s нет права %s", k.Name, strings.Join(scopes, " или ")))
 			return
 		}
 		tctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 2*time.Second)

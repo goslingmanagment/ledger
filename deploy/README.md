@@ -50,6 +50,7 @@ bash deploy/compose.sh exec -T app ledger keys create bobr --scope read,propose 
 bash deploy/compose.sh exec -T app ledger keys list
 bash deploy/compose.sh exec -T app ledger keys revoke bobr                   # действует сразу
 bash deploy/compose.sh exec -T app ledger keys create bobr --scope read,propose --replace   # новый вместо прежнего
+bash deploy/compose.sh exec -T app ledger keys create hub-payouts --scope payouts   # серверу хаба: только GET /v1/payouts
 ```
 
 Агенту — `~/.config/ledger/credentials` (chmod 600): `LEDGER_URL=https://ledger.gosling-agency.ru` и

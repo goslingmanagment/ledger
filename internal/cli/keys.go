@@ -13,7 +13,7 @@ import (
 
 func init() {
 	Command(Cmd{Name: "keys create", Run: keysCreate,
-		Summary: "выпустить ключ агента (на сервере): ledger keys create <имя> --scope read[,propose,decide,collect,import] [--replace]"})
+		Summary: "выпустить ключ агента (на сервере): ledger keys create <имя> --scope read[,propose,decide,collect,import] | payouts [--replace]"})
 	Command(Cmd{Name: "keys list", Summary: "ключи агентов: права, когда выпущены, использованы, отозваны [--json]", Run: keysList})
 	Command(Cmd{Name: "keys revoke", Summary: "отозвать ключ агента: ledger keys revoke <имя>", Run: keysRevoke})
 }
