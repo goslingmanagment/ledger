@@ -18,6 +18,9 @@
   Начисления из фактов в тени (ничего не проводят) пересчитываются после каждого чтения: `fact_homes`, `fact_accruals`,
   `v_accrual_diff`; было — стало — `ledger accruals diff [--week понедельник]` (API `GET /v1/accruals/diff?week=`).
   Человек хаба — по `people.aliases` (имя хаба или `hub:<id>`), ставка — шапка его вкладки модели («Ставка %», «Фикс/см»).
+  Ничья продажа, которую человек заявил, по слову владельца: `ledger accruals claim <transactionRef> --person <код> --note "…"`,
+  снять — `ledger accruals unclaim <transactionRef> --note "…"` (ключ с правом decide или рядом с базой); не ничью продажу отказывает,
+  действующие заявки и учтены ли — `v_sale_claims`.
 - Bybit локально: `LEDGER_BYBIT_API_KEY=… LEDGER_BYBIT_API_SECRET=… ledger bybit fetch --since ГГГГ-ММ-ДД`; статус прогона и
   Funding — `ledger bybit status`, без строки журнала — `ledger bybit unlinked`. Перенос из `ledger-sync`: `ledger rules import <config>`,
   затем `ledger import bybit-state <bybit.sqlite>`; после первого прогона сбора, тогда у событий истории есть сырая запись Bybit.

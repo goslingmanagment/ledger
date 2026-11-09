@@ -45,6 +45,17 @@ type Report struct {
 	Rewritten int      `json:"rewritten"`
 	Unknown   []string `json:"unknownWeeks,omitempty"`
 	Unmapped  []string `json:"unmapped,omitempty"` // Hub users no card names
+	// Claims is how many of the owner's claims (sale_claims) the facts gave their person; ClaimsIgnored — the rest, why.
+	Claims        int            `json:"claims"`
+	ClaimsIgnored []IgnoredClaim `json:"claimsIgnored,omitempty"`
+}
+
+// IgnoredClaim is a claim the facts did not honour: the sale is not nobody's, not in the proven facts, or the person
+// has no Hub user to credit.
+type IgnoredClaim struct {
+	Ref    string `json:"transactionRef"`
+	Person string `json:"person"`
+	Why    string `json:"why"`
 }
 
 type window struct {
@@ -94,14 +105,23 @@ type accrualRow struct {
 }
 
 // Rebuild recomputes fact_homes, fact_accruals and fact_weeks from the mirror of the team's facts, in one
-// transaction. Idempotent; it runs after every read of the facts.
+// transaction. Idempotent; it runs after every read of the facts and every claim.
 func Rebuild(ctx context.Context, store *db.Store, now time.Time) (Report, error) {
-	var rep Report
 	tx, err := store.RW.BeginTx(ctx, nil)
+	if err != nil {
+		return Report{}, err
+	}
+	defer tx.Rollback()
+	rep, err := rebuildTx(ctx, tx, now)
 	if err != nil {
 		return rep, err
 	}
-	defer tx.Rollback()
+	return rep, tx.Commit()
+}
+
+// rebuildTx is Rebuild inside the caller's transaction.
+func rebuildTx(ctx context.Context, tx *sql.Tx, now time.Time) (Report, error) {
+	var rep Report
 	rules := split.Default
 	windows, err := loadWindows(ctx, tx)
 	if err != nil {
@@ -120,6 +140,10 @@ func Rebuild(ctx context.Context, store *db.Store, now time.Time) (Report, error
 		return rep, err
 	}
 	who, err := newPeople(ctx, tx)
+	if err != nil {
+		return rep, err
+	}
+	claims, err := loadClaims(ctx, tx)
 	if err != nil {
 		return rep, err
 	}
@@ -145,6 +169,7 @@ func Rebuild(ctx context.Context, store *db.Store, now time.Time) (Report, error
 	}
 
 	var homes []homeRow
+	claimed := map[string][]homeRow{} // the rows of each claimed sale of the proven windows
 	for _, w := range windows {
 		if w.status != "ok" {
 			continue
@@ -163,12 +188,24 @@ func Rebuild(ctx context.Context, store *db.Store, now time.Time) (Report, error
 		splitSales := make([]split.Sale, len(list))
 		for i, s := range list {
 			splitSales[i] = s.Split()
+			if c, ok := claims[s.TransactionRef]; ok {
+				if user, ok := who.userOf(c.person, models[s.PageLabel], usernames); ok {
+					splitSales[i].ClaimedBy = &user
+				}
+			}
 		}
 		rep.Sales += len(list)
 		// The works are known up to Hub's workTo: a PPV whose wait runs past it still waits.
 		for i, h := range rules.HomesOf(splitSales, splitWorks, w.workTo) {
-			homes = append(homes, homesOf(list[i], h, w.key, models[list[i].PageLabel], byRef, usernames, who)...)
+			rows := homesOf(list[i], h, w.key, models[list[i].PageLabel], byRef, usernames, who)
+			homes = append(homes, rows...)
+			if _, ok := claims[list[i].TransactionRef]; ok {
+				claimed[list[i].TransactionRef] = rows
+			}
 		}
+	}
+	if err := checkClaims(ctx, tx, claims, claimed, models, who, &rep); err != nil {
+		return rep, err
 	}
 
 	acc := map[accrualKey]*accrualRow{}
@@ -248,10 +285,8 @@ func Rebuild(ctx context.Context, store *db.Store, now time.Time) (Report, error
 		}
 	}
 	rep.Weeks = len(weeks)
-	if rep.Rewritten, err = write(ctx, tx, homes, acc, weeks, now); err != nil {
-		return rep, err
-	}
-	return rep, tx.Commit()
+	rep.Rewritten, err = write(ctx, tx, homes, acc, weeks, now)
+	return rep, err
 }
 
 // homesOf turns a sale's home into rows: a share each, a «моё» with an own amount below the net leaves the rest
