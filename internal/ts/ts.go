@@ -28,6 +28,13 @@ func Date(t time.Time) string { return t.In(MSK).Format(DateLayout) }
 // Month renders the MSK month of t (ГГГГ-ММ).
 func Month(t time.Time) string { return t.In(MSK).Format("2006-01") }
 
+// WeekStart is Monday 00:00 MSK of the week holding t.
+func WeekStart(t time.Time) time.Time {
+	m := t.In(MSK)
+	day := time.Date(m.Year(), m.Month(), m.Day(), 0, 0, 0, 0, MSK)
+	return day.AddDate(0, 0, -((int(day.Weekday()) + 6) % 7))
+}
+
 // Now is the current time; tests replace it.
 var Now = time.Now
 

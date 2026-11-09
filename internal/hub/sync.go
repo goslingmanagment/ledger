@@ -215,8 +215,12 @@ const leaseFor = time.Hour
 // lease lets one sync run at a time, across processes: a sync reads the mirror before its transaction, so
 // a slower run applying its answer after a newer one would write older figures over newer ones.
 func (s *Syncer) lease(ctx context.Context, now time.Time) (func(), error) {
-	const name = "hub:sync:lease"
-	err := s.write(ctx, func(tx *sql.Tx) error {
+	return takeLease(ctx, s.Store, "hub:sync:lease", "идёт другая выгрузка хаба", now)
+}
+
+// takeLease holds the cursor `name` for leaseFor; a holder younger than that refuses the run with `busy`.
+func takeLease(ctx context.Context, store *db.Store, name, busy string, now time.Time) (func(), error) {
+	err := writeTx(ctx, store, func(tx *sql.Tx) error {
 		var held string
 		switch err := tx.QueryRowContext(ctx, `SELECT value FROM cursors WHERE name = ?`, name).Scan(&held); {
 		case err == sql.ErrNoRows:
@@ -224,7 +228,7 @@ func (s *Syncer) lease(ctx context.Context, now time.Time) (func(), error) {
 			return err
 		default:
 			if t, err := ts.Parse(held); err == nil && now.Before(t.Add(leaseFor)) {
-				return refusef("идёт другая выгрузка хаба, начата %s", held)
+				return refusef("%s, начата %s", busy, held)
 			}
 		}
 		_, err := tx.ExecContext(ctx, `INSERT INTO cursors(name, value, updated_at) VALUES (?, ?, ?)
@@ -238,7 +242,7 @@ func (s *Syncer) lease(ctx context.Context, now time.Time) (func(), error) {
 		// The job's context may be gone by now; the lease must still go.
 		lctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_ = s.write(lctx, func(tx *sql.Tx) error {
+		_ = writeTx(lctx, store, func(tx *sql.Tx) error {
 			_, err := tx.ExecContext(lctx, `DELETE FROM cursors WHERE name = ?`, name)
 			return err
 		})
@@ -246,7 +250,12 @@ func (s *Syncer) lease(ctx context.Context, now time.Time) (func(), error) {
 }
 
 func (s *Syncer) write(ctx context.Context, fn func(*sql.Tx) error) error {
-	tx, err := s.Store.RW.BeginTx(ctx, nil)
+	return writeTx(ctx, s.Store, fn)
+}
+
+// writeTx runs fn in one write transaction.
+func writeTx(ctx context.Context, store *db.Store, fn func(*sql.Tx) error) error {
+	tx, err := store.RW.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}

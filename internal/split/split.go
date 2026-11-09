@@ -354,6 +354,10 @@ func kindOf(w *Work) string {
 // beforeRule: work of a Moscow day before the rule's first day keeps what the old rule gives it, takes nothing new.
 func (r Rules) beforeRule(w Work) bool { return dayOfWork(w) < ts.Date(r.Since) }
 
+// DayOfWork is the Moscow day a piece of work is paid on, Hub's `dayOfWork` (chatter-shifts.ts): the day holding most
+// of it, the day of its middle instant (a tie: the day it began), as the payout sheet dates it.
+func DayOfWork(w Work) string { return dayOfWork(w) }
+
 // dayOfWork is the Moscow day holding most of the work: the day of its middle instant (a tie: the day it began).
 func dayOfWork(w Work) string {
 	middle := (w.StartedAt.UnixMilli() + w.EndedAt.UnixMilli() - 1) / 2

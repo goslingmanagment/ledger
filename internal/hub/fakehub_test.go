@@ -35,6 +35,8 @@ type fakeHub struct {
 	drift  map[string]int              // page → next summaries that count one row more
 	bodies map[string][]map[string]any // "page/dataset" → request bodies
 	calls  int
+
+	team fakeTeam // agentTeamSales (team_test.go)
 }
 
 type fakeRow struct {
@@ -135,6 +137,10 @@ func (f *fakeHub) serve(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Authorization") != "Bearer test-key" {
 		w.WriteHeader(401)
 		w.Write([]byte(`{"error":"agent_key_invalid","message":"bad key"}`))
+		return
+	}
+	if r.Method == http.MethodPost && r.URL.Path == TeamPath {
+		f.serveTeam(w, r)
 		return
 	}
 	if r.Method == http.MethodGet && r.URL.Path == "/api/v1/agent/capabilities" {
