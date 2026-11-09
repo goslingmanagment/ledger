@@ -1095,3 +1095,62 @@ func TestSlotWindows(t *testing.T) {
 		t.Fatal("no workdays means every day")
 	}
 }
+
+// Two cards on the same slot of a page, nobody entered it: the money is not counted for both. Without Hub's team
+// facts each cell is «неизвестно»; with a proven week it is theirs whose shift Hub saw on the page.
+func TestUnenteredSharedSlot(t *testing.T) {
+	s, ctx := openStore(t)
+	now := "2026-09-20T10:00:00+03:00"
+	if err := PutPeople(ctx, s.RW, []Person{
+		{Slug: "echo", Name: "Эхо", Status: "active", Schedule: "00:00-08:00", Workdays: []string{"mon", "tue"}, Models: []string{"alpha"}},
+	}, "test", t0("2026-09-01")); err != nil {
+		t.Fatal(err)
+	}
+	f := newSheets("Alpha")
+	f.set("Alpha", []string{"Браво", "Эхо"}, map[string][][]Cell{
+		"Браво": sheet(25, 0, week("2026-09-07", map[string][7]any{"page-1": {100, nil, nil, nil, nil, nil, nil}})),
+		"Эхо":   sheet(25, 0, week("2026-09-07", map[string][7]any{"page-1": {100, nil, nil, nil, nil, nil, nil}})),
+	})
+	f.run(t, s, ctx, now)
+	hubDay(t, s, ctx, "page-1", "2026-08-01T00:00:00+03:00", now, [2]any{"2026-09-08T03:00:00+03:00", 80000})
+	rebuild(t, s, ctx, now)
+	read := func() map[string][2]any {
+		rows, err := s.RO.Query(`SELECT person, status, share FROM payroll_unentered WHERE date = '2026-09-08' AND page = 'page-1'`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		out := map[string][2]any{}
+		for rows.Next() {
+			var person, status string
+			var share sql.NullFloat64
+			if err := rows.Scan(&person, &status, &share); err != nil {
+				t.Fatal(err)
+			}
+			out[person] = [2]any{status, share}
+		}
+		return out
+	}
+	got := read()
+	if len(got) != 2 || got["bravo"][0] != "unknown" || got["echo"][0] != "unknown" || got["bravo"][1].(sql.NullFloat64).Valid {
+		t.Fatalf("without Hub's facts both cells are unknown, no money: %+v", got)
+	}
+	// Hub's team facts prove the week; only Эхо (Hub user 7, a login equal to the card's code) worked the page.
+	if _, err := s.RW.ExecContext(ctx, `INSERT INTO hub_team_sync(window_from, window_to, status, reasons, works, sales, net_mills, read_at, ok_at)
+		VALUES ('2026-09-07T00:00:00+03:00', '2026-09-14T00:00:00+03:00', 'ok', '[]', 1, 0, 0, ?, ?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	payload := `{"ref":"7:2026-09-07T21:00:00.000Z","userId":7,"username":"Echo","role":"chatter","kind":"shift",` +
+		`"startedAt":"2026-09-08T00:02:00+03:00","endedAt":"2026-09-08T07:58:00+03:00","ongoing":false,"workedMinutes":476,` +
+		`"pages":[{"pageLabel":"page-1","messages":10,"salesFrom":null}]}`
+	if _, err := s.RW.ExecContext(ctx, `INSERT INTO hub_works(window_from, ref, user_id, username, role, kind, started_at, ended_at, ongoing,
+		worked_minutes, day, payload, read_at) VALUES ('2026-09-07T00:00:00+03:00', '7:2026-09-07T21:00:00.000Z', 7, 'Echo', 'chatter', 'shift',
+		'2026-09-08T00:02:00.000+03:00', '2026-09-08T07:58:00.000+03:00', 0, 476, '2026-09-08', ?, ?)`, payload, now); err != nil {
+		t.Fatal(err)
+	}
+	rebuild(t, s, ctx, now)
+	got = read()
+	if _, ok := got["bravo"]; ok || got["echo"][0] != "ok" || got["echo"][1].(sql.NullFloat64).Float64 != 20 {
+		t.Fatalf("with a proven week the money is the worker's only: %+v", got)
+	}
+}
