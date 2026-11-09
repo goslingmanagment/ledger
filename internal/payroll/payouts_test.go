@@ -103,6 +103,23 @@ func TestPayoutsEqualTheDebtsOfChattersOnly(t *testing.T) {
 	if !reflect.DeepEqual(p.UnpaidDays, wantUnpaid) {
 		t.Fatalf("unpaid %+v", p.UnpaidDays)
 	}
+	// «Не занесено» comes as v_payables counts it; one more empty day with money and one unproved day show up.
+	before := PayoutUnentered{Days: seen["alfa"].UnenteredDays, ShareMicros: int64(money.FromFloat(seen["alfa"].UnenteredShare)), Unknown: seen["alfa"].UnenteredUnknown}
+	if p.Unentered != before {
+		t.Fatalf("unentered %+v, v_payables %+v", p.Unentered, before)
+	}
+	if _, err := s.RW.ExecContext(ctx, `INSERT INTO payroll_unentered(model, name, person, date, page, window_from, window_to, status, reason, net_mills, share, checked_at)
+		VALUES ('Alpha', 'Альфа', 'alfa', '2026-09-14', 'page-1', '2026-09-14T00:00:00+03:00', '2026-09-14T08:00:00+03:00', 'ok', '', 50000, 12.5, '2026-09-15T10:00:00+03:00'),
+		       ('Alpha', 'Альфа', 'alfa', '2026-09-15', 'page-1', '2026-09-15T00:00:00+03:00', '2026-09-15T08:00:00+03:00', 'unknown', 'хаб не доказал', NULL, NULL, '2026-09-15T10:00:00+03:00')`); err != nil {
+		t.Fatal(err)
+	}
+	again, err := ReadPayouts(ctx, s.RO, "2026-09-07", "2026-09-15", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := again.People[0].Unentered, (PayoutUnentered{Days: before.Days + 1, ShareMicros: before.ShareMicros + m("12.5"), Unknown: before.Unknown + 1}); got != want {
+		t.Fatalf("unentered %+v, want %+v", got, want)
+	}
 	// The same numbers as the books: v_payables, payable_days and the accrual postings.
 	if p.BalanceMicros != seen["alfa"].BalanceMicros {
 		t.Fatalf("balance %d, v_payables %d", p.BalanceMicros, seen["alfa"].BalanceMicros)
