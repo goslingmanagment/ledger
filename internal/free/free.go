@@ -94,8 +94,8 @@ func periodMonths(p string) float64 {
 }
 
 type commitment struct {
-	kind, name, period, nextDue, until, note string
-	amount                                   money.Micros
+	kind, name, period, nextDue, until, note, account string
+	amount                                            money.Micros
 }
 
 // addMonths keeps the day of the month, or the last day of a shorter month.
@@ -163,7 +163,7 @@ func occurrences(c commitment, from, to time.Time) []time.Time {
 }
 
 func loadCommitments(ctx context.Context, q ledger.Querier) ([]commitment, error) {
-	rows, err := q.QueryContext(ctx, `SELECT kind, name, period, COALESCE(next_due, ''), COALESCE(until, ''), note, amount FROM commitments ORDER BY name`)
+	rows, err := q.QueryContext(ctx, `SELECT kind, name, period, COALESCE(next_due, ''), COALESCE(until, ''), note, amount, COALESCE(account, '') FROM commitments ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -172,13 +172,41 @@ func loadCommitments(ctx context.Context, q ledger.Querier) ([]commitment, error
 	for rows.Next() {
 		var c commitment
 		var amt int64
-		if err := rows.Scan(&c.kind, &c.name, &c.period, &c.nextDue, &c.until, &c.note, &amt); err != nil {
+		if err := rows.Scan(&c.kind, &c.name, &c.period, &c.nextDue, &c.until, &c.note, &amt, &c.account); err != nil {
 			return nil, err
 		}
 		c.amount = money.Micros(amt)
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// Charge is one coming payment of a commitment that names the account it is paid from.
+type Charge struct {
+	Name    string  `json:"name"`
+	Account string  `json:"account"`
+	Amount  float64 `json:"amount"`
+	Due     string  `json:"due"`
+}
+
+// Charges lists the payments due from the calendar day of from through to, of the commitments that name
+// their account, by due day.
+func Charges(ctx context.Context, q ledger.Querier, from, to time.Time) ([]Charge, error) {
+	cs, err := loadCommitments(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	var out []Charge
+	for _, c := range cs {
+		if c.account == "" {
+			continue
+		}
+		for _, d := range occurrences(c, from, to) {
+			out = append(out, Charge{Name: c.name, Account: c.account, Amount: c.amount.Float(), Due: ts.Date(d)})
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Due < out[j].Due })
+	return out, nil
 }
 
 // ownerPaid sums the owner's salary rows of a month: by the row's date, or by a {за ГГГГ-ММ: N} part.
@@ -345,8 +373,10 @@ func Compute(ctx context.Context, q ledger.Querier, now time.Time) (Answer, erro
 		}
 	}
 	// Owner salary rest for the month: the cap minus what was paid; due at the end of the month.
-	var rate float64
-	fmt.Sscanf(setting(ctx, q, "owner_salary_rate", "0"), "%f", &rate)
+	rate, _, _, err := ledger.OwnerRate(ctx, q, ts.Date(now))
+	if err != nil {
+		return a, err
+	}
 	if rate > 0 {
 		paid, err := ownerPaid(ctx, q, ts.Month(now))
 		if err != nil {
@@ -540,6 +570,7 @@ type CommitmentSeed struct {
 	NextDue  string `json:"next_due"`
 	Until    string `json:"until"`
 	Note     string `json:"note"`
+	Account  string `json:"account"` // the account the payment is taken from (card:1234), if it is a card
 }
 
 // ImportCommitments replaces the rows from one source.
@@ -563,8 +594,17 @@ func ImportCommitments(ctx context.Context, tx *sql.Tx, items []CommitmentSeed, 
 				return 0, fmt.Errorf("%s: период «%s»: нужен month, week, once или Nd", c.Name, c.Period)
 			}
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO commitments(kind, name, category, amount, period, next_due, until, note, created_at, source)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, c.Kind, c.Name, c.Category, int64(v), c.Period, c.NextDue, c.Until, c.Note, ts.Format(now), source); err != nil {
+		if c.Account != "" {
+			var n int
+			if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM accounts WHERE code = ?`, c.Account).Scan(&n); err != nil {
+				return 0, err
+			}
+			if n == 0 {
+				return 0, fmt.Errorf("%s: счёта «%s» нет в плане счетов", c.Name, c.Account)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO commitments(kind, name, category, amount, period, next_due, until, note, account, created_at, source)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?)`, c.Kind, c.Name, c.Category, int64(v), c.Period, c.NextDue, c.Until, c.Note, c.Account, ts.Format(now), source); err != nil {
 			return 0, fmt.Errorf("%s: %w", c.Name, err)
 		}
 	}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/goslingmanagment/ledger/internal/bybit"
 	"github.com/goslingmanagment/ledger/internal/db"
+	"github.com/goslingmanagment/ledger/internal/free"
 	"github.com/goslingmanagment/ledger/internal/hub"
 	"github.com/goslingmanagment/ledger/internal/journal"
 	"github.com/goslingmanagment/ledger/internal/ledger"
@@ -586,5 +587,45 @@ func TestRatesAgainstCards(t *testing.T) {
 	add("Beta", "petr", 0.2)
 	if r := Rates(ctx, e); r.OK || !strings.Contains(r.Summary, "petr (Beta)") {
 		t.Fatalf("different: %+v", r)
+	}
+}
+
+// now is 2026-11-04: the check looks at 05.11–07.11.
+func TestCardCover(t *testing.T) {
+	s, ctx := openDB(t)
+	e := Env{Q: s.RO, Now: now}
+	if r := CardCover(ctx, e); !r.OK {
+		t.Fatalf("no commitments: %+v", r)
+	}
+	post(t, s, ctx, "card:1111", "50.00")
+	post(t, s, ctx, "card:2222", "500.00")
+	post(t, s, ctx, "cincin_wallet", "80.00")
+	tx, _ := s.RW.BeginTx(ctx, nil)
+	if _, err := free.ImportCommitments(ctx, tx, []free.CommitmentSeed{
+		{Kind: "subscription", Name: "Сервис А", Amount: "40.00", Period: "month", NextDue: "2026-11-05", Account: "card:1111"},
+		{Kind: "subscription", Name: "Сервис Б", Amount: "30.00", Period: "month", NextDue: "2026-11-07", Account: "card:1111"},
+		{Kind: "subscription", Name: "Сегодня", Amount: "900.00", Period: "month", NextDue: "2026-11-04", Account: "card:1111"},
+		{Kind: "subscription", Name: "Позже", Amount: "900.00", Period: "month", NextDue: "2026-11-08", Account: "card:1111"},
+		{Kind: "subscription", Name: "Хватает", Amount: "100.00", Period: "month", NextDue: "2026-11-06", Account: "card:2222"},
+		{Kind: "subscription", Name: "Без счёта", Amount: "900.00", Period: "month", NextDue: "2026-11-06"},
+	}, "t", now); err != nil {
+		t.Fatal(err)
+	}
+	tx.Commit()
+	r := CardCover(ctx, e)
+	if r.OK || r.Severity != "warn" {
+		t.Fatalf("a short card passed: %+v", r)
+	}
+	for _, want := range []string{"карта •1111: на счёте 50.00, к списанию 70.00 до 07.11 (Сервис А, Сервис Б), не хватает 20.00", "в кошельке CinCin 80.00"} {
+		if !strings.Contains(r.Summary, want) {
+			t.Fatalf("summary %q lacks %q", r.Summary, want)
+		}
+	}
+	if strings.Contains(r.Summary, "2222") {
+		t.Fatalf("a covered card is named: %q", r.Summary)
+	}
+	post(t, s, ctx, "card:1111", "20.00")
+	if r := CardCover(ctx, e); !r.OK {
+		t.Fatalf("a loaded card fails: %+v", r)
 	}
 }

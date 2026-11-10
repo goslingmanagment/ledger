@@ -253,3 +253,51 @@ func TestAdvanceAndExpected(t *testing.T) {
 		t.Errorf("liquid %v → %v, expected %v", a.Liquid, b.Liquid, b.Expected)
 	}
 }
+
+// The owner's rest of the month is counted by the rate in force today, not by the month still being closed.
+func TestOwnerRestByTheRateInForce(t *testing.T) {
+	s, ctx := openDB(t)
+	now, _ := ts.Parse("2026-11-04T12:00:00+03:00")
+	post(t, s, ctx, "2026-10-01", line("bybit", "10000.00"), line("opening", "-10000.00"))
+	set(t, s, "owner_salary_rate", `{"2026-10-01": 3100, "2026-11-01": 3600}`)
+	a, err := Compute(ctx, s.RO, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !near(a.CommitmentsLate, 3600) {
+		t.Fatalf("later %v %+v", a.CommitmentsLate, a.LaterItems)
+	}
+}
+
+// A commitment names the account it is paid from; Charges lists what falls due there.
+func TestChargesByAccount(t *testing.T) {
+	s, ctx := openDB(t)
+	now, _ := ts.Parse("2026-11-04T12:00:00+03:00")
+	post(t, s, ctx, "2026-10-01", line("card:1111", "50.00"), line("opening", "-50.00"))
+	imp := func(items ...CommitmentSeed) error {
+		tx, _ := s.RW.BeginTx(ctx, nil)
+		defer tx.Rollback()
+		if _, err := ImportCommitments(ctx, tx, items, "t", now); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+	if err := imp(CommitmentSeed{Kind: "subscription", Name: "Сервис", Amount: "10.00", Period: "month", NextDue: "2026-11-05", Account: "card:9999"}); err == nil {
+		t.Fatal("an unknown account passed")
+	}
+	if err := imp(
+		CommitmentSeed{Kind: "subscription", Name: "Сервис А", Amount: "40.00", Period: "month", NextDue: "2026-10-06", Account: "card:1111"},
+		CommitmentSeed{Kind: "subscription", Name: "Сервис Б", Amount: "30.00", Period: "month", NextDue: "2026-11-05", Account: "card:1111"},
+		CommitmentSeed{Kind: "subscription", Name: "Без счёта", Amount: "99.00", Period: "month", NextDue: "2026-11-05"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	from, _ := ts.Parse("2026-11-05T00:00:00+03:00")
+	got, err := Charges(ctx, s.RO, from, from.AddDate(0, 0, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Name != "Сервис Б" || got[0].Due != "2026-11-05" || got[1].Name != "Сервис А" || got[1].Due != "2026-11-06" || got[1].Account != "card:1111" {
+		t.Fatalf("%+v", got)
+	}
+}

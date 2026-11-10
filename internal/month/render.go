@@ -2,6 +2,9 @@ package month
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -193,8 +196,12 @@ func (c *Card) Render(ceoRate *float64, res []Check, extraNotes []string) string
 	} else {
 		cand := *ceoRate + cfg.GuardStep
 		need := cand / cfg.GuardShare
-		out = append(out, fmt.Sprintf("Предохранитель %s (ставка %s + %s; нужно ≥ %s): %s, запас %s; по оценке ещё в пути %s — до закрытия цифра предварительная",
-			Money(cand), Money(*ceoRate), strconv.FormatFloat(cfg.GuardStep, 'f', -1, 64), Money(need), Verdict(dec, cand, cfg.GuardShare, nil), Money(dec-need), Money(t.Transit)))
+		line := fmt.Sprintf("Предохранитель %s (ставка %s + %s; нужно ≥ %s): %s, запас %s; по оценке ещё в пути %s — до закрытия цифра предварительная",
+			Money(cand), Money(*ceoRate), strconv.FormatFloat(cfg.GuardStep, 'f', -1, 64), Money(need), Verdict(dec, cand, cfg.GuardShare, nil), Money(dec-need), Money(t.Transit))
+		if c.RaiseFrom != "" {
+			line += fmt.Sprintf(". Повышение уже принято: ставка %s с %s, вопроса владельцу нет", Money(cand), dayMonth(c.RaiseFrom))
+		}
+		out = append(out, line)
 	}
 	notes := dedupe(append(append(append([]string(nil), e.Notes...), c.Notes...), extraNotes...))
 	if len(notes) > 0 {
@@ -207,6 +214,57 @@ func (c *Card) Render(ceoRate *float64, res []Check, extraNotes []string) string
 }
 
 // tailMonday is the withdrawal for the previous month: the first Monday from the 8th of this month.
+// dayMonth prints a stored day ГГГГ-ММ-ДД as ДД.ММ.
+func dayMonth(day string) string {
+	if t, err := time.Parse(ts.DateLayout, day); err == nil {
+		return t.Format("02.01")
+	}
+	return day
+}
+
+// ParseCaps reads settings.category_caps: a JSON object {"категория расходов": лимит в месяц}.
+func ParseCaps(raw string) (map[string]float64, error) {
+	caps := map[string]float64{}
+	if err := json.Unmarshal([]byte(raw), &caps); err != nil {
+		return nil, fmt.Errorf("настройка category_caps: нужен JSON-объект {\"категория\": лимит}: %v", err)
+	}
+	return caps, nil
+}
+
+// capLine is the month's spend of each capped expense category against its cap (settings.category_caps),
+// "" without caps.
+func capLine(ctx context.Context, q ledger.Querier, card *Card) (string, error) {
+	var raw string
+	switch err := q.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'category_caps'`).Scan(&raw); {
+	case errors.Is(err, sql.ErrNoRows):
+		return "", nil
+	case err != nil:
+		return "", err
+	}
+	caps, err := ParseCaps(raw)
+	if err != nil {
+		return "", Fail{Msg: err.Error()}
+	}
+	cats := make([]string, 0, len(caps))
+	for k := range caps {
+		cats = append(cats, k)
+	}
+	sort.Strings(cats)
+	var parts []string
+	for _, k := range cats {
+		spent := card.Exp.Cats.Vals[k]
+		part := fmt.Sprintf("%s %s из %s", k, USD(spent, false), USD(caps[k], false))
+		if over := spent - caps[k]; over >= .5 {
+			part += ", перерасход " + USD(over, false)
+		}
+		parts = append(parts, part)
+	}
+	if len(parts) == 0 {
+		return "", nil
+	}
+	return "Лимиты: " + strings.Join(parts, " · "), nil
+}
+
 func tailMonday(month string) time.Time {
 	m0, _, _ := ts.MonthStart(month)
 	d := m0.AddDate(0, 0, 7)
@@ -391,6 +449,13 @@ func Brief(ctx context.Context, q ledger.Querier, cv *Cover, tabs []Tab, ceoRate
 			tr = &transit
 		}
 		v := Verdict(dec, need*cfg.GuardShare, cfg.GuardShare, tr)
+		accepted, err := raiseFrom(ctx, q, prev, *cand)
+		if err != nil {
+			return nil, nil, err
+		}
+		if accepted != "" {
+			v = "принято с " + dayMonth(accepted)
+		}
 		line := fmt.Sprintf("Повышение до %s %s: нужно от %s, ", USD(*cand, false), v, USD(need, false))
 		if dec < need {
 			line += "не хватает " + USD(need-dec, false)
@@ -415,6 +480,13 @@ func Brief(ctx context.Context, q ledger.Querier, cv *Cover, tabs []Tab, ceoRate
 			return nil, nil, err
 		}
 		out = append(out, "", fmt.Sprintf("%s по %s: заработали %s, потратили %s", monthName(cur), asOf.In(ts.MSK).Format("02.01"), USD(cc.Totals().Earned, false), USD(cc.Exp.Total, false)))
+		caps, err := capLine(ctx, q, cc)
+		if err != nil {
+			return nil, nil, err
+		}
+		if caps != "" {
+			out = append(out, caps)
+		}
 	}
 	pl, err := planLines(ctx, q, cfg, cur, m0, today)
 	if err != nil {

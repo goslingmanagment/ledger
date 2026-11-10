@@ -2,10 +2,9 @@ package month
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -70,6 +69,11 @@ func Show(ctx context.Context, q ledger.Querier, month string, in Inputs, ceoRat
 		return nil, err
 	}
 	res := card.Checks(tabsErr)
+	if ceoRate != nil {
+		if card.RaiseFrom, err = raiseFrom(ctx, q, month, *ceoRate+cv.Cfg.GuardStep); err != nil {
+			return nil, err
+		}
+	}
 	snap := card.Snapshot()
 	snap["checks"] = res
 	snap["notes"] = card.Notes
@@ -110,24 +114,45 @@ func floatParam(r *http.Request, name string) (*float64, error) {
 	return &v, nil
 }
 
-// rateParam is the owner's salary rate of a request: the parameter, otherwise the setting owner_salary_rate.
-func rateParam(r *http.Request, q ledger.Querier) (*float64, error) {
+// rateParam is the owner's salary rate a month is judged with: the parameter, otherwise the setting
+// owner_salary_rate in force on the month's first day.
+func rateParam(r *http.Request, q ledger.Querier, month string) (*float64, error) {
 	rate, err := floatParam(r, "ceo_rate")
 	if err != nil || rate != nil {
 		return rate, err
 	}
-	var s string
-	switch err := q.QueryRowContext(r.Context(), `SELECT value FROM settings WHERE key = 'owner_salary_rate'`).Scan(&s); {
-	case errors.Is(err, sql.ErrNoRows):
-		return nil, nil
-	case err != nil:
+	return settingRate(r.Context(), q, month)
+}
+
+func settingRate(ctx context.Context, q ledger.Querier, month string) (*float64, error) {
+	v, _, ok, err := ledger.OwnerRate(ctx, q, month+"-01")
+	if err != nil || !ok {
 		return nil, err
 	}
-	v, err := strconv.ParseFloat(s, 64)
-	if err != nil {
-		return nil, fmt.Errorf("настройка owner_salary_rate: %w", err)
-	}
 	return &v, nil
+}
+
+// prevMonth is the month before month ("ГГГГ-ММ").
+func prevMonth(month string) string {
+	m0, _, _ := ts.MonthStart(month)
+	return ts.Month(m0.AddDate(0, 0, -1))
+}
+
+// raiseFrom says from which day the raise that month's safeguard tests is already in force: the owner
+// accepted it before the close. "" when it is not.
+func raiseFrom(ctx context.Context, q ledger.Querier, month string, candidate float64) (string, error) {
+	_, m1, err := ts.MonthStart(month)
+	if err != nil {
+		return "", err
+	}
+	next, from, ok, err := ledger.OwnerRate(ctx, q, ts.Date(m1))
+	if err != nil || !ok || math.Abs(next-candidate) >= 0.005 {
+		return "", err
+	}
+	if from == "" {
+		from = ts.Date(m1)
+	}
+	return from, nil
 }
 
 func init() {
@@ -169,7 +194,7 @@ func init() {
 				}
 				in.AsOf = t
 			}
-			rate, err := rateParam(r, s.Store.RO)
+			rate, err := rateParam(r, s.Store.RO, r.PathValue("month"))
 			if err != nil {
 				server.WriteError(w, http.StatusBadRequest, "ceo_rate: "+err.Error())
 				return
@@ -224,12 +249,12 @@ func init() {
 		})))
 		s.Mux.Handle("GET /v1/month-brief", auth.Require(s, "read", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx := r.Context()
-			rate, err := rateParam(r, s.Store.RO)
+			rate, err := floatParam(r, "ceo_rate")
 			if err != nil {
 				server.WriteError(w, http.StatusBadRequest, "ceo_rate: "+err.Error())
 				return
 			}
-			out, flagged, err := BriefAt(ctx, s.Store.RO, time.Now(), rate)
+			out, flagged, err := BriefAt(ctx, s.Store.RO, time.Now(), rate, true)
 			if err != nil {
 				httpFail(w, err)
 				return
@@ -238,7 +263,7 @@ func init() {
 		})))
 		s.Mux.Handle("POST /v1/month/{month}/close", auth.Require(s, "decide", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx := r.Context()
-			rate, err := rateParam(r, s.Store.RO)
+			rate, err := rateParam(r, s.Store.RO, r.PathValue("month"))
 			if err != nil || rate == nil {
 				server.WriteError(w, http.StatusBadRequest, "нужен ceo_rate или настройка owner_salary_rate")
 				return
@@ -254,12 +279,18 @@ func init() {
 }
 
 // BriefAt computes the Monday message: the cut is the end of yesterday (or the proven cut if earlier).
-func BriefAt(ctx context.Context, q ledger.Querier, now time.Time, rate *float64) ([]string, []DriftRow, error) {
+// Without a rate, fromSetting takes the one in force in the month the message judges: the previous one.
+func BriefAt(ctx context.Context, q ledger.Querier, now time.Time, rate *float64, fromSetting bool) ([]string, []DriftRow, error) {
 	n := now.In(ts.MSK)
 	midnight := time.Date(n.Year(), n.Month(), n.Day(), 0, 0, 0, 0, ts.MSK)
 	cv, tabs, _, err := PrepareCover(ctx, q, Inputs{AsOf: midnight.Add(-time.Second)})
 	if err != nil {
 		return nil, nil, err
+	}
+	if rate == nil && fromSetting {
+		if rate, err = settingRate(ctx, q, prevMonth(ts.Month(cv.AsOf))); err != nil {
+			return nil, nil, err
+		}
 	}
 	return Brief(ctx, q, cv, tabs, rate)
 }
@@ -285,6 +316,9 @@ func CloseNow(ctx context.Context, s *server.Server, month string, rate float64)
 	}
 	out := map[string]any{"ok": true, "closed": len(stops) == 0, "stops": stops}
 	if card != nil {
+		if card.RaiseFrom, err = raiseFrom(ctx, tx, month, rate+cfg.GuardStep); err != nil {
+			return nil, err
+		}
 		out["text"] = card.Render(&rate, nil, nil)
 	}
 	if len(stops) > 0 {
