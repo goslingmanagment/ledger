@@ -57,6 +57,13 @@ type PayoutPage struct {
 	RevenueMicros int64  `json:"revenueMicros"`
 }
 
+// PayoutPot is a person's share of a day's purchases in one pot.
+type PayoutPot struct {
+	Pot           string `json:"pot"`
+	Name          string `json:"name"`
+	RevenueMicros int64  `json:"revenueMicros"`
+}
+
 // PayoutDay is one accrued day of one tab.
 type PayoutDay struct {
 	Date         string       `json:"date"`
@@ -64,6 +71,8 @@ type PayoutDay struct {
 	AmountMicros int64        `json:"amountMicros"`
 	Worked       bool         `json:"worked"`
 	Pages        []PayoutPage `json:"pages,omitempty"`
+	// Pots are the person's pot shares of the day (R3), revenue of the tab beside the pages: a day of the reports.
+	Pots []PayoutPot `json:"pots,omitempty"`
 	// Source is where the day came from: "sheet" — the payout tab, "facts" — Hub's facts (from settings.payroll_facts_from),
 	// "reports" — the chatter's posted shift reports (from settings.payroll_reports_from).
 	Source string `json:"source"`
@@ -366,7 +375,8 @@ func payoutDays(ctx context.Context, q ledger.Querier, from, to, accrualFrom str
 		d := PayoutDay{Date: date, Model: model, AmountMicros: -amt, Source: source}
 		if source != SourceSheet {
 			c := cells[source][slug+"\x00"+ledger.Slug(model)+"\x00"+date]
-			d.Worked, d.Pages = true, c.pages
+			// A day of the reports with only a pot share was not worked.
+			d.Worked, d.Pages, d.Pots = source != SourceReports || len(c.pages) > 0, c.pages, c.pots
 		} else if s := sheet[day]; s != nil {
 			d.Worked, d.Pages = s.worked, s.pages
 		}

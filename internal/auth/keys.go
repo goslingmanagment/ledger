@@ -29,12 +29,14 @@ const (
 	ScopeDecide  = "decide"  // the owner's decisions from the brief: openclaw-main only
 	ScopeCollect = "collect" // collectors on the Mac send events
 	ScopeImport  = "import"  // one-off imports
-	// ScopePayouts opens GET /v1/payouts, GET /v1/payouts/prepare, GET /v1/reports[/{id}] and GET /v1/report-days and
-	// nothing else: Hub's server reads the chatters' pay and shift reports with it and sees no owner draws, no other
-	// expenses, no cash, no post texts and no SQL.
+	// ScopePayouts opens GET /v1/payouts, GET /v1/payouts/prepare, GET /v1/reports[/{id}], GET /v1/report-days,
+	// GET /v1/report-posts without the post texts, GET /v1/decisions and GET /v1/pots… and nothing else: Hub's server
+	// reads the chatters' pay and shift reports with it and sees no owner draws, no other expenses, no cash, no post
+	// texts and no SQL.
 	ScopePayouts = "payouts"
-	// ScopeReports opens POST /v1/reports and nothing else: the team's chat agent saves the breakdown of a shift
-	// report with it.
+	// ScopeReports opens POST /v1/reports, the decisions about whose a sale is (POST and GET /v1/decisions…), the pot
+	// purchases (POST /v1/pots/{slug}/sales, POST /v1/pot-sales/{id}/remove) and reading the pots, and nothing else:
+	// the team's chat agent saves the breakdown of a shift report and what it was told with it.
 	ScopeReports = "reports"
 )
 

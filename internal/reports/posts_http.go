@@ -47,8 +47,9 @@ func init() {
 			}
 			server.WriteJSON(w, http.StatusOK, DaysAnswer{From: from, To: to, Days: days})
 		})))
-		// The posts hold their text: agents with read only, not Hub's payouts key.
-		s.Mux.Handle("GET /v1/report-posts", auth.Require(s, auth.ScopeRead, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The posts hold their text: agents with read get it, Hub's payouts key gets the list without it (the owner's
+		// list of unparsed posts).
+		s.Mux.Handle("GET /v1/report-posts", auth.RequireAny(s, readers, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			q := r.URL.Query()
 			from, to, err := payroll.PayoutWindow(q.Get("from"), q.Get("to"))
 			if err != nil {
@@ -67,6 +68,11 @@ func init() {
 				s.Log.Error("report posts", "key", auth.KeyName(r.Context()), "err", err)
 				server.WriteError(w, http.StatusInternalServerError, "посты не прочитаны: сбой сервиса, подробности в журнале")
 				return
+			}
+			if k, ok := auth.FromContext(r.Context()); !ok || !k.Has(auth.ScopeRead) {
+				for i := range list {
+					list[i].Text = ""
+				}
 			}
 			server.WriteJSON(w, http.StatusOK, PostsAnswer{From: from, To: to, Posts: list})
 		})))

@@ -158,7 +158,7 @@ func orDash(v *int64) string {
 // reportsDiffer: a day of the person where the sheet and the reports differ, or is on one side only.
 func reportsDiffer(p accruals.PersonDiff) bool {
 	for _, x := range p.Days {
-		if x.Presence != "" || len(x.Pages) > 0 {
+		if x.Presence != "" || len(x.Pages) > 0 || len(x.PotNotes) > 0 {
 			return true
 		}
 	}
@@ -233,6 +233,9 @@ func printDiff(out *bufio.Writer, d accruals.Diff) {
 		writeTable(indent{out}, []string{"день", "выручка табл.", "выручка отч.", "net фактов", "таблица", "отчёты", "факты",
 			"отч. − табл.", "факты − отч.", ""}, days, []bool{false, true, true, true, true, true, true, true, true, false})
 		for _, x := range p.Days {
+			for _, n := range x.PotNotes {
+				fmt.Fprintf(out, "  %s: %s\n", x.Day, n)
+			}
 			if len(x.Pages) == 0 {
 				continue
 			}

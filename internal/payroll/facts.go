@@ -574,6 +574,7 @@ func formatCounter(n int, source string) string {
 // of their shares by the facts, the posted amounts by the reports.
 type factCell struct {
 	pages []PayoutPage
+	pots  []PayoutPot // the reports' days: the person's pot shares, in value beside the pages
 	value int64
 }
 
@@ -587,7 +588,7 @@ func sourceCells(ctx context.Context, q ledger.Querier, source, from, to string)
 
 // reportCells reads report_accruals of the days in [from, to]: the posted amount of each page.
 func reportCells(ctx context.Context, q ledger.Querier, from, to string) (map[string]factCell, error) {
-	rows, err := q.QueryContext(ctx, `SELECT person, model, day, pages, net_micros FROM report_accruals WHERE day BETWEEN ? AND ?
+	rows, err := q.QueryContext(ctx, `SELECT person, model, day, pages, net_micros, pots FROM report_accruals WHERE day BETWEEN ? AND ?
 		ORDER BY person, model, day`, from, to)
 	if err != nil {
 		return nil, err
@@ -595,10 +596,18 @@ func reportCells(ctx context.Context, q ledger.Querier, from, to string) (map[st
 	defer rows.Close()
 	out := map[string]factCell{}
 	for rows.Next() {
-		var person, model, day, pages string
+		var person, model, day, pages, pots string
 		var net int64
-		if err := rows.Scan(&person, &model, &day, &pages, &net); err != nil {
+		if err := rows.Scan(&person, &model, &day, &pages, &net, &pots); err != nil {
 			return nil, err
+		}
+		var shares []struct {
+			Pot    string `json:"pot"`
+			Name   string `json:"name"`
+			Micros int64  `json:"micros"`
+		}
+		if err := json.Unmarshal([]byte(pots), &shares); err != nil {
+			return nil, fmt.Errorf("report_accruals %s %s %s: pots: %w", person, model, day, err)
 		}
 		var list []struct {
 			Page   string `json:"page"`
@@ -611,6 +620,9 @@ func reportCells(ctx context.Context, q ledger.Querier, from, to string) (map[st
 		c := out[k]
 		for _, p := range list {
 			c.pages = append(c.pages, PayoutPage{Page: p.Page, RevenueMicros: p.Micros})
+		}
+		for _, sh := range shares {
+			c.pots = append(c.pots, PayoutPot{Pot: sh.Pot, Name: sh.Name, RevenueMicros: sh.Micros})
 		}
 		c.value += net
 		out[k] = c

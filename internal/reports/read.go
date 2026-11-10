@@ -41,6 +41,19 @@ type Line struct {
 	Notes          []string `json:"notes"`
 	PPVAuthor      string   `json:"ppv_author"`
 	PPVSentAt      string   `json:"ppv_sent_at"`
+	// Agreement is the open or applied decision about whose the sale is (sale_decisions, R3); nil — none.
+	Agreement *Agreement `json:"agreement"`
+}
+
+// Agreement is a decision about whose a sale is, as a report line carries it.
+type Agreement struct {
+	ID     int64           `json:"id"`
+	Kind   string          `json:"kind"`
+	Shares json.RawMessage `json:"shares"`
+	Pot    *string         `json:"pot,omitempty"`
+	Status string          `json:"status"`
+	SaidBy string          `json:"said_by"`
+	Note   string          `json:"note"`
 }
 
 // Report is one version of a report.
@@ -207,6 +220,10 @@ func fill(ctx context.Context, q ledger.Querier, reports []Report) error {
 	if err != nil {
 		return err
 	}
+	agreements, err := agreementsOf(ctx, q, reports)
+	if err != nil {
+		return err
+	}
 	for i := range reports {
 		r := &reports[i]
 		r.Pages, r.Lines = []Page{}, []Line{}
@@ -263,6 +280,9 @@ func fill(ctx context.Context, q ledger.Querier, reports []Report) error {
 				l.GrossMicros = &gross.Int64
 			}
 			l.TransactionRef, l.OccurredAt = nullable(ref), nullable(at)
+			if ref.Valid {
+				l.Agreement = agreements[ref.String]
+			}
 			l.Flags, l.Notes = []string{}, []string{}
 			_ = json.Unmarshal([]byte(flags), &l.Flags)
 			_ = json.Unmarshal([]byte(notes), &l.Notes)
@@ -274,4 +294,33 @@ func fill(ctx context.Context, q ledger.Querier, reports []Report) error {
 		}
 	}
 	return nil
+}
+
+// agreementsOf reads the open or applied decisions about the sales of the reports' lines, the latest of each sale.
+func agreementsOf(ctx context.Context, q ledger.Querier, reports []Report) (map[string]*Agreement, error) {
+	ids := make([]string, len(reports))
+	args := make([]any, len(reports))
+	for i, r := range reports {
+		ids[i], args[i] = "?", r.ID
+	}
+	rows, err := q.QueryContext(ctx, `SELECT d.transaction_ref, d.id, d.kind, d.shares, d.pot, d.status, d.said_by, d.note
+		FROM sale_decisions d WHERE d.status IN ('open', 'applied') AND d.transaction_ref IN
+		(SELECT transaction_ref FROM shift_report_lines WHERE transaction_ref IS NOT NULL AND report_id IN (`+strings.Join(ids, ", ")+`))
+		ORDER BY d.id`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]*Agreement{}
+	for rows.Next() {
+		var ref, shares string
+		var pot sql.NullString
+		a := &Agreement{}
+		if err := rows.Scan(&ref, &a.ID, &a.Kind, &shares, &pot, &a.Status, &a.SaidBy, &a.Note); err != nil {
+			return nil, err
+		}
+		a.Shares, a.Pot = json.RawMessage(shares), nullable(pot)
+		out[ref] = a // the latest stands
+	}
+	return out, rows.Err()
 }
