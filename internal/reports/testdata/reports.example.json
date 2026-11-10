@@ -1,0 +1,9 @@
+{
+  "topics": [
+    {"peer": -1001000000001, "topic": 4},
+    {"peer": "-1001000000002", "topic": 7}
+  ],
+  "since_days": 3,
+  "account": "synthetic-account",
+  "tg_dir": "~/code/tg-inbox"
+}

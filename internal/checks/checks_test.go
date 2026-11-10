@@ -629,3 +629,19 @@ func TestCardCover(t *testing.T) {
 		t.Fatalf("a loaded card fails: %+v", r)
 	}
 }
+
+func TestReportPosts(t *testing.T) {
+	s, ctx := openDB(t)
+	now := at("2026-11-10T12:00:00+03:00")
+	if r := ReportPosts(ctx, Env{Q: s.RO, Now: now}); !r.OK {
+		t.Fatalf("nothing configured: %+v", r)
+	}
+	exec(t, s, `INSERT INTO events(id, source, source_id, kind, payload, received_at) VALUES (1, 'tg_reports', 'x', 'post', '{}', ?)`, ts.Format(now))
+	exec(t, s, `INSERT INTO shift_report_posts(event_id, peer, topic, msg_id, posted_at, sender, tag, report_date, total_micros, pages_micros,
+		flags, text, current, digest, parsed_at) VALUES (1, '-1', 4, 7, '2026-11-08T23:00:00+03:00', 'someone', '#nobody', '2026-11-08',
+		1, 1, '["unknown_author"]', 't', 1, 'd', ?)`, ts.Format(now))
+	r := ReportPosts(ctx, Env{Q: s.RO, Now: now})
+	if r.OK || r.Severity != "warn" || !strings.Contains(r.Summary, "someone #nobody, 2026-11-08") || !strings.Contains(r.Summary, "автор не узнан") {
+		t.Fatalf("%+v", r)
+	}
+}

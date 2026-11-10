@@ -383,6 +383,10 @@ func Save(ctx context.Context, store *db.Store, raw []byte, keyName string, now 
 			return SaveResult{}, err
 		}
 	}
+	// The chatter may have posted before the agent saved: the new version is posted at once when the post agrees.
+	if _, err := SyncStatuses(ctx, tx); err != nil {
+		return SaveResult{}, err
+	}
 	return out, tx.Commit()
 }
 

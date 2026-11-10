@@ -84,9 +84,11 @@ CinCin раз в 30 минут, только на чтение (`gog --readonly`
 1. На VPS: `bash deploy/compose.sh exec -T app ledger keys create mac-collector --scope read,collect,import`.
 2. На маке в `~/.config/ledger/` (всё chmod 600): `credentials.collector` с `LEDGER_URL` и `LEDGER_KEY`;
    `sheets.json` — `{"account": "...", "tables": {"<модель>": "<id таблицы>"}}`, пример — `internal/payroll/testdata/sheets.example.json`;
-   `cards.json` — `{"peer": <id бота>, "account": "...", "tg_dir": "<каталог tg-inbox>"}`, пример — `internal/cards/testdata/cards.example.json`.
+   `cards.json` — `{"peer": <id бота>, "account": "...", "tg_dir": "<каталог tg-inbox>"}`, пример — `internal/cards/testdata/cards.example.json`;
+   `reports.json` — `{"topics": [{"peer": <id группы>, "topic": <id топика «Отчётность»>}], "since_days": 3, "tg_dir": "…"}`,
+   пример — `internal/reports/testdata/reports.example.json`; без него агент постов не ставится.
 3. `bash deploy/install-mac-jobs.sh shadow` (после переключения `live`): бинарник в `~/.config/ledger/bin`, launchd-агенты
-   `ru.gosling-agency.ledger-cards`, `-sheets`, `-journal` или `-mirror` (шаблон один, `deploy/launchd/ru.gosling-agency.ledger-job.plist`),
+   `ru.gosling-agency.ledger-cards`, `-reports` (раз в 15 минут), `-sheets`, `-journal` или `-mirror` (шаблон один, `deploy/launchd/ru.gosling-agency.ledger-job.plist`),
    журналы в `~/Library/Logs/ledger`.
 
 Карточки людей переносятся один раз: `ledger import people <папка people>` внутри контейнера, папку — через `docker cp`. Стартовые

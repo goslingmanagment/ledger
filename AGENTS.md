@@ -47,6 +47,14 @@
   иной — версия N+1, прежняя `superseded`. `ledger report list [--from] [--to] [--person] [--json]` (по умолчанию 14 дней),
   `ledger report show <id> [--json]`; хаб читает `GET /v1/reports?from&to[&hub_user_id][&hub_username]` ключом `payouts`
   (только отчёты этого пользователя или его карточки). Таблицы `shift_reports*`, вид `v_shift_reports`. Этап ничего не проводит и не начисляет.
+- Посты «Отчётности» (R2a): `ledger collect reports [--dry-run] [--local-db] [--since]` на маке (конфиг `~/.config/ledger/reports.json`:
+  `topics` [{peer, topic}], `since_days`, `tg_dir`; очередь `spool-reports`, только `tg history`, launchd раз в 15 минут) шлёт сообщения
+  с «Общий доход» событиями `tg_reports`; правка поста — новое событие. Сервер разбирает их в `shift_report_posts*` при приходе и джобом,
+  сейчас — `ledger report parse`. Настройки (seed `ledger import business`, значения — JSON-строки): `report_topics` — топик, его модель
+  и `pages` {имя в посте строчными: страница хаба}; `report_authors` — {"tg:<id>": человек, "#тег": человек}, отправитель важнее тега.
+  База оплаты по страницам — вид `v_report_pages` (пост против черновика: `posted_equal|posted_changed|post_only|draft_only`), глазами —
+  `ledger report days`, пометки постов — `ledger report posts --flagged` и проверка «отчёты разобраны». Хабу — `GET /v1/report-days`
+  (`read`, `payouts`), текст постов — `GET /v1/report-posts` (только `read`). Ничего ещё не начисляется: это этап R2b.
 - Бриф: `ledger brief [--text] [--new]` — открытый неотправленный или новый из открытых предложений, номера заморожены; `ledger brief-sent --brief N`, `ledger pending`.
   Решения: `ledger decide --brief N --set 1=confirm --set 2=personal --set 3=custom:{…} --set 4=defer --set 5=recorded:388,389`, весь набор одной транзакцией, ключ с правом decide.
   `mode` shadow: решения только записываются, закрывает их импорт журнала или `import bybit-state`; live: `confirm` и `custom` (JSON-правка: `category`, `counterparty`, `model`, `note`, `type`, `amount`, `split`) пишут строки и проводки, точное правило пишет само.

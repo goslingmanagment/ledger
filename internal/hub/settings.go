@@ -135,6 +135,7 @@ var settingKinds = map[string]string{
 	"fansly_payout_methods": "list", "hold_types": "list",
 	"hub_model_slugs": "map", "tab_aliases": "map", "sheet_pages": "map",
 	"owner_salary_rate": "owner_rates", "category_caps": "caps",
+	SettingReportTopics: "report_topics", SettingReportAuthors: "report_authors",
 }
 
 func checkSetting(key, value string) error {
@@ -162,6 +163,10 @@ func checkSetting(key, value string) error {
 		_, err = s.Map(key)
 	case "owner_rates":
 		_, err = ledger.ParseOwnerRates(value)
+	case "report_topics":
+		_, err = ParseReportTopics(value)
+	case "report_authors":
+		_, err = ParseReportAuthors(value)
 	case "caps":
 		caps := map[string]float64{}
 		if jerr := json.Unmarshal([]byte(value), &caps); jerr != nil {
@@ -169,4 +174,85 @@ func checkSetting(key, value string) error {
 		}
 	}
 	return err
+}
+
+// Settings of the chatters' posts in «Отчётность» (stage R2a of docs/plans/2026-11-10-shift-reports.md).
+const (
+	SettingReportTopics  = "report_topics"
+	SettingReportAuthors = "report_authors"
+)
+
+// ReportTopic is a topic the posts are read from: its model and how the names written in its posts map to Hub pages
+// (keys lowercased).
+type ReportTopic struct {
+	Peer  string            `json:"peer"`
+	Topic int64             `json:"topic"`
+	Model string            `json:"model"`
+	Pages map[string]string `json:"pages"`
+}
+
+// ParseReportTopics reads report_topics: a JSON list of topics. An empty value is no topics.
+func ParseReportTopics(v string) ([]ReportTopic, error) {
+	var out []ReportTopic
+	if strings.TrimSpace(v) == "" {
+		return out, nil
+	}
+	dec := json.NewDecoder(strings.NewReader(v))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&out); err != nil {
+		return nil, fmt.Errorf(`настройка %s: нужен JSON-список [{"peer": "<чат>", "topic": <id>, "model": "<модель>", "pages": {"<имя в посте>": "<страница хаба>"}}]: %v`,
+			SettingReportTopics, err)
+	}
+	seen := map[string]bool{}
+	for i := range out {
+		t := &out[i]
+		t.Peer, t.Model = strings.TrimSpace(t.Peer), strings.TrimSpace(t.Model)
+		if t.Peer == "" || t.Topic <= 0 {
+			return nil, fmt.Errorf("настройка %s, топик %d: нужны peer и topic > 0", SettingReportTopics, i+1)
+		}
+		k := t.Peer + ":" + strconv.FormatInt(t.Topic, 10)
+		if seen[k] {
+			return nil, fmt.Errorf("настройка %s: топик %s дважды", SettingReportTopics, k)
+		}
+		seen[k] = true
+		pages := map[string]string{}
+		for name, label := range t.Pages {
+			n := strings.ToLower(strings.TrimSpace(name))
+			if n == "" || strings.TrimSpace(label) == "" {
+				return nil, fmt.Errorf("настройка %s, топик %s: пустое имя или страница в pages", SettingReportTopics, k)
+			}
+			pages[n] = strings.TrimSpace(label)
+		}
+		t.Pages = pages
+	}
+	return out, nil
+}
+
+// ParseReportAuthors reads report_authors: {"tg:<sender_id>": "<person>", "#<tag>": "<person>"}, keys lowercased.
+func ParseReportAuthors(v string) (map[string]string, error) {
+	out := map[string]string{}
+	if strings.TrimSpace(v) == "" {
+		return out, nil
+	}
+	raw := map[string]string{}
+	if err := json.Unmarshal([]byte(v), &raw); err != nil {
+		return nil, fmt.Errorf(`настройка %s: нужен JSON-объект {"tg:<id отправителя>": "<человек>", "#<тег>": "<человек>"}: %v`, SettingReportAuthors, err)
+	}
+	for k, slug := range raw {
+		key := strings.ToLower(strings.TrimSpace(k))
+		switch {
+		case strings.HasPrefix(key, "tg:") && len(key) > 3:
+			if _, err := strconv.ParseInt(key[3:], 10, 64); err != nil {
+				return nil, fmt.Errorf("настройка %s: «%s» — после tg: нужен id отправителя", SettingReportAuthors, k)
+			}
+		case strings.HasPrefix(key, "#") && len(key) > 1:
+		default:
+			return nil, fmt.Errorf("настройка %s: ключ «%s» — нужен tg:<id> или #<тег>", SettingReportAuthors, k)
+		}
+		if strings.TrimSpace(slug) == "" {
+			return nil, fmt.Errorf("настройка %s: у «%s» пустой человек", SettingReportAuthors, k)
+		}
+		out[key] = strings.TrimSpace(slug)
+	}
+	return out, nil
 }

@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -190,5 +191,38 @@ func TestImportBusiness(t *testing.T) {
 	}
 	if _, err := set.Int("no_such_key"); err == nil || !strings.Contains(err.Error(), "ledger import business") {
 		t.Fatalf("missing key: %v", err)
+	}
+}
+
+func TestImportReportSettings(t *testing.T) {
+	b := newBench(t)
+	seed := func(topics, authors string) error {
+		raw, _ := json.Marshal(map[string]any{"source": "test", "settings": map[string]string{
+			SettingReportTopics: topics, SettingReportAuthors: authors}})
+		_, err := ImportBusiness(b.ctx, b.store.RW, raw, b.clock.Now())
+		return err
+	}
+	if err := seed(`[{"peer": "-1001", "topic": 4, "model": "alfa", "pages": {" VIP ": "alfa-of"}}]`, `{"tg:501": "anna", "#Anna": "anna"}`); err != nil {
+		t.Fatal(err)
+	}
+	set, _ := LoadSettings(b.ctx, b.store.RW)
+	topics, err := ParseReportTopics(set.raw[SettingReportTopics])
+	if err != nil || len(topics) != 1 || topics[0].Pages["vip"] != "alfa-of" {
+		t.Fatalf("topics %+v %v", topics, err)
+	}
+	authors, err := ParseReportAuthors(set.raw[SettingReportAuthors])
+	if err != nil || authors["#anna"] != "anna" || authors["tg:501"] != "anna" {
+		t.Fatalf("authors %+v %v", authors, err)
+	}
+	for _, bad := range [][2]string{
+		{`[{"peer": "-1001"}]`, `{}`},
+		{`[{"peer": "-1001", "topic": 4, "extra": 1}]`, `{}`},
+		{`[]`, `{"501": "anna"}`},
+		{`[]`, `{"tg:x": "anna"}`},
+		{`[]`, `{"#anna": ""}`},
+	} {
+		if err := seed(bad[0], bad[1]); err == nil {
+			t.Errorf("accepted %s %s", bad[0], bad[1])
+		}
 	}
 }
