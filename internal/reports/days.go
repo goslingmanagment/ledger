@@ -17,6 +17,16 @@ const (
 	StateDraftOnly     = "draft_only"
 )
 
+// SameCents says whether a posted amount and a draft's are one amount: a post is written to the cent, the agent's
+// draft keeps a page in thousandths of a dollar (as Hub gives it), so they may differ by up to half a cent.
+func SameCents(posted, draft int64) bool {
+	d := posted - draft
+	if d < 0 {
+		d = -d
+	}
+	return d <= 5000
+}
+
 // Day is a row of v_report_pages: a person's page on a report date, as posted and as drafted.
 type Day struct {
 	Person       string  `json:"person"`

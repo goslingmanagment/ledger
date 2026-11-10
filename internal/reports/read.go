@@ -243,7 +243,7 @@ func fill(ctx context.Context, q ledger.Querier, reports []Report) error {
 				if d, ok := posted[[3]string{*r.Person, r.ReportDate, p.Page}]; ok {
 					p.PostedMicros = d.PostedMicros
 					p.PostState = StatePostedChanged
-					if *d.PostedMicros == p.AmountMicros {
+					if SameCents(*d.PostedMicros, p.AmountMicros) {
 						p.PostState = StatePostedEqual
 					}
 					if r.PostedAt == nil || *d.PostedAt > *r.PostedAt {

@@ -408,3 +408,50 @@ func TestCollectPosts(t *testing.T) {
 		t.Error("an edit is not fresh")
 	}
 }
+
+// Hub gives a sale in thousandths of a dollar and the agent prints the page to the chatter rounded to the cent: the
+// post that repeats it is the draft, not a change. A cent more is a change.
+func TestAPostToTheCentEqualsADraftInMills(t *testing.T) {
+	s := postBook(t)
+	ctx := context.Background()
+	m := sample("anna_hub")
+	m["total_mills"] = 213116
+	m["pages"].([]any)[1].(map[string]any)["amount_mills"] = 181596
+	m["lines"].([]any)[2].(map[string]any)["net_mills"] = 181596
+	draft, err := Save(ctx, s, raw(t, m), "agent", ts.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	send(t, s, 10, "501", "2026-11-08T20:30:00Z", report("08.11.2026", "#Anna", "$213,12", "• Page-A - $31,52", "• VIP - $181,60"))
+	list, err := Days(ctx, s.RO, Filter{From: "2026-11-08", To: "2026-11-08"})
+	if err != nil || len(list) != 2 {
+		t.Fatalf("days: %v %+v", err, list)
+	}
+	for _, d := range list {
+		if d.State != StatePostedEqual || d.DiffMicros == nil || *d.DiffMicros != 0 {
+			t.Errorf("%s: state %s, diff %v — a post to the cent must equal the draft", d.Page, d.State, d.DiffMicros)
+		}
+	}
+	if st := statusOf(t, s, draft.ID); st != StatusPosted {
+		t.Errorf("the draft after a post to the cent: %s", st)
+	}
+	rep, err := Get(ctx, s.RO, draft.ID)
+	if err != nil || rep.Pages[1].PostState != StatePostedEqual {
+		t.Errorf("the report's page: %v %+v", err, rep.Pages)
+	}
+
+	send(t, s, 10, "501", "2026-11-08T20:30:00Z", report("08.11.2026", "#Anna", "$213,13", "• Page-A - $31,52", "• VIP - $181,61"))
+	list, _ = Days(ctx, s.RO, Filter{From: "2026-11-08", To: "2026-11-08"})
+	var changed int
+	for _, d := range list {
+		if d.State == StatePostedChanged && d.Page == "page-b" && d.DiffMicros != nil && *d.DiffMicros == 14000 {
+			changed++
+		}
+	}
+	if changed != 1 {
+		t.Errorf("a cent more must be a change of page-b by 14000 micros: %+v", list)
+	}
+	if st := statusOf(t, s, draft.ID); st != StatusDraft {
+		t.Errorf("the draft after a changed post: %s", st)
+	}
+}
