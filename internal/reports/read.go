@@ -16,6 +16,10 @@ type Page struct {
 	Page         string `json:"page"`
 	Model        string `json:"model"` // hub_pages and hub_model_slugs; "" — the page is not in the grant
 	AmountMicros int64  `json:"amount_micros"`
+	// PostedMicros is the amount of the page in the chatter's post (v_report_pages); nil — not posted. PostState
+	// compares it with this version's amount: posted_equal, posted_changed or draft_only.
+	PostedMicros *int64 `json:"posted_micros"`
+	PostState    string `json:"post_state"`
 }
 
 // Line is a sale of the breakdown, or an amount added by hand (Added, What).
@@ -56,6 +60,7 @@ type Report struct {
 	Source      string  `json:"source"`
 	TotalMicros int64   `json:"total_micros"`
 	CreatedAt   string  `json:"created_at"`
+	PostedAt    *string `json:"posted_at"` // the latest post that touches a page of the report; nil — none
 	Pages       []Page  `json:"pages"`
 	Lines       []Line  `json:"lines"`
 }
@@ -198,6 +203,10 @@ func fill(ctx context.Context, q ledger.Querier, reports []Report) error {
 	if err != nil {
 		return err
 	}
+	posted, err := postedOf(ctx, q, reports)
+	if err != nil {
+		return err
+	}
 	for i := range reports {
 		r := &reports[i]
 		r.Pages, r.Lines = []Page{}, []Line{}
@@ -212,6 +221,19 @@ func fill(ctx context.Context, q ledger.Querier, reports []Report) error {
 				return err
 			}
 			p.Model = models[p.Page]
+			p.PostState = StateDraftOnly
+			if r.Person != nil {
+				if d, ok := posted[[3]string{*r.Person, r.ReportDate, p.Page}]; ok {
+					p.PostedMicros = d.PostedMicros
+					p.PostState = StatePostedChanged
+					if *d.PostedMicros == p.AmountMicros {
+						p.PostState = StatePostedEqual
+					}
+					if r.PostedAt == nil || *d.PostedAt > *r.PostedAt {
+						r.PostedAt = d.PostedAt
+					}
+				}
+			}
 			r.Pages = append(r.Pages, p)
 		}
 		rows.Close()

@@ -26,6 +26,7 @@ import (
 	"github.com/goslingmanagment/ledger/internal/money"
 	"github.com/goslingmanagment/ledger/internal/month"
 	"github.com/goslingmanagment/ledger/internal/payroll"
+	"github.com/goslingmanagment/ledger/internal/reports"
 	"github.com/goslingmanagment/ledger/internal/ts"
 )
 
@@ -715,9 +716,48 @@ func Sources(ctx context.Context, e Env) Result {
 	return pass(name, "хаб, Bybit и сборщики мака в порядке")
 }
 
+// ReportPosts: the chatters' posts of the last 14 days that the pay base cannot use — an author or a page name not in
+// the settings, a total that does not add up, a date that does not read or lies far from the day of posting. A warning:
+// nothing is accrued from posts yet, but a missing mapping should be noticed before it is.
+func ReportPosts(ctx context.Context, e Env) Result {
+	const name = "отчёты разобраны"
+	from := ts.Date(e.Now.Add(-13 * 24 * time.Hour))
+	list, err := reports.Posts(ctx, e.Q, from, ts.Date(e.Now), true)
+	if err != nil {
+		return fail(name, "warn", err.Error(), nil)
+	}
+	var bad []string
+	for _, p := range list {
+		var why []string
+		for i, f := range p.Flags {
+			if reports.Blocking(f) || f == reports.FlagUnknownPage {
+				why = append(why, p.FlagTexts[i])
+			}
+		}
+		if len(why) == 0 {
+			continue
+		}
+		who, date := p.Sender, "без даты"
+		if p.Tag != "" {
+			who += " " + p.Tag
+		}
+		if p.Person != nil {
+			who = *p.Person
+		}
+		if p.ReportDate != nil {
+			date = *p.ReportDate
+		}
+		bad = append(bad, fmt.Sprintf("%s, %s (сообщение %d): %s", who, date, p.MsgID, strings.Join(why, "; ")))
+	}
+	if len(bad) > 0 {
+		return fail(name, "warn", fmt.Sprintf("%d постов «Отчётности» не идут в базу оплаты целиком: %s", len(bad), strings.Join(bad, " | ")), bad)
+	}
+	return pass(name, "посты «Отчётности» за 14 дней разобраны без блокирующих пометок")
+}
+
 // Run executes every check. A coverage that cannot be built fails its own checks, not the rest.
 func Run(ctx context.Context, e Env) []Result {
-	out := []Result{Balanced(ctx, e), BybitBalance(ctx, e), Coins(ctx, e), CoinsAtCost(ctx, e), CardAnchors(ctx, e), CardCover(ctx, e), Unlinked(ctx, e), Payables(ctx, e), Copies(ctx, e), Sources(ctx, e)}
+	out := []Result{Balanced(ctx, e), BybitBalance(ctx, e), Coins(ctx, e), CoinsAtCost(ctx, e), CardAnchors(ctx, e), CardCover(ctx, e), Unlinked(ctx, e), Payables(ctx, e), Copies(ctx, e), Sources(ctx, e), ReportPosts(ctx, e)}
 	cv, tabs, _, err := month.PrepareCover(ctx, e.Q, month.Inputs{})
 	if err != nil {
 		for _, n := range []string{"заявки равны покрытому net", "k переводов в норме", "переводы не просрочены", "депозиты сходятся с заявками", "дрейф закрытых месяцев"} {

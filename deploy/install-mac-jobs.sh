@@ -2,7 +2,8 @@
 # Ставит на мак задания ledger: бинарник в ~/.config/ledger/bin и launchd-агенты из одного шаблона, журналы в ~/Library/Logs/ledger.
 #   bash deploy/install-mac-jobs.sh shadow   сборщики и толчок коммитов журнала на сервер: канон — файл в /OS
 #   bash deploy/install-mac-jobs.sh live     сборщики и зеркало журнала в /OS: канон — ledger
-# Сборщики: карты раз в 30 минут, таблицы выплат раз в час; журнал раз в час. Повторный запуск обновляет всё.
+# Сборщики: карты раз в 30 минут, посты «Отчётности» раз в 15 минут (если есть reports.json), таблицы выплат раз в час;
+# журнал раз в час. Повторный запуск обновляет всё.
 set -Eeuo pipefail
 mode=${1:-}
 case "$mode" in shadow | live) ;; *) printf 'нужен режим: shadow или live\n' >&2; exit 2 ;; esac
@@ -41,6 +42,12 @@ remove_agent() { # имя
 
 install_agent cards 1800 collect cards
 install_agent sheets 3600 collect sheets
+if [ -f "$dest/reports.json" ]; then
+  install_agent reports 900 collect reports
+else
+  remove_agent reports
+  printf 'skipped reports: нет %s (см. deploy/README.md, «Задания на маке»)\n' "$dest/reports.json"
+fi
 if [ "$mode" = shadow ]; then
   remove_agent mirror
   install_agent journal 3600 journal sync --git "$os_dir"
