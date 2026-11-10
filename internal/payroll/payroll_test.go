@@ -1159,8 +1159,13 @@ func TestUnenteredSharedSlot(t *testing.T) {
 // teamWork stores a work of Hub's team facts on page-1 in the week window it began in.
 func teamWork(t *testing.T, s *db.Store, ctx context.Context, user int64, username, kind, from, to string) {
 	t.Helper()
+	teamWorkIn(t, s, ctx, ts.Format(ts.WeekStart(t0(from))), user, username, kind, from, to)
+}
+
+// teamWorkIn stores a work of Hub's team facts on page-1 in the window that begins at win.
+func teamWorkIn(t *testing.T, s *db.Store, ctx context.Context, win string, user int64, username, kind, from, to string) {
+	t.Helper()
 	start, end := t0(from), t0(to)
-	win := ts.Format(ts.WeekStart(start))
 	ref := fmt.Sprintf("%d:%s", user, start.UTC().Format("2006-01-02T15:04:05.000Z"))
 	payload := fmt.Sprintf(`{"ref":%q,"userId":%d,"username":%q,"role":"chatter","kind":%q,"startedAt":%q,"endedAt":%q,`+
 		`"ongoing":false,"workedMinutes":%d,"pages":[{"pageLabel":"page-1","messages":5,"salesFrom":%q}]}`,
@@ -1379,4 +1384,48 @@ func TestUnenteredTabOffTheCard(t *testing.T) {
 		"bravo 2026-11-03 page-1":   {"ok", reasonSlot, 60000, 15}, // his alone: no «неизвестно» shared with Foxtrot
 		"foxtrot 2026-11-10 page-1": {"ok", reasonFacts, 30000, 7.5},
 	}, "off the card")
+}
+
+// Before the split rule's start the sheets still pay, and «не занесено» goes by the slot: but where Hub's works prove
+// the slot (a window read from hub_team_since on) and Hub saw the person before and after it, no shift of theirs on the
+// page there is a day off, not the whole window's money. A look-in is no shift. Before the first window, before the
+// person's first work in Hub and after their last, Hub knows nothing of them: the slot counts as before.
+func TestUnenteredDayOffBeforeTheRule(t *testing.T) {
+	s, ctx := openStore(t)
+	now := "2026-11-08T10:00:00+03:00"
+	// Alfa: 16:00–00:00 every day, Hub user 8. Bravo: 00:00–08:00, mon and tue (the cells of Tue and Wed), Hub user 5.
+	f := newSheets("Alpha")
+	f.set("Alpha", []string{"Альфа", "Браво"}, map[string][][]Cell{
+		"Альфа": sheet(125, 0, week("2026-10-19", map[string][7]any{"page-1": {100, nil, nil, nil, nil, nil, nil}}),
+			week("2026-10-26", map[string][7]any{"page-1": {100, nil, 100, nil, 100, 100, nil}})),
+		"Браво": sheet(25, 0, week("2026-10-26", map[string][7]any{"page-1": {100, nil, nil, nil, nil, nil, nil}})),
+	})
+	f.run(t, s, ctx, now)
+	hubDay(t, s, ctx, "page-1", "2026-10-01T00:00:00+03:00", now,
+		[2]any{"2026-10-24T20:00:00+03:00", 30000}, // Alfa's slot the day before Hub's first window
+		[2]any{"2026-10-27T20:00:00+03:00", 40000}, // Alfa's slot: her shift
+		[2]any{"2026-10-29T20:00:00+03:00", 80000}, // Alfa's slot: only a look-in of hers, someone else's money
+		[2]any{"2026-11-01T20:00:00+03:00", 10000}, // Alfa's slot after her last work in Hub
+		[2]any{"2026-10-27T03:00:00+03:00", 60000}, // Bravo's slots before his first work in Hub
+		[2]any{"2026-10-28T03:00:00+03:00", 20000})
+	// Hub's works begin on Sunday 10-25 (hub_team_since): that day's window, then the week; the works of a window are
+	// read from a day before it.
+	if _, err := s.RW.ExecContext(ctx, `INSERT INTO hub_team_sync(window_from, window_to, status, reasons, read_at, ok_at) VALUES
+		('2026-10-25T00:00:00+03:00', '2026-10-26T00:00:00+03:00', 'ok', '[]', ?, ?),
+		('2026-10-26T00:00:00+03:00', '2026-11-02T00:00:00+03:00', 'ok', '[]', ?, ?)`, now, now, now, now); err != nil {
+		t.Fatal(err)
+	}
+	teamWorkIn(t, s, ctx, "2026-10-25T00:00:00+03:00", 8, "Alfa", "visit", "2026-10-24T10:00:00+03:00", "2026-10-24T10:20:00+03:00")
+	teamWork(t, s, ctx, 8, "Alfa", "shift", "2026-10-27T16:05:00+03:00", "2026-10-27T23:55:00+03:00")
+	teamWork(t, s, ctx, 8, "Alfa", "visit", "2026-10-29T18:00:00+03:00", "2026-10-29T18:15:00+03:00")
+	teamWork(t, s, ctx, 8, "Alfa", "shift", "2026-10-30T16:00:00+03:00", "2026-10-30T23:50:00+03:00")
+	teamWork(t, s, ctx, 5, "Bravo", "shift", "2026-10-29T00:00:00+03:00", "2026-10-29T08:00:00+03:00") // off the card's days
+	rebuild(t, s, ctx, now)
+	wantUnentered(t, unenteredRows(t, s), map[string]unenteredGot{
+		"alfa 2026-10-24 page-1":  {"ok", reasonSlot, 30000, 7.5}, // no window proves it: no false day off
+		"alfa 2026-10-27 page-1":  {"ok", reasonSlot, 40000, 10},  // her shift: the slot, as before the rule
+		"alfa 2026-11-01 page-1":  {"ok", reasonSlot, 10000, 2.5}, // Hub has not seen her since
+		"bravo 2026-10-27 page-1": {"ok", reasonSlot, 60000, 15},  // not in Hub yet
+		"bravo 2026-10-28 page-1": {"ok", reasonSlot, 20000, 5},
+	}, "before the rule (the day off 10-29 is no gap)")
 }

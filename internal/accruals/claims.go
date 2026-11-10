@@ -262,6 +262,8 @@ func notInFacts(ctx context.Context, q ledger.Querier, ref string) (string, erro
 		return "", err
 	case status != "ok":
 		return "окно фактов " + win[:10] + " не доказано, чья продажа — неизвестно: ledger hub team-sync, затем снова", nil
+	case win < ts.Format(ts.WeekStart(split.Default.Since)):
+		return "продажа раньше правил дележа (" + ts.Date(split.Default.Since) + "): её платит таблица выплат", nil
 	}
 	return "", nil
 }

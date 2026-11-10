@@ -14,7 +14,8 @@
   `LEDGER_HUB_AGENT_KEY=<ключ> ledger hub sync`; что доказано — `ledger hub status`, оборот — `ledger hub net --month ГГГГ-ММ`.
   Лимит запросов к датасетам (`hub_rpm`) у хаба на адрес: `hub sync` и `month.py` с одного мака не запускать одновременно.
   Факты смен и продаж (выпуск 2, ключу нужны `read:team` и `read:money`): джоб `hub-team` раз в час, вручную —
-  `ledger hub team-sync [--from ГГГГ-ММ-ДД] [--to …]`; окна по неделям МСК — в `ledger hub status`, поле `team`.
+  `ledger hub team-sync [--from ГГГГ-ММ-ДД] [--to …]`; окна по неделям МСК — в `ledger hub status`, поле `team`. Читаются с
+  `settings.hub_team_since` (первый день работ людей в хабе, раньше правил): недели до правил — только для «не занесено».
   Начисления из фактов в тени (ничего не проводят) пересчитываются после каждого чтения: `fact_homes`, `fact_accruals`,
   `v_accrual_diff`; было — стало — `ledger accruals diff [--week понедельник]` (API `GET /v1/accruals/diff?week=`).
   Человек хаба — по `people.aliases` (имя хаба или `hub:<id>`), ставка — шапка его вкладки модели («Ставка %», «Фикс/см»).

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/goslingmanagment/ledger/internal/db"
@@ -19,7 +20,9 @@ import (
 // The team's facts (ledger release 2, L2): Hub's `agentTeamSales` gives a window's work of the team and every sale on
 // the key's pages with the facts the split rules read (packages/contracts/src/agent-team.ts in the hub repo). ledger
 // reads them by Moscow week — Monday 00:00 to the next Monday, the current week up to the moment of reading — each
-// hour the weeks that touch the last 14 days, once a week every week since the rule's start. A window is Hub's
+// hour the weeks that touch the last 14 days, once a week every week since hub_team_since: the first day Hub has the
+// team's works, before the rule's start too (the first window begins on that day). The rule pays from its own week;
+// the earlier weeks tell «не занесено» who worked while the sheets still paid. A window is Hub's
 // consistent snapshot: its works (from a day before it to 7 days after it) and its sales. An answer that is not whole
 // — a refusal, a key without read:team, another window than asked, a holder that is not among the works, a page of
 // the grant missing — leaves the window unknown: what it proved before stays, the accruals do not count it.
@@ -60,11 +63,32 @@ const (
 	// (AGENT_TEAM_SALES_WORK_BEFORE_DAYS, AGENT_TEAM_SALES_WORK_AFTER_DAYS).
 	teamWorkBefore = 24 * time.Hour
 	teamWorkAfter  = 7 * 24 * time.Hour
-	// teamTail is how far back the hourly read goes; teamFullEvery how often every week since the rule is read.
+	// teamTail is how far back the hourly read goes; teamFullEvery how often every week since hub_team_since is read.
 	teamTail      = 14 * 24 * time.Hour
 	teamFullEvery = 7 * 24 * time.Hour
 	teamFullAt    = "hub:team:full_at"
 )
+
+// SettingTeamSince is the first Moscow day of Hub's per-person works (the chat extension's activity reached Hub then):
+// the team's facts are read from it. No window begins earlier, so no read says «nobody worked» where Hub has no data.
+const SettingTeamSince = "hub_team_since"
+
+// TeamSince is the first day of the team's facts: hub_team_since, the rule's start without it, never later than it.
+func TeamSince(set Settings) (time.Time, error) {
+	rule := split.Default.Since
+	v := strings.TrimSpace(set.raw[SettingTeamSince])
+	if v == "" {
+		return rule, nil
+	}
+	d, err := time.ParseInLocation(ts.DateLayout, v, ts.MSK)
+	if err != nil {
+		return rule, fmt.Errorf("настройка %s: нужна дата ГГГГ-ММ-ДД, не «%s»", SettingTeamSince, v)
+	}
+	if d.After(rule) {
+		return rule, nil
+	}
+	return d, nil
+}
 
 // TeamWork is one piece of the team's work in Hub's answer.
 type TeamWork struct {
@@ -367,13 +391,20 @@ type TeamSyncer struct {
 	Client *Client
 	Now    func() time.Time
 	Log    func(string)
-	// Since is the rule's start: no window before its week is read.
+	// Since is the first instant read: no window begins earlier. Zero — TeamSince of the settings.
 	Since time.Time
 }
 
 // NewTeamSyncer builds a syncer that shares the hub_rpm throttle with the dataset sync.
 func NewTeamSyncer(store *db.Store, cfg Config) *TeamSyncer {
-	return &TeamSyncer{Store: store, Client: NewClient(cfg, &Throttle{DB: store.RW}), Now: time.Now, Since: split.Default.Since}
+	return &TeamSyncer{Store: store, Client: NewClient(cfg, &Throttle{DB: store.RW}), Now: time.Now}
+}
+
+func (s *TeamSyncer) since(set Settings) (time.Time, error) {
+	if !s.Since.IsZero() {
+		return s.Since, nil
+	}
+	return TeamSince(set)
 }
 
 // TeamWindow is one window of a run.
@@ -413,12 +444,20 @@ func (s *TeamSyncer) logf(format string, args ...any) {
 	}
 }
 
-// Hourly reads the weeks that touch the last 14 days, or every week since the rule when the last full read that
+// Hourly reads the weeks that touch the last 14 days, or every week since hub_team_since when the last full read that
 // proved them all is a week old.
 func (s *TeamSyncer) Hourly(ctx context.Context) (TeamReport, error) {
 	now := s.Now()
+	set, err := LoadSettings(ctx, s.Store.RW)
+	if err != nil {
+		return TeamReport{}, err
+	}
+	since, err := s.since(set)
+	if err != nil {
+		return TeamReport{}, err
+	}
 	var last string
-	err := s.Store.RW.QueryRowContext(ctx, `SELECT value FROM cursors WHERE name = ?`, teamFullAt).Scan(&last)
+	err = s.Store.RW.QueryRowContext(ctx, `SELECT value FROM cursors WHERE name = ?`, teamFullAt).Scan(&last)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return TeamReport{}, err
 	}
@@ -428,7 +467,7 @@ func (s *TeamSyncer) Hourly(ctx context.Context) (TeamReport, error) {
 	}
 	from := now.Add(-teamTail)
 	if full {
-		from = s.Since
+		from = since
 	}
 	rep, err := s.Run(ctx, from, now)
 	rep.Full = full
@@ -444,20 +483,23 @@ func (s *TeamSyncer) Hourly(ctx context.Context) (TeamReport, error) {
 
 type teamSpan struct{ from, to time.Time }
 
-// teamWindows are the Moscow weeks that touch [from, to), none before the rule's week and none not begun by now; the
-// current week ends at now.
+// teamWindows are the Moscow weeks that touch [from, to), none before since (the week of since begins at it) and none
+// not begun by now; the current week ends at now.
 func teamWindows(since, from, to, now time.Time) []teamSpan {
 	if from.Before(since) {
 		from = since
 	}
 	var out []teamSpan
 	for w := ts.WeekStart(from); w.Before(to) && w.Before(now); w = w.AddDate(0, 0, 7) {
-		end := w.AddDate(0, 0, 7)
+		start, end := w, w.AddDate(0, 0, 7)
+		if start.Before(since) {
+			start = since
+		}
 		if end.After(now) {
 			end = now.Truncate(time.Second)
 		}
-		if end.After(w) {
-			out = append(out, teamSpan{w, end})
+		if end.After(start) {
+			out = append(out, teamSpan{start, end})
 		}
 	}
 	return out
@@ -481,6 +523,10 @@ func (s *TeamSyncer) Run(ctx context.Context, from, to time.Time) (TeamReport, e
 	if err != nil {
 		return rep, err
 	}
+	since, err := s.since(set)
+	if err != nil {
+		return rep, err
+	}
 	if s.Client.Throttle != nil {
 		s.Client.Throttle.RPM = rpm
 	}
@@ -491,7 +537,7 @@ func (s *TeamSyncer) Run(ctx context.Context, from, to time.Time) (TeamReport, e
 	calls0 := s.Client.Calls
 	defer func() { rep.Requests = s.Client.Calls - calls0 }()
 	refused := "" // the key's refusal: the other windows are not asked
-	for _, w := range teamWindows(s.Since, from, to, now) {
+	for _, w := range teamWindows(since, from, to, now) {
 		res := TeamWindow{From: ts.Format(w.from), To: ts.Format(w.to)}
 		c0 := s.Client.Calls
 		var a *teamAnswer

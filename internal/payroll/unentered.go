@@ -197,7 +197,9 @@ type unenteredTab struct {
 
 // computeUnentered walks the days without a value of the last 45 days. A day of a week Hub's team facts proved, of
 // a person who is a Hub user, is their own accrued sales of the day (teamFacts.rows), and a day without their work is
-// a day off; every other day is the money of the week's pages in the person's slot by the card.
+// a day off; every other day is the money of the week's pages in the person's slot by the card — unless Hub's works
+// prove the slot (settleSlots): then a slot nobody shares and the person had no shift in is a day off too, before the
+// split rule's start as well.
 //
 // Two kinds of day are no gap at all and make no row: a day on or before the person's paid-through day (a payout is
 // the check of those days, whichever way they would be counted), and, for the slot only, a day of a tab whose model
@@ -396,10 +398,10 @@ func computeUnentered(ctx context.Context, q ledger.Querier, now time.Time) ([]u
 			}
 		}
 	}
-	// The slot rows of every person go through sharedSlots first, so that a colleague on the same slot who has no
+	// The slot rows of every person go through settleSlots first, so that a colleague on the same slot who has no
 	// facts is settled exactly as before. Then a day the facts cover drops its slot rows on Hub's pages (and the
 	// «no slot» row) for the person's own sales; a page outside the grant keeps what the slot said.
-	out, err = sharedSlots(ctx, q, out)
+	out, err = settleSlots(ctx, q, out)
 	if err != nil {
 		return nil, err
 	}
@@ -535,7 +537,9 @@ func loadFacts(ctx context.Context, q ledger.Querier, now time.Time) (*teamFacts
 		return nil, err
 	}
 	// A work is in every window its days touch: the whole version is the one of the proven window it began in, else
-	// the longest one there is (it began before the facts).
+	// the longest one there is (it began before the facts). The Hub users the facts answer for are those of the rule's
+	// weeks: the windows before them (hub_team_since) are read for the slot (settleSlots).
+	ruleWeek := ts.WeekStart(split.Default.Since)
 	rows, err = q.QueryContext(ctx, `SELECT s.window_from, s.window_to, w.ref, w.payload FROM hub_works w
 		JOIN hub_team_sync s ON s.window_from = w.window_from WHERE s.status = 'ok' ORDER BY w.ref, s.window_from`)
 	if err != nil {
@@ -564,7 +568,9 @@ func loadFacts(ctx context.Context, q ledger.Querier, now time.Time) (*teamFacts
 			rows.Close()
 			return nil, fmt.Errorf("hub_team_sync %s: bad window", wf)
 		}
-		f.users[w.UserID] = w.Username
+		if !from.Before(ruleWeek) {
+			f.users[w.UserID] = w.Username
+		}
 		v := version{w: w, whole: !w.StartedAt.Before(from) && w.StartedAt.Before(to)}
 		old, seen := works[ref]
 		switch {
@@ -675,11 +681,17 @@ func (f *teamFacts) rows(t unenteredTab, date string) []unenteredRow {
 	return out
 }
 
-// sharedSlots settles the page-window money two or more people's empty cells claim at once: their cards put them
-// on the same slot of the page, and nobody entered it. Where Hub's team facts prove the week, it is theirs whose
-// shift Hub saw on the page in the window (others drop out: they did not work it); otherwise it is «неизвестно»
-// for each of them — never the same money counted twice.
-func sharedSlots(ctx context.Context, q ledger.Querier, rows []unenteredRow) ([]unenteredRow, error) {
+// settleSlots settles the page-window money of the slot rows by Hub's team facts.
+//
+// Two or more people's empty cells claim it at once: their cards put them on the same slot of the page, and nobody
+// entered it. Where Hub's team facts prove the window, it is theirs whose work Hub saw on the page in the window
+// (others drop out: they did not work it); otherwise it is «неизвестно» for each of them — never the same money
+// counted twice.
+//
+// One person's claim stays as the slot says, unless Hub's facts prove them off it (teamWorks.dayOff): no shift of
+// theirs on the page in the window, a look-in being no shift. Then the day is a day off, not a gap. Before the split
+// rule's start this is all Hub can say: the payout sheets still pay those weeks, the accruals do not count them.
+func settleSlots(ctx context.Context, q ledger.Querier, rows []unenteredRow) ([]unenteredRow, error) {
 	type slotKey struct {
 		model, page string
 		from, to    int64
@@ -691,17 +703,7 @@ func sharedSlots(ctx context.Context, q ledger.Querier, rows []unenteredRow) ([]
 			claims[k] = append(claims[k], i)
 		}
 	}
-	var shared []slotKey
-	for k, idx := range claims {
-		people := map[string]bool{}
-		for _, i := range idx {
-			people[rows[i].person] = true
-		}
-		if len(people) > 1 {
-			shared = append(shared, k)
-		}
-	}
-	if len(shared) == 0 {
+	if len(claims) == 0 {
 		return rows, nil
 	}
 	worked, err := provenWorks(ctx, q)
@@ -709,8 +711,20 @@ func sharedSlots(ctx context.Context, q ledger.Querier, rows []unenteredRow) ([]
 		return nil, err
 	}
 	drop := map[int]bool{}
-	for _, k := range shared {
+	for k, idx := range claims {
 		from, to := time.Unix(k.from, 0), time.Unix(k.to, 0)
+		people := map[string]bool{}
+		for _, i := range idx {
+			people[rows[i].person] = true
+		}
+		if len(people) == 1 {
+			if worked.dayOff(rows[idx[0]].person, k.page, from, to) {
+				for _, i := range idx {
+					drop[i] = true
+				}
+			}
+			continue
+		}
 		proven, who := worked.on(k.page, from, to)
 		var keep []int
 		if proven {
@@ -744,18 +758,23 @@ func sharedSlots(ctx context.Context, q ledger.Querier, rows []unenteredRow) ([]
 	return out, nil
 }
 
-// teamWorks are the shifts and look-ins of the weeks Hub's team facts proved (hub_team_sync ok), by ledger person.
+// teamWorks are the shifts and look-ins of the windows Hub's team facts proved (hub_team_sync ok, from hub_team_since
+// on), by ledger person.
 type teamWorks struct {
 	windows []struct{ from, to time.Time }
-	works   []struct {
-		person   string
-		pages    []string
-		from, to time.Time
-	}
+	works   []provenWork
+	// seen spans each person's works: from the start of the first to the end of the last.
+	seen map[string]struct{ from, to time.Time }
+}
+
+type provenWork struct {
+	person, kind string
+	pages        []string
+	from, to     time.Time
 }
 
 func provenWorks(ctx context.Context, q ledger.Querier) (teamWorks, error) {
-	var tw teamWorks
+	tw := teamWorks{seen: map[string]struct{ from, to time.Time }{}}
 	rows, err := q.QueryContext(ctx, `SELECT window_from, window_to FROM hub_team_sync WHERE status = 'ok'`)
 	if err != nil {
 		return tw, err
@@ -809,13 +828,36 @@ func provenWorks(ctx context.Context, q ledger.Querier) (teamWorks, error) {
 		for _, p := range w.Pages {
 			pages = append(pages, p.PageLabel)
 		}
-		tw.works = append(tw.works, struct {
-			person   string
-			pages    []string
-			from, to time.Time
-		}{person, pages, w.StartedAt, w.EndedAt})
+		tw.works = append(tw.works, provenWork{person: person, kind: w.Kind, pages: pages, from: w.StartedAt, to: w.EndedAt})
+		seen, ok := tw.seen[person]
+		if !ok || w.StartedAt.Before(seen.from) {
+			seen.from = w.StartedAt
+		}
+		if !ok || w.EndedAt.After(seen.to) {
+			seen.to = w.EndedAt
+		}
+		tw.seen[person] = seen
 	}
 	return tw, wr.Err()
+}
+
+// dayOff says whether Hub's facts prove the person did not work the page in [from, to): the window is proven, Hub saw
+// them before it and after it (a work began by its start and one ended by its end or later: they were on Hub then, so
+// no work is no shift, not missing data), and no shift of theirs on the page overlaps it. A look-in is no shift.
+func (tw teamWorks) dayOff(person, page string, from, to time.Time) bool {
+	if proven, _ := tw.on(page, from, to); !proven {
+		return false
+	}
+	seen, ok := tw.seen[person]
+	if !ok || seen.from.After(from) || seen.to.Before(to) {
+		return false
+	}
+	for _, w := range tw.works {
+		if w.person == person && w.kind == split.Shift && w.from.Before(to) && from.Before(w.to) && slices.Contains(w.pages, page) {
+			return false
+		}
+	}
+	return true
 }
 
 // on says whether Hub's facts prove the window [from, to), and whose work on the page overlaps it.
