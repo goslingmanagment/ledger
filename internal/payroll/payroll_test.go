@@ -1097,12 +1097,13 @@ func TestSlotWindows(t *testing.T) {
 }
 
 // Two cards on the same slot of a page, nobody entered it: the money is not counted for both. Without Hub's team
-// facts each cell is «неизвестно»; with a proven week it is theirs whose shift Hub saw on the page.
+// facts each cell is «неизвестно»; with a proven week it is theirs whose shift Hub saw on the page. Эхо's card lists
+// no models: that is every model, the slot counts as before.
 func TestUnenteredSharedSlot(t *testing.T) {
 	s, ctx := openStore(t)
 	now := "2026-09-20T10:00:00+03:00"
 	if err := PutPeople(ctx, s.RW, []Person{
-		{Slug: "echo", Name: "Эхо", Status: "active", Schedule: "00:00-08:00", Workdays: []string{"mon", "tue"}, Models: []string{"alpha"}},
+		{Slug: "echo", Name: "Эхо", Status: "active", Schedule: "00:00-08:00", Workdays: []string{"mon", "tue"}},
 	}, "test", t0("2026-09-01")); err != nil {
 		t.Fatal(err)
 	}
@@ -1254,4 +1255,128 @@ func TestUnenteredFromFacts(t *testing.T) {
 	if list[0].UnenteredDays != 3 || list[0].UnenteredShare != 26.25 || list[0].UnenteredUnknown != 0 {
 		t.Fatalf("v_payables %+v", list[0])
 	}
+}
+
+type unenteredGot struct {
+	status, reason string
+	net            int64
+	share          float64
+}
+
+// unenteredRows reads payroll_unentered by "person date page".
+func unenteredRows(t *testing.T, s *db.Store) map[string]unenteredGot {
+	t.Helper()
+	rows, err := s.RO.Query(`SELECT person, date, page, status, COALESCE(reason, ''), COALESCE(net_mills, 0), COALESCE(share, 0)
+		FROM payroll_unentered`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[string]unenteredGot{}
+	for rows.Next() {
+		var person, date, page string
+		var r unenteredGot
+		if err := rows.Scan(&person, &date, &page, &r.status, &r.reason, &r.net, &r.share); err != nil {
+			t.Fatal(err)
+		}
+		got[person+" "+date+" "+page] = r
+	}
+	return got
+}
+
+func wantUnentered(t *testing.T, got, want map[string]unenteredGot, what string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("%s: rows %+v, want %+v", what, got, want)
+	}
+	for k, w := range want {
+		if got[k] != w {
+			t.Errorf("%s: %s = %+v, want %+v", what, k, got[k], w)
+		}
+	}
+}
+
+// proveWeek stores Hub's team facts proving the week of 2026-11-09 (the one before is not), page-1 as Alpha's page.
+func proveWeek(t *testing.T, s *db.Store, ctx context.Context, accruals string) {
+	t.Helper()
+	for _, q := range []string{
+		`INSERT INTO hub_pages(page_label, platform, model_slug, model_name, seen_at) VALUES ('page-1', 'fansly', 'Alpha', 'Alpha', '2026-11-15')`,
+		`INSERT INTO hub_team_sync(window_from, window_to, status, reasons, read_at, ok_at) VALUES
+			('2026-11-09T00:00:00+03:00', '2026-11-16T00:00:00+03:00', 'ok', '[]', '2026-11-16', '2026-11-16')`,
+		`INSERT INTO fact_weeks(week, status, computed_at) VALUES ('2026-11-02', 'unknown', '2026-11-16'), ('2026-11-09', 'ok', '2026-11-16')`,
+		`INSERT INTO fact_accruals(hub_user_id, username, person, model, page_label, day, week, kind, sales, net_micros) VALUES ` + accruals,
+	} {
+		if _, err := s.RW.ExecContext(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A payout is the check of the days it reached: an empty day on or before the person's paid-through day is no gap,
+// by the slot or by Hub's facts alike. A day after it still is.
+func TestUnenteredStopsAtPaidThrough(t *testing.T) {
+	s, ctx := openStore(t)
+	now := "2026-11-22T10:00:00+03:00"
+	// Bravo works 00:00–08:00, mon and tue (the cells of Tue and Wed). Days: 11-02 25, 11-09 20, 11-11 10, 11-16 15.
+	f := newSheets("Alpha")
+	f.set("Alpha", []string{"Браво"}, map[string][][]Cell{
+		"Браво": sheet(70, 0, week("2026-11-02", map[string][7]any{"page-1": {100, nil, nil, nil, nil, nil, nil}}),
+			week("2026-11-09", map[string][7]any{"page-1": {80, nil, 40, nil, nil, nil, nil}}),
+			week("2026-11-16", map[string][7]any{"page-1": {60, nil, nil, nil, nil, nil, nil}})),
+	})
+	f.run(t, s, ctx, now)
+	hubDay(t, s, ctx, "page-1", "2026-10-01T00:00:00+03:00", now,
+		[2]any{"2026-11-03T03:00:00+03:00", 60000}, // his slot, unproven week, before paid-through
+		[2]any{"2026-11-17T03:00:00+03:00", 40000}) // his slot, unproven week, after it
+	// The week of 11-09 is proven: his own sales 11-10 (before paid-through) and 11-12 (after it).
+	proveWeek(t, s, ctx, `(5, 'Bravo', 'bravo', 'Alpha', 'page-1', '2026-11-10', '2026-11-09', 'sales', 1, 30000000),
+		(5, 'Bravo', 'bravo', 'Alpha', 'page-1', '2026-11-12', '2026-11-09', 'sales', 1, 15000000)`)
+	teamWork(t, s, ctx, 5, "Bravo", "shift", "2026-11-10T00:01:00+03:00", "2026-11-10T07:59:00+03:00")
+	teamWork(t, s, ctx, 5, "Bravo", "shift", "2026-11-12T00:00:00+03:00", "2026-11-12T08:00:00+03:00")
+	rebuild(t, s, ctx, now)
+	wantUnentered(t, unenteredRows(t, s), map[string]unenteredGot{
+		"bravo 2026-11-03 page-1": {"ok", reasonSlot, 60000, 15},
+		"bravo 2026-11-10 page-1": {"ok", reasonFacts, 30000, 7.5},
+		"bravo 2026-11-12 page-1": {"ok", reasonFacts, 15000, 3.75},
+		"bravo 2026-11-17 page-1": {"ok", reasonSlot, 40000, 10},
+	}, "nothing paid")
+	// 55 clears 11-02, 11-09 and 11-11: paid through 11-11. 50 leaves 5 of 11-11: the payout reached it, paid through
+	// 11-10. Either way 11-03 and 11-10 are settled.
+	for _, amount := range []string{"55.00", "50.00"} {
+		importJournal(t, s, ctx, "2026-11-20T09:00:00+03:00", payout(1, "2026-11-20", "Браво", "Alpha", amount, "по таблице"))
+		rebuild(t, s, ctx, now)
+		wantUnentered(t, unenteredRows(t, s), map[string]unenteredGot{
+			"bravo 2026-11-12 page-1": {"ok", reasonFacts, 15000, 3.75},
+			"bravo 2026-11-17 page-1": {"ok", reasonSlot, 40000, 10},
+		}, "paid "+amount)
+	}
+}
+
+// A tab of a model the card no longer lists makes no slot rows, so it does not make a colleague's slot shared; Hub's
+// facts of the person's own sale on that model still count. A card without models is TestUnenteredSharedSlot's echo.
+func TestUnenteredTabOffTheCard(t *testing.T) {
+	s, ctx := openStore(t)
+	now := "2026-11-15T10:00:00+03:00"
+	// Foxtrot sits on Bravo's slot (00:00–08:00, mon and tue) but has left Alpha: the card lists Beta only.
+	if err := PutPeople(ctx, s.RW, []Person{
+		{Slug: "foxtrot", Name: "Фокстрот", Status: "active", Schedule: "00:00-08:00", Workdays: []string{"mon", "tue"}, Models: []string{"beta"}},
+	}, "test", t0("2026-09-01")); err != nil {
+		t.Fatal(err)
+	}
+	tab := func() [][]Cell {
+		return sheet(45, 0, week("2026-11-02", map[string][7]any{"page-1": {100, nil, nil, nil, nil, nil, nil}}),
+			week("2026-11-09", map[string][7]any{"page-1": {80, nil, nil, nil, nil, nil, nil}}))
+	}
+	f := newSheets("Alpha")
+	f.set("Alpha", []string{"Браво", "Фокстрот"}, map[string][][]Cell{"Браво": tab(), "Фокстрот": tab()})
+	f.run(t, s, ctx, now)
+	hubDay(t, s, ctx, "page-1", "2026-10-01T00:00:00+03:00", now, [2]any{"2026-11-03T03:00:00+03:00", 60000})
+	// The week of 11-09 is proven, and Hub user 6 (the card foxtrot by its code) sold on Alpha's page-1 on 11-10.
+	proveWeek(t, s, ctx, `(6, 'Foxtrot', 'foxtrot', 'Alpha', 'page-1', '2026-11-10', '2026-11-09', 'sales', 1, 30000000)`)
+	teamWork(t, s, ctx, 6, "Foxtrot", "shift", "2026-11-10T00:01:00+03:00", "2026-11-10T07:59:00+03:00")
+	rebuild(t, s, ctx, now)
+	wantUnentered(t, unenteredRows(t, s), map[string]unenteredGot{
+		"bravo 2026-11-03 page-1":   {"ok", reasonSlot, 60000, 15}, // his alone: no «неизвестно» shared with Foxtrot
+		"foxtrot 2026-11-10 page-1": {"ok", reasonFacts, 30000, 7.5},
+	}, "off the card")
 }
