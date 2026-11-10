@@ -14,6 +14,9 @@ type Micros int64
 // Scale is one dollar in micros.
 const Scale = 1_000_000
 
+// FromMills is an amount in thousandths of a dollar (Hub's and the chat agent's unit) in micros.
+func FromMills(mills int64) Micros { return Micros(mills * 1000) }
+
 // Parse reads "1234.56", "-0.0001", "1 234,5". More than six decimals is an error, not a rounding.
 func Parse(s string) (Micros, error) {
 	t := strings.ReplaceAll(strings.TrimSpace(s), " ", "")

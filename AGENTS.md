@@ -41,6 +41,12 @@
   дни начисляет `fact_accruals` на вкладку человека модели (source_key с `:facts`, `payable_days.source`), раньше — таблица как была;
   таблица после даты — зеркало (расхождение — сведения в health и payables), день без доказанных фактов стоит как проведён и
   «неизвестно» в «не занесено» (reason «факты хаба не начислили: …»).
+- Отчёты смен (R1, план `docs/plans/2026-11-10-shift-reports.md`): `ledger report save <файл|->` — агент команды сохраняет
+  расклад отчёта (`POST /v1/reports`, ключ с правом `reports`: только эта запись, сочетается с другими правами); суммы в mills,
+  страницы сходятся с итогом, включённые строки и добавки — со страницей, до тысячной. Тот же JSON новой версии не создаёт,
+  иной — версия N+1, прежняя `superseded`. `ledger report list [--from] [--to] [--person] [--json]` (по умолчанию 14 дней),
+  `ledger report show <id> [--json]`; хаб читает `GET /v1/reports?from&to[&hub_user_id][&hub_username]` ключом `payouts`
+  (только отчёты этого пользователя или его карточки). Таблицы `shift_reports*`, вид `v_shift_reports`. Этап ничего не проводит и не начисляет.
 - Бриф: `ledger brief [--text] [--new]` — открытый неотправленный или новый из открытых предложений, номера заморожены; `ledger brief-sent --brief N`, `ledger pending`.
   Решения: `ledger decide --brief N --set 1=confirm --set 2=personal --set 3=custom:{…} --set 4=defer --set 5=recorded:388,389`, весь набор одной транзакцией, ключ с правом decide.
   `mode` shadow: решения только записываются, закрывает их импорт журнала или `import bybit-state`; live: `confirm` и `custom` (JSON-правка: `category`, `counterparty`, `model`, `note`, `type`, `amount`, `split`) пишут строки и проводки, точное правило пишет само.
