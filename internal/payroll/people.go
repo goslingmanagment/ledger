@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -305,6 +306,24 @@ func (r *Resolver) BySlug(slug string) (Person, bool) {
 		}
 	}
 	return Person{}, false
+}
+
+// HubPerson is the card of a Hub user: one whose aliases name `hub:<id>`, else their Hub username (Resolve: title,
+// alias, tab_aliases; the model decides between two cards of one name), else the card whose code is the username,
+// case aside (Hub's «Grisha» is the card grisha: the agency's logins are the cards' codes). The error is the
+// username's.
+func (r *Resolver) HubPerson(model string, user int64, username string) (string, error) {
+	if slug, err := r.Resolve(model, "hub:"+strconv.FormatInt(user, 10)); err == nil {
+		return slug, nil
+	}
+	slug, err := r.Resolve(model, username)
+	if err == nil {
+		return slug, nil
+	}
+	if card, ok := r.BySlug(strings.ToLower(strings.TrimSpace(username))); ok {
+		return card.Slug, nil
+	}
+	return "", err
 }
 
 var parenthetical = regexp.MustCompile(`\s*\([^()]*\)\s*$`)

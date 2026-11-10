@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/goslingmanagment/ledger/internal/db"
@@ -135,7 +134,7 @@ func rebuildTx(ctx context.Context, tx *sql.Tx, now time.Time) (Report, error) {
 	if err != nil {
 		return rep, err
 	}
-	models, err := pageModels(ctx, tx)
+	models, err := payroll.HubPageModels(ctx, tx)
 	if err != nil {
 		return rep, err
 	}
@@ -638,38 +637,6 @@ func loadSales(ctx context.Context, q ledger.Querier) (map[string][]hub.TeamSale
 	return out, rows.Err()
 }
 
-// pageModels is the ledger model of each page of the grant: hub_model_slugs of its modelSlug, or the slug itself.
-func pageModels(ctx context.Context, q ledger.Querier) (map[string]string, error) {
-	slugs := map[string]string{}
-	var raw string
-	switch err := q.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'hub_model_slugs'`).Scan(&raw); {
-	case err == sql.ErrNoRows:
-	case err != nil:
-		return nil, err
-	default:
-		if err := json.Unmarshal([]byte(raw), &slugs); err != nil {
-			return nil, fmt.Errorf("настройка hub_model_slugs: %w", err)
-		}
-	}
-	rows, err := q.QueryContext(ctx, `SELECT page_label, model_slug FROM hub_pages`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := map[string]string{}
-	for rows.Next() {
-		var label, slug string
-		if err := rows.Scan(&label, &slug); err != nil {
-			return nil, err
-		}
-		out[label] = slug
-		if m, ok := slugs[slug]; ok {
-			out[label] = m
-		}
-	}
-	return out, rows.Err()
-}
-
 // people finds the person of a Hub user and their terms on a model's tab.
 type people struct {
 	res   *payroll.Resolver
@@ -689,26 +656,17 @@ func newPeople(ctx context.Context, q ledger.Querier) (*people, error) {
 	return &people{res: res, tabs: terms, cache: map[string][2]string{}}, nil
 }
 
-// person is the card of a Hub user: one whose aliases name `hub:<id>`, else their Hub username (the payroll Resolver:
-// title, alias, tab_aliases; the model decides between two cards of one name), else the card whose code is the
-// username, case aside (Hub's «Grisha» is the card grisha: the agency's logins are the cards' codes). "" and why —
-// nobody to credit.
+// person is the card of a Hub user (payroll.Resolver.HubPerson). "" and why — nobody to credit.
 func (p *people) person(user int64, username, model string) (string, string) {
 	key := strconv.FormatInt(user, 10) + "\x00" + username + "\x00" + model
 	if v, ok := p.cache[key]; ok {
 		return v[0], v[1]
 	}
-	slug, err := p.res.Resolve(model, "hub:"+strconv.FormatInt(user, 10))
+	slug, err := p.res.HubPerson(model, user, username)
 	reason := ""
 	if err != nil {
-		if slug, err = p.res.Resolve(model, username); err != nil {
-			if card, ok := p.res.BySlug(strings.ToLower(strings.TrimSpace(username))); ok {
-				slug = card.Slug
-			} else {
-				slug, reason = "", "не сопоставлен с people: "+err.Error()+"; добавьте в aliases карточки имя хаба или hub:"+
-					strconv.FormatInt(user, 10)
-			}
-		}
+		reason = "не сопоставлен с people: " + err.Error() + "; добавьте в aliases карточки имя хаба или hub:" +
+			strconv.FormatInt(user, 10)
 	}
 	p.cache[key] = [2]string{slug, reason}
 	return slug, reason

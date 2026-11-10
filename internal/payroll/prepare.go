@@ -744,7 +744,8 @@ func tabFlags(tabs map[string]*prepTab, unpaid []prepUnpaid, f *flagger) {
 }
 
 // unenteredFlags: «не занесено» on or after the oldest unpaid day (all of it when nothing is owed). A day
-// the hub shows money for is a blocker; a day it could not prove is a note per tab.
+// the hub shows money for is a blocker, saying whether it is the person's own sales by the facts or the page money of
+// their slot; a day it could not prove is a note per tab.
 func unenteredFlags(ctx context.Context, q ledger.Querier, slug, from string, f *flagger) error {
 	rows, err := q.QueryContext(ctx, `SELECT model, date, page, status, COALESCE(reason, ''), net_mills, share FROM payroll_unentered
 		WHERE person = ? AND date >= ? ORDER BY model, date, page`, slug, from)
@@ -757,6 +758,7 @@ func unenteredFlags(ctx context.Context, q ledger.Querier, slug, from string, f 
 		net         int64
 		share       float64
 		noShare     bool
+		facts       bool // counted from Hub's team facts, not the slot
 	}
 	var days []*day
 	unknown := map[string][]string{} // model → dates
@@ -785,6 +787,7 @@ func unenteredFlags(ctx context.Context, q ledger.Querier, slug, from string, f 
 		}
 		d := days[len(days)-1]
 		d.pages = append(d.pages, page)
+		d.facts = d.facts || strings.HasPrefix(why, reasonFacts)
 		d.net += net.Int64 * 1000
 		if share.Valid {
 			d.share += share.Float64
@@ -802,7 +805,11 @@ func unenteredFlags(ctx context.Context, q ledger.Querier, slug, from string, f 
 		if d.noShare {
 			share = "доля не посчитана: нет ставки"
 		}
-		f.add("unentered", true, "не занесено %s (%s): хаб видит %s на %s, %s — в таблице пусто", ddmm(d.date), d.model,
+		seen := "в окне графика хаб видит"
+		if d.facts {
+			seen = "по его сменам хаб видит"
+		}
+		f.add("unentered", true, "не занесено %s (%s): %s %s на %s, %s — в таблице пусто", ddmm(d.date), d.model, seen,
 			money.Micros(d.net).Cents(), strings.Join(d.pages, ", "), share)
 	}
 	for _, m := range models {

@@ -1154,3 +1154,104 @@ func TestUnenteredSharedSlot(t *testing.T) {
 		t.Fatalf("with a proven week the money is the worker's only: %+v", got)
 	}
 }
+
+// teamWork stores a work of Hub's team facts on page-1 in the week window it began in.
+func teamWork(t *testing.T, s *db.Store, ctx context.Context, user int64, username, kind, from, to string) {
+	t.Helper()
+	start, end := t0(from), t0(to)
+	win := ts.Format(ts.WeekStart(start))
+	ref := fmt.Sprintf("%d:%s", user, start.UTC().Format("2006-01-02T15:04:05.000Z"))
+	payload := fmt.Sprintf(`{"ref":%q,"userId":%d,"username":%q,"role":"chatter","kind":%q,"startedAt":%q,"endedAt":%q,`+
+		`"ongoing":false,"workedMinutes":%d,"pages":[{"pageLabel":"page-1","messages":5,"salesFrom":%q}]}`,
+		ref, user, username, kind, from, to, int(end.Sub(start).Minutes()), from)
+	if _, err := s.RW.ExecContext(ctx, `INSERT INTO hub_works(window_from, ref, user_id, username, role, kind, started_at, ended_at, ongoing,
+		worked_minutes, day, payload, read_at) VALUES (?, ?, ?, ?, 'chatter', ?, ?, ?, 0, ?, ?, ?, ?)`,
+		win, ref, user, username, kind, ts.FormatMilli(start), ts.FormatMilli(end), int(end.Sub(start).Minutes()),
+		ts.Date(start), payload, ts.Format(end)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// In a week Hub's team facts proved, a mapped person's empty day is their own accrued sales of the day: a day off is
+// no gap, a neighbour's sale in the slot is not theirs. An unproven week and an unmapped person go by the slot.
+func TestUnenteredFromFacts(t *testing.T) {
+	s, ctx := openStore(t)
+	now := "2026-11-15T10:00:00+03:00"
+	// Bravo (00:00–08:00, mon and tue: the cells of Tue and Wed) and Alfa (16:00–00:00, every day) on page-1.
+	f := newSheets("Alpha")
+	f.set("Alpha", []string{"Браво", "Альфа"}, map[string][][]Cell{
+		"Браво": sheet(45, 0, week("2026-11-02", map[string][7]any{"page-1": {100, nil, nil, nil, nil, nil, nil}}),
+			week("2026-11-09", map[string][7]any{"page-1": {80, nil, nil, nil, nil, nil, nil}})),
+		"Альфа": sheet(25, 0, week("2026-11-09", map[string][7]any{"page-1": {100, nil, nil, nil, nil, nil, nil}})),
+	})
+	f.run(t, s, ctx, now)
+	hubDay(t, s, ctx, "page-1", "2026-10-01T00:00:00+03:00", now,
+		[2]any{"2026-11-03T03:00:00+03:00", 60000}, // Bravo's slot, unproven week
+		[2]any{"2026-11-10T02:00:00+03:00", 30000}, // Bravo's slot: his own sale
+		[2]any{"2026-11-10T05:00:00+03:00", 50000}, // Bravo's slot: a neighbour's sale
+		[2]any{"2026-11-11T03:00:00+03:00", 40000}, // Bravo's slot on his day off
+		[2]any{"2026-11-10T20:00:00+03:00", 20000}) // Alfa's slot
+	for _, q := range []string{
+		`INSERT INTO hub_pages(page_label, platform, model_slug, model_name, seen_at) VALUES ('page-1', 'fansly', 'Alpha', 'Alpha', '2026-11-15')`,
+		`INSERT INTO hub_team_sync(window_from, window_to, status, reasons, read_at, ok_at) VALUES
+			('2026-11-02T00:00:00+03:00', '2026-11-09T00:00:00+03:00', 'unknown', '["отказ"]', '2026-11-15', NULL),
+			('2026-11-09T00:00:00+03:00', '2026-11-15T10:00:00+03:00', 'ok', '[]', '2026-11-15', '2026-11-15')`,
+		`INSERT INTO fact_weeks(week, status, computed_at) VALUES ('2026-11-02', 'unknown', '2026-11-15'), ('2026-11-09', 'ok', '2026-11-15')`,
+		// Hub user 5 «Bravo» is the card bravo by its code; user 9 «Delta» has no card.
+		`INSERT INTO fact_accruals(hub_user_id, username, person, model, page_label, day, week, kind, sales, net_micros) VALUES
+			(5, 'Bravo', 'bravo', 'Alpha', 'page-1', '2026-11-03', '2026-11-02', 'sales', 1, 10000000),
+			(5, 'Bravo', 'bravo', 'Alpha', 'page-1', '2026-11-10', '2026-11-09', 'sales', 1, 30000000),
+			(9, 'Delta', NULL, 'Alpha', 'page-1', '2026-11-10', '2026-11-09', 'sales', 1, 50000000),
+			(5, 'Bravo', 'bravo', 'Alpha', 'page-1', '2026-11-12', '2026-11-09', 'sales', 1, 15000000)`,
+	} {
+		if _, err := s.RW.ExecContext(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	teamWork(t, s, ctx, 5, "Bravo", "shift", "2026-11-10T00:01:00+03:00", "2026-11-10T07:59:00+03:00")
+	teamWork(t, s, ctx, 9, "Delta", "visit", "2026-11-10T04:30:00+03:00", "2026-11-10T05:30:00+03:00")
+	teamWork(t, s, ctx, 5, "Bravo", "shift", "2026-11-12T00:00:00+03:00", "2026-11-12T08:00:00+03:00") // off the card's days
+	rebuild(t, s, ctx, now)
+
+	type row struct {
+		status, reason string
+		net            int64
+		share          float64
+	}
+	got := map[string]row{}
+	rows, err := s.RO.Query(`SELECT person, date, page, status, COALESCE(reason, ''), COALESCE(net_mills, 0), COALESCE(share, 0)
+		FROM payroll_unentered`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var person, date, page string
+		var r row
+		if err := rows.Scan(&person, &date, &page, &r.status, &r.reason, &r.net, &r.share); err != nil {
+			t.Fatal(err)
+		}
+		got[person+" "+date+" "+page] = r
+	}
+	rows.Close()
+	want := map[string]row{
+		"bravo 2026-11-03 page-1": {"ok", reasonSlot, 60000, 15},   // unproven week: the slot, not the facts' 10.00
+		"bravo 2026-11-10 page-1": {"ok", reasonFacts, 30000, 7.5}, // his own sale; the neighbour's 50.00 is not his
+		"bravo 2026-11-12 page-1": {"ok", reasonFacts, 15000, 3.75},
+		"alfa 2026-11-10 page-1":  {"ok", reasonSlot, 20000, 5}, // no Hub user is Alfa: the slot
+	}
+	if len(got) != len(want) {
+		t.Fatalf("rows %+v, want %+v (the day off 11.11 is no gap)", got, want)
+	}
+	for k, w := range want {
+		if got[k] != w {
+			t.Errorf("%s = %+v, want %+v", k, got[k], w)
+		}
+	}
+	list, err := Payables(ctx, s.RO, "bravo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if list[0].UnenteredDays != 3 || list[0].UnenteredShare != 26.25 || list[0].UnenteredUnknown != 0 {
+		t.Fatalf("v_payables %+v", list[0])
+	}
+}
