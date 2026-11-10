@@ -122,7 +122,10 @@ func decodeValues(sheet, rng string, stdout []byte) ([][]Cell, error) {
 
 // Gog reads ranges through the gog CLI, read-only. A failed call is tried three times: a dropped
 // connection should not turn a tab into an error for a whole hour.
-func Gog(account string) Reader {
+func Gog(account string) Reader { return gogGet(account, "UNFORMATTED_VALUE") }
+
+// gogGet reads with a render option: the reader's UNFORMATTED_VALUE, or FORMULA for the mirror's look at formulas.
+func gogGet(account, render string) Reader {
 	return func(ctx context.Context, sheet, rng string) ([][]Cell, error) {
 		var last error
 		for attempt := range 3 {
@@ -135,7 +138,7 @@ func Gog(account string) Reader {
 			}
 			cctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 			var stdout, stderr bytes.Buffer
-			cmd := exec.CommandContext(cctx, "gog", "sheets", "get", sheet, rng, "--render=UNFORMATTED_VALUE", "--json",
+			cmd := exec.CommandContext(cctx, "gog", "sheets", "get", sheet, rng, "--render="+render, "--json",
 				"--readonly", "--account", account)
 			cmd.Stdout, cmd.Stderr = &stdout, &stderr
 			err := cmd.Run()

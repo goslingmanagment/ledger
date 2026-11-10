@@ -3,7 +3,7 @@
 #   bash deploy/install-mac-jobs.sh shadow   сборщики и толчок коммитов журнала на сервер: канон — файл в /OS
 #   bash deploy/install-mac-jobs.sh live     сборщики и зеркало журнала в /OS: канон — ledger
 # Сборщики: карты раз в 30 минут, посты «Отчётности» раз в 15 минут (если есть reports.json), таблицы выплат раз в час;
-# журнал раз в час. Повторный запуск обновляет всё.
+# зеркало таблиц выплат раз в час (если есть метка sheets-mirror.on); журнал раз в час. Повторный запуск обновляет всё.
 set -Eeuo pipefail
 mode=${1:-}
 case "$mode" in shadow | live) ;; *) printf 'нужен режим: shadow или live\n' >&2; exit 2 ;; esac
@@ -47,6 +47,14 @@ if [ -f "$dest/reports.json" ]; then
 else
   remove_agent reports
   printf 'skipped reports: нет %s (см. deploy/README.md, «Задания на маке»)\n' "$dest/reports.json"
+fi
+# Зеркало таблиц выплат (отчёты → ячейки) — только по сознательному шагу: файл-метка после просмотра `ledger mirror sheets`
+# без --apply. Задание само читает вкладки, поэтому порядок с collect sheets не важен; без payroll_reports_from выходит с 0.
+if [ -f "$dest/sheets-mirror.on" ]; then
+  install_agent sheets-mirror 3600 mirror sheets --apply
+else
+  remove_agent sheets-mirror
+  printf 'skipped sheets-mirror: нет %s (см. deploy/README.md, «Зеркало таблиц выплат»)\n' "$dest/sheets-mirror.on"
 fi
 if [ "$mode" = shadow ]; then
   remove_agent mirror

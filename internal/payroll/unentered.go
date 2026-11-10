@@ -73,30 +73,44 @@ func (s slot) scheduled(workdays []string, date time.Time) bool {
 // pageResolver maps a page row of a tab to the hub's label: settings.sheet_pages first, then the name
 // spelled as a label ("Page 1" → "page-1") when that label exists. Nothing else is tried.
 func pageResolver(ctx context.Context, q ledger.Querier) (func(string) (string, bool), error) {
-	named, err := optionalMap(ctx, q, "sheet_pages")
+	named, known, err := pageNames(ctx, q)
 	if err != nil {
 		return nil, err
 	}
+	return func(page string) (string, bool) { return resolvePage(named, known, page) }, nil
+}
+
+// pageNames are the inputs of resolvePage: settings.sheet_pages and the labels Hub and the routes know.
+func pageNames(ctx context.Context, q ledger.Querier) (map[string]string, map[string]bool, error) {
+	named, err := optionalMap(ctx, q, "sheet_pages")
+	if err != nil {
+		return nil, nil, err
+	}
 	rows, err := q.QueryContext(ctx, `SELECT page_label FROM routes UNION SELECT page_label FROM hub_pages`)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
 	known := map[string]bool{}
 	for rows.Next() {
 		var l string
 		if err := rows.Scan(&l); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		known[l] = true
 	}
-	return func(page string) (string, bool) {
-		if l, ok := named[page]; ok {
-			return l, l != ""
-		}
-		l := strings.ToLower(strings.Join(strings.Fields(page), "-"))
-		return l, known[l]
-	}, rows.Err()
+	return named, known, rows.Err()
+}
+
+// resolvePage is the one rule that maps a tab's row name to Hub's label: the reader («не занесено», the mirror check) and
+// the writer (ledger mirror sheets) both go through it, so the two can never disagree. A row named in sheet_pages with ""
+// is not a page.
+func resolvePage(named map[string]string, known map[string]bool, page string) (string, bool) {
+	if l, ok := named[page]; ok {
+		return l, l != ""
+	}
+	l := strings.ToLower(strings.Join(strings.Fields(page), "-"))
+	return l, known[l]
 }
 
 // PageLabeler maps a sheet's page row to Hub's label the way «не занесено» does; a row it cannot map is spelled as a
