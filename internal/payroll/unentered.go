@@ -14,6 +14,7 @@ import (
 	"github.com/goslingmanagment/ledger/internal/db"
 	"github.com/goslingmanagment/ledger/internal/hub"
 	"github.com/goslingmanagment/ledger/internal/ledger"
+	"github.com/goslingmanagment/ledger/internal/split"
 	"github.com/goslingmanagment/ledger/internal/ts"
 )
 
@@ -98,6 +99,32 @@ func pageResolver(ctx context.Context, q ledger.Querier) (func(string) (string, 
 	}, rows.Err()
 }
 
+// HubPageModels is the ledger model of each page of the hub grant: settings.hub_model_slugs of its modelSlug, or the
+// slug itself.
+func HubPageModels(ctx context.Context, q ledger.Querier) (map[string]string, error) {
+	slugs, err := optionalMap(ctx, q, "hub_model_slugs")
+	if err != nil {
+		return nil, err
+	}
+	rows, err := q.QueryContext(ctx, `SELECT page_label, model_slug FROM hub_pages`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var label, slug string
+		if err := rows.Scan(&label, &slug); err != nil {
+			return nil, err
+		}
+		out[label] = slug
+		if m, ok := slugs[slug]; ok {
+			out[label] = m
+		}
+	}
+	return out, rows.Err()
+}
+
 type unenteredRow struct {
 	model, name, person, date, page string
 	from, to                        time.Time
@@ -156,7 +183,21 @@ func weekPages(days []dayCells) map[string][]string {
 	return out
 }
 
-// computeUnentered walks the days without a value of the last 45 days.
+// Which way a row of «не занесено» was counted, in its reason.
+const (
+	reasonFacts = "по фактам хаба: его доли продаж за день (fact_accruals)"
+	reasonSlot  = "по окну графика: все деньги страницы в окне смены из карточки"
+	reasonRate  = "в шапке вкладки нет ставки: доля не посчитана"
+)
+
+type unenteredTab struct {
+	model, name, person string
+	rate                *float64
+}
+
+// computeUnentered walks the days without a value of the last 45 days. A day of a week Hub's team facts proved, of
+// a person who is a Hub user, is their own accrued sales of the day (teamFacts.rows), and a day without their work is
+// a day off; every other day is the money of the week's pages in the person's slot by the card.
 func computeUnentered(ctx context.Context, q ledger.Querier, now time.Time) ([]unenteredRow, error) {
 	people, err := LoadPeople(ctx, q)
 	if err != nil {
@@ -166,21 +207,21 @@ func computeUnentered(ctx context.Context, q ledger.Querier, now time.Time) ([]u
 	if err != nil {
 		return nil, err
 	}
+	facts, err := loadFacts(ctx, q, now)
+	if err != nil {
+		return nil, err
+	}
 	nowMSK := now.In(ts.MSK)
 	today := time.Date(nowMSK.Year(), nowMSK.Month(), nowMSK.Day(), 0, 0, 0, 0, ts.MSK)
 	first := today.AddDate(0, 0, -unenteredDays)
-	type tab struct {
-		model, name, person string
-		rate                *float64
-	}
-	var tabs []tab
+	var tabs []unenteredTab
 	rows, err := q.QueryContext(ctx, `SELECT model, name, person, rate FROM payroll_tabs WHERE person IS NOT NULL AND ok_event_id IS NOT NULL
 		ORDER BY model, name`)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
-		var t tab
+		var t unenteredTab
 		if err := rows.Scan(&t.model, &t.name, &t.person, &t.rate); err != nil {
 			rows.Close()
 			return nil, err
@@ -196,6 +237,7 @@ func computeUnentered(ctx context.Context, q ledger.Querier, now time.Time) ([]u
 	// page that day (the page changed hands, and the money is already on their tab).
 	daysOf := map[string][]dayCells{}
 	enteredBy := map[string]map[string]bool{} // model, page, date → slugs with a value there
+	enteredDay := map[string]bool{}           // person, model, date → a value on a tab of theirs
 	for _, t := range tabs {
 		// The whole tab: a week inherits the pages of the last filled one, and only the days from the first
 		// value on are shifts at all (new tabs start with empty weeks).
@@ -217,6 +259,9 @@ func computeUnentered(ctx context.Context, q ledger.Querier, now time.Time) ([]u
 				return nil, fmt.Errorf("payroll_days %s/%s %s: %w", t.model, t.name, d.date, err)
 			}
 			days = append(days, d)
+			if d.hasValue() {
+				enteredDay[personDay(t.person, t.model, d.date)] = true
+			}
 			for page, v := range d.pages {
 				if v != nil && *v != 0 {
 					k := t.model + "\x00" + page + "\x00" + d.date
@@ -234,13 +279,12 @@ func computeUnentered(ctx context.Context, q ledger.Querier, now time.Time) ([]u
 		dr.Close()
 		daysOf[t.model+"\x00"+t.name] = days
 	}
-	var out []unenteredRow
+	var out, fromFacts []unenteredRow
+	factDays := map[string]bool{} // model, name, date → counted from the facts
+	counted := map[string]bool{}  // person, model, date → the facts of the day are on a tab already
 	for _, t := range tabs {
 		p := people[t.person]
 		sl, haveSlot := parseSlot(p.Schedule)
-		if !haveSlot && p.Status == "departed" {
-			continue // nobody expects a shift of a person who left and has no slot
-		}
 		days := daysOf[t.model+"\x00"+t.name]
 		active := weekPages(days)
 		firstValue, lastValue := "", ""
@@ -267,6 +311,17 @@ func computeUnentered(ctx context.Context, q ledger.Querier, now time.Time) ([]u
 			}
 			if date.Before(first) || date.After(until) || d.date < firstValue || d.hasValue() {
 				continue
+			}
+			if facts.cover(t.person, t.model, d.date) {
+				factDays[t.model+"\x00"+t.name+"\x00"+d.date] = true
+				k := personDay(t.person, t.model, d.date)
+				if !counted[k] && !enteredDay[k] { // one tab of the model takes the day; a value on another is an entry
+					counted[k] = true
+					fromFacts = append(fromFacts, facts.rows(t, d.date)...)
+				}
+			}
+			if !haveSlot && p.Status == "departed" {
+				continue // nobody expects a shift of a person who left and has no slot
 			}
 			base := unenteredRow{model: t.model, name: t.name, person: t.person, date: d.date}
 			if !haveSlot {
@@ -317,18 +372,247 @@ func computeUnentered(ctx context.Context, q ledger.Querier, now time.Time) ([]u
 				if net == 0 {
 					continue
 				}
-				row.status, row.net = "ok", &net
+				row.status, row.net, row.reason = "ok", &net, reasonSlot
 				if t.rate != nil {
 					share := float64(float64(net)/1000) * *t.rate
 					row.share = &share
 				} else {
-					row.reason = "в шапке вкладки нет ставки: доля не посчитана"
+					row.reason += "; " + reasonRate
 				}
 				out = append(out, row)
 			}
 		}
 	}
-	return sharedSlots(ctx, q, out)
+	// The slot rows of every person go through sharedSlots first, so that a colleague on the same slot who has no
+	// facts is settled exactly as before. Then a day the facts cover drops its slot rows on Hub's pages (and the
+	// «no slot» row) for the person's own sales; a page outside the grant keeps what the slot said.
+	out, err = sharedSlots(ctx, q, out)
+	if err != nil {
+		return nil, err
+	}
+	kept := out[:0:0]
+	for _, r := range out {
+		if factDays[r.model+"\x00"+r.name+"\x00"+r.date] && (r.page == "—" || facts.hubPage(r.page)) {
+			continue
+		}
+		kept = append(kept, r)
+	}
+	return append(kept, fromFacts...), nil
+}
+
+func personDay(person, model, date string) string {
+	return person + "\x00" + ledger.Slug(model) + "\x00" + date
+}
+
+// teamFacts are Hub's proven team facts as «не занесено» reads them (ledger release 2): the weeks fact_weeks proved,
+// each person's accrued sales by model, page and day (fact_accruals, the split rules' shares of their shifts and
+// look-ins), and their works by day.
+type teamFacts struct {
+	since string            // the first day the split rule pays
+	weeks map[string]bool   // Mondays of the proven weeks
+	pages map[string]string // page of the grant → ledger model
+	res   *Resolver
+	users map[int64]string            // the Hub users of the proven windows → username
+	isHub map[string]bool             // person, model → one of those users is the person (cache)
+	net   map[string]map[string]int64 // person, model, date → page → net of their shares, mills
+	works map[string]*dayWorks        // person, model, date
+}
+
+// dayWorks spans a person's works of a day on a model's pages.
+type dayWorks struct {
+	from, to time.Time
+	going    bool
+}
+
+func loadFacts(ctx context.Context, q ledger.Querier, now time.Time) (*teamFacts, error) {
+	f := &teamFacts{since: ts.Date(split.Default.Since), weeks: map[string]bool{}, users: map[int64]string{}, isHub: map[string]bool{},
+		net: map[string]map[string]int64{}, works: map[string]*dayWorks{}}
+	rows, err := q.QueryContext(ctx, `SELECT week FROM fact_weeks WHERE status = 'ok'`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var wk string
+		if err := rows.Scan(&wk); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		f.weeks[wk] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(f.weeks) == 0 {
+		return f, nil
+	}
+	if f.res, err = NewResolver(ctx, q); err != nil {
+		return nil, err
+	}
+	if f.pages, err = HubPageModels(ctx, q); err != nil {
+		return nil, err
+	}
+	rows, err = q.QueryContext(ctx, `SELECT person, model, page_label, day, SUM(net_micros) FROM fact_accruals
+		WHERE kind = 'sales' AND person IS NOT NULL GROUP BY person, model, page_label, day`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var person, model, page, day string
+		var micros int64
+		if err := rows.Scan(&person, &model, &page, &day, &micros); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		k := personDay(person, model, day)
+		if f.net[k] == nil {
+			f.net[k] = map[string]int64{}
+		}
+		f.net[k][page] += micros / 1000 // the shares are whole mills
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// A work is in every window its days touch: the whole version is the one of the proven window it began in, else
+	// the longest one there is (it began before the facts).
+	rows, err = q.QueryContext(ctx, `SELECT s.window_from, s.window_to, w.ref, w.payload FROM hub_works w
+		JOIN hub_team_sync s ON s.window_from = w.window_from WHERE s.status = 'ok' ORDER BY w.ref, s.window_from`)
+	if err != nil {
+		return nil, err
+	}
+	type version struct {
+		w     hub.TeamWork
+		whole bool
+	}
+	works := map[string]version{}
+	var refs []string
+	for rows.Next() {
+		var wf, wt, ref, payload string
+		if err := rows.Scan(&wf, &wt, &ref, &payload); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		w, err := hub.DecodeTeamWork([]byte(payload))
+		if err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("hub_works %s %s: %w", wf, ref, err)
+		}
+		from, err1 := ts.Parse(wf)
+		to, err2 := ts.Parse(wt)
+		if err1 != nil || err2 != nil {
+			rows.Close()
+			return nil, fmt.Errorf("hub_team_sync %s: bad window", wf)
+		}
+		f.users[w.UserID] = w.Username
+		v := version{w: w, whole: !w.StartedAt.Before(from) && w.StartedAt.Before(to)}
+		old, seen := works[ref]
+		switch {
+		case !seen:
+			refs = append(refs, ref)
+		case old.whole, !v.whole && !w.EndedAt.After(old.w.EndedAt):
+			continue
+		}
+		works[ref] = v
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, ref := range refs {
+		w := works[ref].w
+		seen := map[string]bool{}
+		for _, p := range w.Pages {
+			model, ok := f.pages[p.PageLabel]
+			if !ok || seen[ledger.Slug(model)] {
+				continue
+			}
+			seen[ledger.Slug(model)] = true
+			person, err := f.res.HubPerson(model, w.UserID, w.Username)
+			if err != nil {
+				continue
+			}
+			k := personDay(person, model, w.Day())
+			d := f.works[k]
+			if d == nil {
+				d = &dayWorks{from: w.StartedAt, to: w.EndedAt}
+				f.works[k] = d
+			}
+			if w.StartedAt.Before(d.from) {
+				d.from = w.StartedAt
+			}
+			if w.EndedAt.After(d.to) {
+				d.to = w.EndedAt
+			}
+			d.going = d.going || w.Ongoing || w.EndedAt.After(now)
+		}
+	}
+	return f, nil
+}
+
+// cover says whether the facts answer for the person's day on the model: the week is proven (from the split rule's
+// first day on) and the person is a Hub user of the facts. Otherwise the day goes by the slot.
+func (f *teamFacts) cover(person, model, date string) bool {
+	if date < f.since {
+		return false
+	}
+	d, err := time.ParseInLocation(ts.DateLayout, date, ts.MSK)
+	if err != nil || !f.weeks[ts.Date(ts.WeekStart(d))] {
+		return false
+	}
+	k := person + "\x00" + ledger.Slug(model)
+	is, ok := f.isHub[k]
+	if !ok {
+		for id, name := range f.users {
+			if got, err := f.res.HubPerson(model, id, name); err == nil && got == person {
+				is = true
+				break
+			}
+		}
+		f.isHub[k] = is
+	}
+	return is
+}
+
+// hubPage says whether the facts see the page (it is in the grant).
+func (f *teamFacts) hubPage(page string) bool {
+	_, ok := f.pages[page]
+	return ok
+}
+
+// rows are the person's own accrued sales of the day on the tab's model, a row per page. No work that day is a day
+// off, not a missing entry: no rows; a work still going is a shift not over yet.
+func (f *teamFacts) rows(t unenteredTab, date string) []unenteredRow {
+	k := personDay(t.person, t.model, date)
+	w := f.works[k]
+	if w != nil && w.going {
+		return nil
+	}
+	pages := make([]string, 0, len(f.net[k]))
+	for page := range f.net[k] {
+		pages = append(pages, page)
+	}
+	sort.Strings(pages)
+	var out []unenteredRow
+	for _, page := range pages {
+		net := f.net[k][page]
+		if net == 0 {
+			continue
+		}
+		row := unenteredRow{model: t.model, name: t.name, person: t.person, date: date, page: page, status: "ok", net: &net,
+			reason: reasonFacts}
+		if w != nil {
+			row.from, row.to = w.from, w.to
+		}
+		if t.rate != nil {
+			share := float64(float64(net)/1000) * *t.rate
+			row.share = &share
+		} else {
+			row.reason += "; " + reasonRate
+		}
+		out = append(out, row)
+	}
+	return out
 }
 
 // sharedSlots settles the page-window money two or more people's empty cells claim at once: their cards put them
@@ -457,15 +741,9 @@ func provenWorks(ctx context.Context, q ledger.Querier) (teamWorks, error) {
 		if err := json.Unmarshal([]byte(payload), &w); err != nil {
 			return tw, fmt.Errorf("hub_works %d: %w", user, err)
 		}
-		person, err := res.Resolve("", "hub:"+strconv.FormatInt(user, 10))
+		person, err := res.HubPerson("", user, username)
 		if err != nil {
-			if person, err = res.Resolve("", username); err != nil {
-				card, ok := res.BySlug(strings.ToLower(strings.TrimSpace(username)))
-				if !ok {
-					continue // a Hub user without a card claims no one's cell
-				}
-				person = card.Slug
-			}
+			continue // a Hub user without a card claims no one's cell
 		}
 		pages := make([]string, 0, len(w.Pages))
 		for _, p := range w.Pages {

@@ -88,8 +88,9 @@ type PayoutPerson struct {
 	ToPayMicros      *int64      `json:"toPayMicros"`      // «К выплате» of all the person's tabs; null — unknown
 	OldestUnpaidDate *string     `json:"oldestUnpaidDate"` // now
 	UnpaidDays       []UnpaidDay `json:"unpaidDays"`       // now, oldest first
-	// Unentered is «не занесено» now (v_payables): the tab's empty days on which Hub shows money in the
-	// person's scheduled shift — pay the sheet has not got yet, so not in the debt.
+	// Unentered is «не занесено» now (v_payables): the tab's empty days on which Hub shows the person's money — their
+	// own sales by Hub's team facts where a week is proven, else the page money in their scheduled shift — pay the
+	// sheet has not got yet, so not in the debt.
 	Unentered PayoutUnentered `json:"unentered"`
 }
 
