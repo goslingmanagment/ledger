@@ -21,7 +21,7 @@ import (
 func init() {
 	Command(Cmd{Name: "decision add", Run: decisionAdd,
 		Summary: "записать решение «чья продажа» (POST /v1/decisions, право reports или decide): --page … --fan-ref|--fan-name … --kind owner|split|pot|off_platform|exclude " +
-			"[--share код:процент …] [--pot код] [--tx ref] [--net 12.50] [--at время] --said-by … --said-at … [--link …] [--note …] [--supersedes id]; или --json (JSON из stdin)"})
+			"[--share код:процент …] [--pot код] [--tx ref] [--net 12.50] [--at время] --said-by … --said-at … [--link …] [--note …] [--supersedes id] [--answers <вопрос>]; или --json (JSON из stdin)"})
 	Command(Cmd{Name: "decision list", Run: decisionList,
 		Summary: "решения «чья продажа» (GET /v1/decisions): [--open] [--fan …] [--person код] [--from ГГГГ-ММ-ДД --to …] [--json] [--md — открытые списком, как файл агента]"})
 	Command(Cmd{Name: "decision applied", Run: decisionApplied,
@@ -99,6 +99,7 @@ func decisionAdd(ctx context.Context, args []string) error {
 	fs.StringVar(&in.SourceLink, "link", "", "ссылка на сообщение")
 	fs.StringVar(&in.Note, "note", "", "почему так")
 	supersedes := fs.Int64("supersedes", 0, "какое решение заменяет")
+	answers := fs.Int64("answers", 0, "на какой открытый вопрос отвечает (закроет его)")
 	pos, err := ParseArgs(fs, args)
 	if err != nil {
 		return err
@@ -123,6 +124,9 @@ func decisionAdd(ctx context.Context, args []string) error {
 		if *supersedes > 0 {
 			in.Supersedes = supersedes
 		}
+	}
+	if *answers > 0 {
+		in.Answers = answers
 	}
 	var out decisions.Decision
 	if local() {
