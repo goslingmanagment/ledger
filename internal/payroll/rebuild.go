@@ -56,10 +56,11 @@ func AccrualFrom(ctx context.Context, q ledger.Querier) (string, error) {
 	return ts.Date(t), nil
 }
 
-// Rebuild brings the books in line with what is known: who each tab belongs to, the accruals, the
-// clearing of payouts, the FIFO of days, then «не занесено». Only what differs is posted, the way the
-// journal does it: a changed day or payout is reversed and posted anew, nothing is edited. It is
-// idempotent and runs after every batch of sheet events and every hour.
+// Rebuild brings the books in line with what is known: who each tab belongs to, the accruals (from the sheets, and
+// from Hub's facts from settings.payroll_facts_from on), the clearing of payouts, the FIFO of days, then «не
+// занесено». Only what differs is posted, the way the journal does it: a changed day or payout is reversed and posted
+// anew, nothing is edited. It is idempotent and runs after every batch of sheet events, every read of the facts and
+// every hour.
 func Rebuild(ctx context.Context, store *db.Store, now time.Time) (Report, error) {
 	var rep Report
 	tx, err := store.RW.BeginTx(ctx, nil)
@@ -78,7 +79,15 @@ func Rebuild(ctx context.Context, store *db.Store, now time.Time) (Report, error
 	if err := assignPeople(ctx, tx, res); err != nil {
 		return rep, err
 	}
-	if err := reconcileAccruals(ctx, tx, from, now, &rep); err != nil {
+	factsFrom, err := FactsFrom(ctx, tx)
+	if err != nil {
+		return rep, err
+	}
+	plan, err := planFacts(ctx, tx, factsFrom, now)
+	if err != nil {
+		return rep, err
+	}
+	if err := reconcileAccruals(ctx, tx, from, plan, now, &rep); err != nil {
 		return rep, err
 	}
 	if err := reconcileClearings(ctx, tx, from, res, now, &rep); err != nil {
@@ -137,23 +146,28 @@ func assignPeople(ctx context.Context, tx *sql.Tx, res *Resolver) error {
 }
 
 // accrualKey is the source_key of an accrual: one tab's day, with a counter because a day changed
-// back to an earlier amount needs a new entry, while a source_key can be used once.
-func accrualKey(model, name, date string, n int) string {
-	return fmt.Sprintf("%s:%s/%s:%s#%d", KindAccrual, model, name, date, n)
+// back to an earlier amount needs a new entry, while a source_key can be used once. The counter is the day's
+// whichever the source; a day accrued from Hub's facts ends in ":facts".
+func accrualKey(model, name, date string, n int, source string) string {
+	return fmt.Sprintf("%s:%s/%s:%s#%s", KindAccrual, model, name, date, formatCounter(n, source))
 }
 
-// parseAccrualKey returns "<model>/<name>:<date>" and the counter.
-func parseAccrualKey(key string) (day string, n int, ok bool) {
+// parseAccrualKey returns "<model>/<name>:<date>", the counter and the source (sheet or facts).
+func parseAccrualKey(key string) (day string, n int, source string, ok bool) {
 	day, ok = strings.CutPrefix(key, KindAccrual+":")
 	if !ok {
-		return "", 0, false
+		return "", 0, "", false
 	}
 	i := strings.LastIndexByte(day, '#')
 	if i < 0 {
-		return "", 0, false
+		return "", 0, "", false
 	}
-	n, err := strconv.Atoi(day[i+1:])
-	return day[:i], n, err == nil
+	counter, source := day[i+1:], SourceSheet
+	if c, isFacts := strings.CutSuffix(counter, sourceSuffix); isFacts {
+		counter, source = c, SourceFacts
+	}
+	n, err := strconv.Atoi(counter)
+	return day[:i], n, source, err == nil
 }
 
 // splitDayKey cuts "<model>/<name>:<date>" apart.
@@ -170,11 +184,14 @@ type activeEntry struct {
 	id      int64
 	date    string
 	account string
+	source  string
 	amount  money.Micros
 }
 
-// reconcileAccruals posts one entry per person, tab and day with money since accrual_from.
-func reconcileAccruals(ctx context.Context, tx *sql.Tx, from string, now time.Time, rep *Report) error {
+// reconcileAccruals posts one entry per person, tab and day with money since accrual_from: the sheet's day before the
+// switch to Hub's facts (plan nil — no switch), the facts' from it. A day from the switch on that the facts cannot
+// answer for is left as it is posted (plan.holds); a sheet's value there is a mirror, never posted.
+func reconcileAccruals(ctx context.Context, tx *sql.Tx, from string, plan *factPlan, now time.Time, rep *Report) error {
 	rows, err := tx.QueryContext(ctx, `SELECT e.id, e.effective_at, COALESCE(e.source_key, ''), l.account, l.amount,
 		NOT EXISTS (SELECT 1 FROM entries r WHERE r.reverses_id = e.id) AS active
 		FROM entries e JOIN lines l ON l.entry_id = e.id
@@ -193,12 +210,12 @@ func reconcileAccruals(ctx context.Context, tx *sql.Tx, from string, now time.Ti
 			rows.Close()
 			return err
 		}
-		day, n, ok := parseAccrualKey(key)
+		day, n, source, ok := parseAccrualKey(key)
 		if !ok {
 			rows.Close()
 			return fmt.Errorf("начисление %d: непонятный source_key %q", a.id, key)
 		}
-		a.amount = money.Micros(amt)
+		a.amount, a.source = money.Micros(amt), source
 		if n > last[day] {
 			last[day] = n
 		}
@@ -217,6 +234,7 @@ func reconcileAccruals(ctx context.Context, tx *sql.Tx, from string, now time.Ti
 		amount                    money.Micros
 		event                     int64
 		at                        time.Time
+		source                    string
 	}
 	rows, err = tx.QueryContext(ctx, `SELECT d.model, d.name, d.person, d.date, d.amount, t.ok_event_id, t.ok_at, t.posted_event_id
 		FROM payroll_days d JOIN payroll_tabs t ON t.model = d.model AND t.name = d.name
@@ -234,7 +252,7 @@ func reconcileAccruals(ctx context.Context, tx *sql.Tx, from string, now time.Ti
 			rows.Close()
 			return err
 		}
-		w.amount, w.event, w.at = money.FromFloat(amount), okEvent.Int64, now
+		w.amount, w.event, w.at, w.source = money.FromFloat(amount), okEvent.Int64, now, SourceSheet
 		// Recorded at the event's time only while that reading is news: a fix of who the tab belongs to
 		// is a correction of today and must not slip into a month closed before it.
 		if okAt.Valid && posted.Int64 != okEvent.Int64 {
@@ -242,7 +260,7 @@ func reconcileAccruals(ctx context.Context, tx *sql.Tx, from string, now time.Ti
 				w.at = t
 			}
 		}
-		if w.amount != 0 {
+		if w.amount != 0 && (plan == nil || w.date < plan.from) {
 			want[w.model+"/"+w.name+":"+w.date] = w
 		}
 	}
@@ -251,6 +269,13 @@ func reconcileAccruals(ctx context.Context, tx *sql.Tx, from string, now time.Ti
 		return err
 	}
 	rows.Close()
+	if plan != nil {
+		for day, f := range plan.want {
+			if f.amount != 0 && f.date >= from {
+				want[day] = wanted{model: f.model, name: f.name, person: f.person, date: f.date, amount: f.amount, at: now, source: SourceFacts}
+			}
+		}
+	}
 
 	days := make([]string, 0, len(want)+len(have))
 	for d := range want {
@@ -263,10 +288,15 @@ func reconcileAccruals(ctx context.Context, tx *sql.Tx, from string, now time.Ti
 	}
 	sort.Strings(days)
 	for _, day := range days {
+		if plan != nil {
+			if model, name, date, ok := splitDayKey(day); ok && date >= plan.from && plan.holds(model, name, date) {
+				continue // the facts do not answer for it yet: as posted, and in «не занесено» as unknown
+			}
+		}
 		w, ok := want[day]
 		hs := have[day]
 		account := "payable:" + w.person
-		if ok && len(hs) == 1 && hs[0].account == account && hs[0].amount == -w.amount && hs[0].date == w.date {
+		if ok && len(hs) == 1 && hs[0].account == account && hs[0].amount == -w.amount && hs[0].date == w.date && hs[0].source == w.source {
 			continue
 		}
 		at := now
@@ -284,8 +314,14 @@ func reconcileAccruals(ctx context.Context, tx *sql.Tx, from string, now time.Ti
 		}
 		last[day]++
 		memo := fmt.Sprintf("начисление %s/%s за %s", w.model, w.name, w.date)
+		var events []int64
+		if w.source == SourceFacts {
+			memo += " из фактов хаба"
+		} else {
+			events = []int64{w.event}
+		}
 		if _, err := ledger.Post(ctx, tx, ledger.Entry{EffectiveAt: w.date, Kind: KindAccrual, Memo: memo, Author: author,
-			SourceKey: accrualKey(w.model, w.name, w.date, last[day]), EventIDs: []int64{w.event},
+			SourceKey: accrualKey(w.model, w.name, w.date, last[day], w.source), EventIDs: events,
 			Lines: []ledger.Line{{Account: salary, Amount: w.amount}, {Account: account, Amount: -w.amount}}}, at); err != nil {
 			return fmt.Errorf("%s: %w", day, err)
 		}
@@ -485,6 +521,7 @@ func setCursor(ctx context.Context, q ledger.Querier, v int64, now time.Time) er
 // debt is something a person is owed, payment something that covers debts.
 type debt struct {
 	kind, date, model, name string
+	source                  string // of a day: sheet or facts
 	entry                   int64
 	amount, paid            money.Micros
 	paidBy                  []int
@@ -599,9 +636,9 @@ func rebuildFIFO(ctx context.Context, tx *sql.Tx) error {
 		case KindOpening:
 			d.kind = "opening"
 		case KindAccrual:
-			if day, _, ok := parseAccrualKey(key); ok {
+			if day, _, source, ok := parseAccrualKey(key); ok {
 				if model, name, _, ok := splitDayKey(day); ok {
-					d.kind, d.model, d.name = "day", model, name
+					d.kind, d.model, d.name, d.source = "day", model, name, source
 				}
 			}
 		}
@@ -628,22 +665,22 @@ func rebuildFIFO(ctx context.Context, tx *sql.Tx) error {
 	for _, slug := range slugs {
 		list, advance, advanceBy, lastDate := fifo(debts[slug], pays[slug])
 		seq := 0
-		insert := func(kind, date, model, name string, amount, paid, unpaid money.Micros, by []int) error {
+		insert := func(kind, date, model, name, source string, amount, paid, unpaid money.Micros, by []int) error {
 			seq++
 			if by == nil {
 				by = []int{}
 			}
-			_, err := tx.ExecContext(ctx, `INSERT INTO payable_days(person, seq, kind, date, model, name, amount, paid, unpaid, paid_by)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, slug, seq, kind, date, model, name, int64(amount), int64(paid), int64(unpaid), jsonText(by))
+			_, err := tx.ExecContext(ctx, `INSERT INTO payable_days(person, seq, kind, date, model, name, amount, paid, unpaid, paid_by, source)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, slug, seq, kind, date, model, name, int64(amount), int64(paid), int64(unpaid), jsonText(by), source)
 			return err
 		}
 		for _, d := range list {
-			if err := insert(d.kind, d.date, d.model, d.name, d.amount, d.paid, d.amount-d.paid, d.paidBy); err != nil {
+			if err := insert(d.kind, d.date, d.model, d.name, d.source, d.amount, d.paid, d.amount-d.paid, d.paidBy); err != nil {
 				return err
 			}
 		}
 		if advance > 0 {
-			if err := insert("advance", lastDate, "", "", 0, advance, -advance, advanceBy); err != nil {
+			if err := insert("advance", lastDate, "", "", "", 0, advance, -advance, advanceBy); err != nil {
 				return err
 			}
 		}

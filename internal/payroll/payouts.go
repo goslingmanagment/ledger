@@ -64,7 +64,8 @@ type PayoutDay struct {
 	AmountMicros int64        `json:"amountMicros"`
 	Worked       bool         `json:"worked"`
 	Pages        []PayoutPage `json:"pages,omitempty"`
-	Source       string       `json:"source"` // "sheet": the payout tab; the facts of Hub come with L4
+	// Source is where the day came from: "sheet" — the payout tab, "facts" — Hub's facts (from settings.payroll_facts_from).
+	Source string `json:"source"`
 }
 
 // UnpaidDay is what is left of a debt after the FIFO of payouts (payable_days).
@@ -149,7 +150,8 @@ func PayoutWindow(from, to string) (string, string, error) {
 // ReadPayouts reads the pay of every person with a payout tab for the days from…to, in one snapshot.
 //
 // The days are the active accrual postings (the books, as v_payables and `ledger payables` count them),
-// with worked and the page cells from payroll_days; a worked day that accrued nothing is listed at zero. Days
+// with worked and the page cells from payroll_days — or, for a day accrued from Hub's facts, the net of the person's
+// shares by Hub page; a worked sheet day that accrued nothing is listed at zero. Days
 // before accrualFrom have no postings of their own: they are inside the opening debt. paidMicros is the sum
 // of the active clearing postings dated in the window — the table part of each salary row of the journal
 // (above-table money never touches the debt), by the row's date; it is not the FIFO share of the window's
@@ -282,6 +284,15 @@ func payoutDays(ctx context.Context, q ledger.Querier, from, to, accrualFrom str
 	}
 	rows.Close()
 
+	factsFrom, err := FactsFrom(ctx, q)
+	if err != nil {
+		return err
+	}
+	facts, err := factCells(ctx, q, from, to)
+	if err != nil {
+		return err
+	}
+
 	rows, err = q.QueryContext(ctx, `SELECT substr(l.account, 9), COALESCE(e.source_key, ''), l.amount
 		FROM entries e JOIN lines l ON l.entry_id = e.id
 		WHERE e.kind = ? AND l.account LIKE 'payable:%' AND substr(e.effective_at, 1, 10) BETWEEN ? AND ?
@@ -298,7 +309,7 @@ func payoutDays(ctx context.Context, q ledger.Querier, from, to, accrualFrom str
 			rows.Close()
 			return err
 		}
-		day, _, ok := parseAccrualKey(key)
+		day, _, source, ok := parseAccrualKey(key)
 		model, _, date, ok2 := splitDayKey(day)
 		if !ok || !ok2 {
 			rows.Close()
@@ -309,8 +320,11 @@ func payoutDays(ctx context.Context, q ledger.Querier, from, to, accrualFrom str
 		if p == nil {
 			continue
 		}
-		d := PayoutDay{Date: date, Model: model, AmountMicros: -amt, Source: "sheet"}
-		if s := sheet[day]; s != nil {
+		d := PayoutDay{Date: date, Model: model, AmountMicros: -amt, Source: source}
+		if source == SourceFacts {
+			c := facts[slug+"\x00"+ledger.Slug(model)+"\x00"+date]
+			d.Worked, d.Pages = true, c.pages
+		} else if s := sheet[day]; s != nil {
 			d.Worked, d.Pages = s.worked, s.pages
 		}
 		p.Days = append(p.Days, d)
@@ -322,14 +336,15 @@ func payoutDays(ctx context.Context, q ledger.Querier, from, to, accrualFrom str
 	}
 	rows.Close()
 
-	// A worked day that came to zero has no posting, and is still a day of work.
+	// A worked day that came to zero has no posting, and is still a day of work — of the sheet before the switch to
+	// Hub's facts; from it the sheet is a mirror.
 	for day, s := range sheet {
 		p := people[s.person]
 		if p == nil || posted[day] || !s.worked || s.amount != 0 {
 			continue
 		}
 		model, _, date, ok := splitDayKey(day)
-		if !ok || date < accrualFrom {
+		if !ok || date < accrualFrom || (factsFrom != "" && date >= factsFrom) {
 			continue
 		}
 		p.Days = append(p.Days, PayoutDay{Date: date, Model: model, Worked: true, Pages: s.pages, Source: "sheet"})

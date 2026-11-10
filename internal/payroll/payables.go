@@ -11,6 +11,7 @@ import (
 	"github.com/goslingmanagment/ledger/internal/ledger"
 	"github.com/goslingmanagment/ledger/internal/money"
 	"github.com/goslingmanagment/ledger/internal/server"
+	"github.com/goslingmanagment/ledger/internal/ts"
 )
 
 func init() {
@@ -94,7 +95,8 @@ func Payables(ctx context.Context, q ledger.Querier, person string) ([]Payable, 
 // tolerance is how far a debt may stand from «К выплате» (the sheets round): $1.
 const tolerance = money.Scale
 
-// PersonCheck is one person's debt against their tabs.
+// PersonCheck is one person's debt against their tabs. From the switch to Hub's facts on, Diff is what the sheet still
+// governs: the debt with the switch's days as the sheet has them (Payable − Facts + Sheet) against «К выплате».
 type PersonCheck struct {
 	Person  string       `json:"person"`
 	Name    string       `json:"name"`
@@ -103,6 +105,9 @@ type PersonCheck struct {
 	Diff    money.Micros `json:"diff"`
 	OK      bool         `json:"ok"`
 	Reason  string       `json:"reason,omitempty"`
+	// Facts is what the books accrued from the switch day on; Sheet what the mirror has for those days.
+	Facts money.Micros `json:"facts,omitempty"`
+	Sheet money.Micros `json:"sheet,omitempty"`
 }
 
 // TabProblem is a table or tab whose state is not to be trusted.
@@ -120,12 +125,19 @@ type CheckReport struct {
 	People   []PersonCheck `json:"people"`
 	Rows     []Unresolved  `json:"rows"`
 	Tabs     []TabProblem  `json:"tabs"`
+	// FactsFrom is the switch to Hub's facts (settings.payroll_facts_from); "" — the sheets accrue everything. From it
+	// the sheet is a mirror: Mirror are its days that differ from the books, Unaccrued the facts no tab takes. Both are
+	// information, not failures.
+	FactsFrom string      `json:"facts_from,omitempty"`
+	Mirror    []MirrorDay `json:"mirror"`
+	Unaccrued []Unaccrued `json:"unaccrued"`
 }
 
 // Check compares the debts with the sheets. A person with a tab in error or without any tab is not OK:
-// the comparison has nothing to stand on.
+// the comparison has nothing to stand on. From the switch to Hub's facts on it compares what the sheet still governs.
 func Check(ctx context.Context, q ledger.Querier) (CheckReport, error) {
-	rep := CheckReport{OK: true, People: []PersonCheck{}, Rows: []Unresolved{}, Tabs: []TabProblem{}}
+	rep := CheckReport{OK: true, People: []PersonCheck{}, Rows: []Unresolved{}, Tabs: []TabProblem{}, Mirror: []MirrorDay{},
+		Unaccrued: []Unaccrued{}}
 	people, err := LoadPeople(ctx, q)
 	if err != nil {
 		return rep, err
@@ -133,6 +145,20 @@ func Check(ctx context.Context, q ledger.Querier) (CheckReport, error) {
 	list, err := Payables(ctx, q, "")
 	if err != nil {
 		return rep, err
+	}
+	if rep.FactsFrom, err = FactsFrom(ctx, q); err != nil {
+		return rep, err
+	}
+	var mir map[string]*mirrorSums
+	if rep.FactsFrom != "" {
+		if mir, err = mirror(ctx, q, rep.FactsFrom); err != nil {
+			return rep, err
+		}
+		plan, err := planFacts(ctx, q, rep.FactsFrom, ts.Now())
+		if err != nil {
+			return rep, err
+		}
+		rep.Unaccrued = append(rep.Unaccrued, plan.unaccrued...)
 	}
 	for _, p := range list {
 		if _, isPerson := people[p.Person]; !isPerson && p.Tabs == 0 {
@@ -143,6 +169,11 @@ func Check(ctx context.Context, q ledger.Querier) (CheckReport, error) {
 			c.ToPay = *p.ToPay
 		}
 		c.Diff = c.Payable - money.FromFloat(c.ToPay)
+		if m := mir[p.Person]; m != nil {
+			c.Facts, c.Sheet = m.total()
+			c.Diff += c.Sheet - c.Facts
+			rep.Mirror = append(rep.Mirror, m.days(p.Person, p.Name)...)
+		}
 		switch {
 		case p.Tabs == 0 && c.Payable != 0:
 			c.OK, c.Reason = false, "долг есть, вкладки нет"

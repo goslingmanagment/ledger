@@ -124,7 +124,7 @@ func Claim(ctx context.Context, store *db.Store, in ClaimInput, author string, n
 	case in.Note == "":
 		return ClaimResult{}, refuse("нужна заметка: чьё слово и почему (--note)")
 	}
-	return inTx(ctx, store, func(tx *sql.Tx) (ClaimResult, error) {
+	return inTx(ctx, store, now, func(tx *sql.Tx) (ClaimResult, error) {
 		var name string
 		switch err := tx.QueryRowContext(ctx, `SELECT name FROM people WHERE slug = ?`, in.Person).Scan(&name); {
 		case errors.Is(err, sql.ErrNoRows):
@@ -173,7 +173,7 @@ func Unclaim(ctx context.Context, store *db.Store, in ClaimInput, author string,
 	case in.Note == "":
 		return ClaimResult{}, refuse("нужна заметка: чьё слово и почему (--note)")
 	}
-	return inTx(ctx, store, func(tx *sql.Tx) (ClaimResult, error) {
+	return inTx(ctx, store, now, func(tx *sql.Tx) (ClaimResult, error) {
 		if _, ok, err := activeClaim(ctx, tx, in.Ref); err != nil || !ok {
 			if err != nil {
 				return ClaimResult{}, err
@@ -192,7 +192,7 @@ func Unclaim(ctx context.Context, store *db.Store, in ClaimInput, author string,
 	})
 }
 
-func inTx(ctx context.Context, store *db.Store, f func(*sql.Tx) (ClaimResult, error)) (ClaimResult, error) {
+func inTx(ctx context.Context, store *db.Store, now time.Time, f func(*sql.Tx) (ClaimResult, error)) (ClaimResult, error) {
 	tx, err := store.RW.BeginTx(ctx, nil)
 	if err != nil {
 		return ClaimResult{}, err
@@ -202,7 +202,10 @@ func inTx(ctx context.Context, store *db.Store, f func(*sql.Tx) (ClaimResult, er
 	if err != nil {
 		return ClaimResult{}, err
 	}
-	return out, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return ClaimResult{}, err
+	}
+	return out, settle(ctx, store, now)
 }
 
 func insertClaim(ctx context.Context, tx *sql.Tx, r ClaimRecord) (int64, error) {

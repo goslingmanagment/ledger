@@ -3,8 +3,9 @@
 // of a shift or a look-in goes to its person at the rate of their tab for the page's model: payroll.Terms, the same
 // header the sheet's days are counted by — «Ставка %» of the revenue, and «Фикс/см» for a day with a shift. The общак
 // is summed per week with its sales; what waits, waits for a decision, is nobody's or unknown is listed with its
-// sales, not accrued. Nothing here posts: the debts, payable_days and v_payables do not move. `ledger accruals diff`
-// puts a week of it beside the payout sheets.
+// sales, not accrued. Nothing here posts; from settings.payroll_facts_from on payroll.Rebuild posts fact_accruals of the
+// proven weeks as the debts (L4), before it they are a shadow. `ledger accruals diff` puts a week of it beside the
+// payout sheets.
 package accruals
 
 import (
@@ -104,7 +105,8 @@ type accrualRow struct {
 }
 
 // Rebuild recomputes fact_homes, fact_accruals and fact_weeks from the mirror of the team's facts, in one
-// transaction. Idempotent; it runs after every read of the facts and every claim.
+// transaction, then — once the accruals are switched to the facts (settings.payroll_facts_from) — the debts.
+// Idempotent; it runs after every read of the facts and every claim.
 func Rebuild(ctx context.Context, store *db.Store, now time.Time) (Report, error) {
 	tx, err := store.RW.BeginTx(ctx, nil)
 	if err != nil {
@@ -115,7 +117,23 @@ func Rebuild(ctx context.Context, store *db.Store, now time.Time) (Report, error
 	if err != nil {
 		return rep, err
 	}
-	return rep, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return rep, err
+	}
+	return rep, settle(ctx, store, now)
+}
+
+// settle rebuilds the debts after the facts changed, when the facts accrue them (payroll L4); before the switch they
+// are a shadow and the debts do not move.
+func settle(ctx context.Context, store *db.Store, now time.Time) error {
+	from, err := payroll.FactsFrom(ctx, store.RO)
+	if err != nil || from == "" {
+		return err
+	}
+	if _, err := payroll.Rebuild(ctx, store, now); err != nil {
+		return fmt.Errorf("долги после фактов: %w", err)
+	}
+	return nil
 }
 
 // rebuildTx is Rebuild inside the caller's transaction.

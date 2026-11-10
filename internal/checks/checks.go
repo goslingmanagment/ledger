@@ -491,7 +491,34 @@ func Payables(ctx context.Context, e Env) Result {
 	if len(bad) > 0 {
 		return fail(name, "warn", strings.Join(bad, "; "), nil)
 	}
-	return pass(name, fmt.Sprintf("%d человек: долг равен К выплате ±$1", len(c.People)))
+	if c.FactsFrom == "" {
+		return pass(name, fmt.Sprintf("%d человек: долг равен К выплате ±$1", len(c.People)))
+	}
+	// From the switch to Hub's facts on the sheet is a mirror: its difference from the facts, and the facts no tab takes,
+	// are said, never a failure.
+	summary := fmt.Sprintf("%d человек: долг с днями с %s по таблице равен К выплате ±$1; с %s начисляют факты хаба", len(c.People),
+		c.FactsFrom, c.FactsFrom)
+	if len(c.Mirror) > 0 {
+		const shown = 8
+		var parts []string
+		for i, d := range c.Mirror {
+			if i == shown {
+				parts = append(parts, fmt.Sprintf("и ещё %d", len(c.Mirror)-shown))
+				break
+			}
+			parts = append(parts, fmt.Sprintf("%s %s: таблица %s, факты %s", d.Person, d.Date, money.Micros(d.SheetMicros).Cents(),
+				money.Micros(d.BooksMicros).Cents()))
+		}
+		summary += "; таблица-зеркало расходится в " + fmt.Sprint(len(c.Mirror)) + " дн.: " + strings.Join(parts, ", ")
+	}
+	for _, u := range c.Unaccrued {
+		who := u.Username + " (хаб " + fmt.Sprint(u.UserID) + ")"
+		if u.Person != "" {
+			who = u.Person
+		}
+		summary += fmt.Sprintf("; не начислено фактами: %s, %s, %s за %d дн. — %s", who, u.Model, money.Micros(u.NetMicros).Cents(), u.Days, u.Reason)
+	}
+	return Result{Name: name, OK: true, Severity: "info", Summary: summary, Details: map[string]any{"mirror": c.Mirror, "unaccrued": c.Unaccrued}}
 }
 
 // DriftOf: a closed month whose figure now differs by $100 or more from what the owner knows.
