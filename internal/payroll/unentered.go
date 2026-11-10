@@ -198,6 +198,11 @@ type unenteredTab struct {
 // computeUnentered walks the days without a value of the last 45 days. A day of a week Hub's team facts proved, of
 // a person who is a Hub user, is their own accrued sales of the day (teamFacts.rows), and a day without their work is
 // a day off; every other day is the money of the week's pages in the person's slot by the card.
+//
+// Two kinds of day are no gap at all and make no row: a day on or before the person's paid-through day (a payout is
+// the check of those days, whichever way they would be counted), and, for the slot only, a day of a tab whose model
+// the card no longer lists (the person left that model: their slot there is no guess, and no colleague shares it).
+// Hub's facts still count such a tab: their own sale on the model is cover money nobody entered.
 func computeUnentered(ctx context.Context, q ledger.Querier, now time.Time) ([]unenteredRow, error) {
 	people, err := LoadPeople(ctx, q)
 	if err != nil {
@@ -208,6 +213,10 @@ func computeUnentered(ctx context.Context, q ledger.Querier, now time.Time) ([]u
 		return nil, err
 	}
 	facts, err := loadFacts(ctx, q, now)
+	if err != nil {
+		return nil, err
+	}
+	paid, err := paidThrough(ctx, q)
 	if err != nil {
 		return nil, err
 	}
@@ -285,6 +294,7 @@ func computeUnentered(ctx context.Context, q ledger.Querier, now time.Time) ([]u
 	for _, t := range tabs {
 		p := people[t.person]
 		sl, haveSlot := parseSlot(p.Schedule)
+		onCard := cardHasModel(p, t.model)
 		days := daysOf[t.model+"\x00"+t.name]
 		active := weekPages(days)
 		firstValue, lastValue := "", ""
@@ -309,7 +319,7 @@ func computeUnentered(ctx context.Context, q ledger.Querier, now time.Time) ([]u
 			if err != nil {
 				return nil, err
 			}
-			if date.Before(first) || date.After(until) || d.date < firstValue || d.hasValue() {
+			if date.Before(first) || date.After(until) || d.date < firstValue || d.hasValue() || d.date <= paid[t.person] {
 				continue
 			}
 			if facts.cover(t.person, t.model, d.date) {
@@ -319,6 +329,9 @@ func computeUnentered(ctx context.Context, q ledger.Querier, now time.Time) ([]u
 					counted[k] = true
 					fromFacts = append(fromFacts, facts.rows(t, d.date)...)
 				}
+			}
+			if !onCard {
+				continue // the card left this model: no slot guess
 			}
 			if !haveSlot && p.Status == "departed" {
 				continue // nobody expects a shift of a person who left and has no slot
@@ -402,6 +415,53 @@ func computeUnentered(ctx context.Context, q ledger.Querier, now time.Time) ([]u
 
 func personDay(person, model, date string) string {
 	return person + "\x00" + ledger.Slug(model) + "\x00" + date
+}
+
+// cardHasModel says whether the card lists the tab's model (card ari is tab Ari, as Resolve compares them). A card
+// without models lists every model.
+func cardHasModel(p Person, model string) bool {
+	if len(p.Models) == 0 {
+		return true
+	}
+	return slices.ContainsFunc(p.Models, func(m string) bool { return ledger.Slug(m) == ledger.Slug(model) })
+}
+
+// paidThrough is each person's last day the payouts reached in the FIFO of their debt (payable_days): the last debt
+// row cleared in full with every row before it, or the eve of the first row a payout only began on. A person with
+// nothing unpaid is paid through their last debt row. Days up to it are settled: «не занесено» chases none of them.
+func paidThrough(ctx context.Context, q ledger.Querier) (map[string]string, error) {
+	rows, err := q.QueryContext(ctx, `SELECT person, date, paid, unpaid FROM payable_days WHERE kind <> 'advance' ORDER BY person, seq`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	stopped := map[string]bool{}
+	for rows.Next() {
+		var person, date string
+		var paid, unpaid int64
+		if err := rows.Scan(&person, &date, &paid, &unpaid); err != nil {
+			return nil, err
+		}
+		if stopped[person] {
+			continue
+		}
+		if unpaid > 0 {
+			stopped[person] = true
+			if paid == 0 {
+				continue
+			}
+			d, err := time.Parse(ts.DateLayout, date)
+			if err != nil {
+				return nil, fmt.Errorf("payable_days %s %s: %w", person, date, err)
+			}
+			date = d.AddDate(0, 0, -1).Format(ts.DateLayout)
+		}
+		if date > out[person] {
+			out[person] = date
+		}
+	}
+	return out, rows.Err()
 }
 
 // teamFacts are Hub's proven team facts as «не занесено» reads them (ledger release 2): the weeks fact_weeks proved,
