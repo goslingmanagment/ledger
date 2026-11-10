@@ -640,7 +640,20 @@ func TestReportPosts(t *testing.T) {
 	exec(t, s, `INSERT INTO shift_report_posts(event_id, peer, topic, msg_id, posted_at, sender, tag, report_date, total_micros, pages_micros,
 		flags, text, current, digest, parsed_at) VALUES (1, '-1', 4, 7, '2026-11-08T23:00:00+03:00', 'someone', '#nobody', '2026-11-08',
 		1, 1, '["unknown_author"]', 't', 1, 'd', ?)`, ts.Format(now))
+	// The sheets still pay: the unusable post is information, the check stays green and keeps the list.
 	r := ReportPosts(ctx, Env{Q: s.RO, Now: now})
+	if !r.OK || !strings.Contains(r.Summary, "в тени") || !strings.Contains(r.Summary, "1 постов") {
+		t.Fatalf("shadow: %+v", r)
+	}
+	// The reports pay from a day after the post's: still nothing to warn about.
+	exec(t, s, `INSERT INTO settings(key, value, note, updated_at) VALUES ('payroll_reports_from', '2026-11-09', '', ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, ts.Format(now))
+	if r := ReportPosts(ctx, Env{Q: s.RO, Now: now}); !r.OK {
+		t.Fatalf("a post of a day the sheets paid for: %+v", r)
+	}
+	// The reports pay for the post's day: a warning.
+	exec(t, s, `UPDATE settings SET value = '2026-11-08' WHERE key = 'payroll_reports_from'`)
+	r = ReportPosts(ctx, Env{Q: s.RO, Now: now})
 	if r.OK || r.Severity != "warn" || !strings.Contains(r.Summary, "someone #nobody, 2026-11-08") || !strings.Contains(r.Summary, "автор не узнан") {
 		t.Fatalf("%+v", r)
 	}

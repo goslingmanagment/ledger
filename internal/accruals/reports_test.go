@@ -618,16 +618,21 @@ func TestAShiftWithoutAReport(t *testing.T) {
 	if gaps, _ := payroll.ShiftsWithoutReport(ctx, s.RO, "2026-11-03", "2026-11-17", at("2026-11-13T10:00:00+03:00")); len(gaps) != 1 {
 		t.Fatalf("a fresh shift: %+v", gaps)
 	}
+	// The sheets still pay: the shifts without a report are information, the check stays green.
 	r := checks.ShiftReports(ctx, checks.Env{Q: s.RO, Now: reportNow})
-	if r.OK || r.Severity != "warn" || !strings.Contains(r.Summary, "bravo 2026-11-10") || !strings.Contains(r.Summary, "bravo 2026-11-12") {
-		t.Fatalf("check %+v", r)
+	if !r.OK || !strings.Contains(r.Summary, "в тени") || !strings.Contains(r.Summary, "2 смен") {
+		t.Fatalf("check in shadow %+v", r)
 	}
 	// Before the switch «не занесено» is as it was: no row of the reports.
 	if n := count(t, s, `SELECT count(*) FROM payroll_unentered WHERE reason LIKE 'смена без отчёта%'`); n != 0 {
 		t.Fatal("a shift without a report before the switch")
 	}
-	// Under the reports a worked shift without a report is what «не занесено» means.
+	// Under the reports a worked shift without a report is what «не занесено» means, and the check warns.
 	setReports(t, s, ctx, "2026-11-10")
+	r = checks.ShiftReports(ctx, checks.Env{Q: s.RO, Now: reportNow})
+	if r.OK || r.Severity != "warn" || !strings.Contains(r.Summary, "bravo 2026-11-10") || !strings.Contains(r.Summary, "bravo 2026-11-12") {
+		t.Fatalf("check %+v", r)
+	}
 	// The 12th: the shift and no report. The 10th has the sheet's fix and no report: held as posted, said first.
 	if got := cols(t, s, `SELECT date, CASE WHEN reason LIKE 'по отчёту не начислено: отчёта нет%' THEN 'held'
 		WHEN reason LIKE 'смена без отчёта: смена 12.11 10:00 — 12.11 18:00%' THEN 'shift' ELSE reason END
