@@ -28,6 +28,96 @@ func init() {
 	Command(Cmd{Name: "payables", Summary: "кому сколько должны и за какие дни: [--person имя] [--json]", Run: payables})
 	Command(Cmd{Name: "payroll facts-from", Run: payrollFactsFrom,
 		Summary: "начисления из фактов хаба с дня (рядом с базой): [ГГГГ-ММ-ДД | --off]; без аргумента — показать; затем пересборка"})
+	Command(Cmd{Name: "payroll reports-from", Run: payrollReportsFrom,
+		Summary: "начисления из отчётов смен с дня (рядом с базой): [ГГГГ-ММ-ДД | --off]; без аргумента — показать; затем пересборка"})
+	Command(Cmd{Name: "payroll change", Run: payrollChange,
+		Summary: `изменение выплаченного дня: apply <id> — сторно и новая проводка по отчёту, dismiss <id> — книги как были; [--note "…"] (ключ decide или рядом с базой)`})
+}
+
+// payrollReportsFrom sets or clears the switch of the accruals to the shift reports and rebuilds: the reports'
+// accruals first, then the debts. --off gives back the sheets' books exactly.
+func payrollReportsFrom(ctx context.Context, args []string) error {
+	fs := Flags("payroll reports-from")
+	off := fs.Bool("off", false, "выключить: все дни снова из таблиц выплат (откат)")
+	pos, err := ParseArgs(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) > 1 || (*off && len(pos) > 0) {
+		return Exit{Code: 2, Msg: "ledger payroll reports-from [ГГГГ-ММ-ДД | --off]"}
+	}
+	store, err := OpenStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	if len(pos) == 0 && !*off {
+		from, err := payroll.ReportsFrom(ctx, store.RO)
+		if err != nil {
+			return err
+		}
+		return printJSON(map[string]any{"ok": true, "reportsFrom": from})
+	}
+	day := ""
+	if !*off {
+		day = pos[0]
+	}
+	tx, err := store.RW.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := payroll.SetReportsFrom(ctx, tx, day, ts.Now()); err != nil {
+		return Exit{Code: 2, Msg: "не записано: " + err.Error()}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	shadow, err := accruals.RebuildReports(ctx, store, ts.Now())
+	if err != nil {
+		return err
+	}
+	rep, err := payroll.Rebuild(ctx, store, ts.Now())
+	if err != nil {
+		return err
+	}
+	return printJSON(map[string]any{"ok": true, "reportsFrom": day, "reports": shadow, "report": rep})
+}
+
+// payrollChange applies or dismisses a pending change of a paid day, next to the database or through the API (decide).
+func payrollChange(ctx context.Context, args []string) error {
+	fs := Flags("payroll change")
+	note := fs.String("note", "", "слово владельца: почему")
+	pos, err := ParseArgs(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) != 2 || (pos[0] != payroll.DecisionApply && pos[0] != payroll.DecisionDismiss) {
+		return Exit{Code: 2, Msg: `ledger payroll change apply|dismiss <id> [--note "…"]`}
+	}
+	decision := pos[0]
+	var id int64
+	if _, err := fmt.Sscan(pos[1], &id); err != nil || id <= 0 {
+		return Exit{Code: 2, Msg: "номер изменения — число, а не " + pos[1]}
+	}
+	var out payroll.DecideResult
+	if local() {
+		store, err := openDirect(ctx)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		if out, err = payroll.DecideChange(ctx, store, id, decision, localAuthor(), *note, ts.Now()); err != nil {
+			var r *payroll.ChangeRefusal
+			if errors.As(err, &r) {
+				return Exit{Code: 2, Msg: "не записано: " + r.Error()}
+			}
+			return err
+		}
+	} else if err := call(ctx, http.MethodPost, fmt.Sprintf("/v1/payroll/changes/%d/%s", id, decision), map[string]string{"note": *note}, &out); err != nil {
+		return err
+	}
+	return printJSON(out)
 }
 
 // payrollFactsFrom sets or clears the switch of the accruals to Hub's facts and rebuilds: the facts' accruals first,
@@ -419,22 +509,34 @@ func printPayables(out *bufio.Writer, ans payroll.Answer) {
 	}
 	printProblems(out, ans.Check)
 	printMirror(out, ans.Check)
+	if len(ans.Check.Pending) > 0 {
+		fmt.Fprintf(out, "\nИзменения за выплаченные дни ждут решения (ledger payroll change apply|dismiss <id>):\n")
+		for _, c := range ans.Check.Pending {
+			fmt.Fprintf(out, "  #%d %s %s %s/%s: проведено %s, по отчёту %s — %s\n", c.ID, c.Person, c.Date, c.Model, c.Name,
+				amount(money.Micros(c.PostedMicros)), amount(money.Micros(c.NewMicros)), c.ReasonText)
+		}
+	}
 }
 
-// printMirror: from the switch to Hub's facts on, the sheet's days that differ from the facts, and the facts no tab takes.
+// printMirror: from the switch to a source after the sheets on, the sheet's days that differ from it, and what no tab
+// takes.
 func printMirror(w *bufio.Writer, c payroll.CheckReport) {
-	if c.FactsFrom == "" {
+	from, source, with, short, lost := c.FactsFrom, "факты хаба", "фактами", "факты", "Факты, которые никому не начислены:"
+	if c.ReportsFrom != "" {
+		from, source, with, short, lost = c.ReportsFrom, "отчёты смен", "отчётами", "отчёт", "Отчёты, которые никому не начислены:"
+	}
+	if from == "" {
 		return
 	}
-	fmt.Fprintf(w, "\nС %s начисляют факты хаба; таблицы — зеркало (разница с «К выплате» — их дни).\n", c.FactsFrom)
+	fmt.Fprintf(w, "\nС %s начисляют %s; таблицы — зеркало (разница с «К выплате» — их дни).\n", from, source)
 	if len(c.Mirror) > 0 {
-		fmt.Fprintf(w, "Таблица расходится с фактами:\n")
+		fmt.Fprintf(w, "Таблица расходится с %s:\n", with)
 		for _, d := range c.Mirror {
-			fmt.Fprintf(w, "  %s %s: таблица %s, факты %s\n", d.Name, d.Date, amount(money.Micros(d.SheetMicros)), amount(money.Micros(d.BooksMicros)))
+			fmt.Fprintf(w, "  %s %s: таблица %s, %s %s\n", d.Name, d.Date, amount(money.Micros(d.SheetMicros)), short, amount(money.Micros(d.BooksMicros)))
 		}
 	}
 	if len(c.Unaccrued) > 0 {
-		fmt.Fprintf(w, "Факты, которые никому не начислены:\n")
+		fmt.Fprintln(w, lost)
 		for _, u := range c.Unaccrued {
 			who := fmt.Sprintf("%s (хаб %d)", u.Username, u.UserID)
 			if u.Person != "" {

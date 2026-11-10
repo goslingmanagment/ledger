@@ -20,7 +20,7 @@ import (
 
 func init() {
 	Command(Cmd{Name: "accruals diff", Run: accrualsDiff,
-		Summary: "было — стало за неделю: таблица выплат против начислений из фактов хаба (тень): [--week понедельник] [--json]"})
+		Summary: "было — стало за неделю: таблица выплат, отчёты смен и факты хаба рядом (тень): [--week понедельник] [--json]"})
 	Command(Cmd{Name: "accruals rebuild", Summary: "пересчитать начисления из фактов хаба сейчас (рядом с базой)", Run: accrualsRebuild})
 	Command(Cmd{Name: "accruals claim", Run: accrualsClaim,
 		Summary: `ничья продажа — человеку по слову владельца: ledger accruals claim <transactionRef> --person <код> --note "…"`})
@@ -141,6 +141,30 @@ func signed(v int64) string {
 	return usd(v)
 }
 
+func orZero(v *int64) int64 {
+	if v == nil {
+		return 0
+	}
+	return *v
+}
+
+func orDash(v *int64) string {
+	if v == nil {
+		return "—"
+	}
+	return usd(*v)
+}
+
+// reportsDiffer: a day of the person where the sheet and the reports differ, or is on one side only.
+func reportsDiffer(p accruals.PersonDiff) bool {
+	for _, x := range p.Days {
+		if x.Presence != "" || len(x.Pages) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func orUnknown(v *int64, f func(int64) string) string {
 	if v == nil {
 		return "неизвестно"
@@ -151,8 +175,11 @@ func orUnknown(v *int64, f func(int64) string) string {
 // printDiff renders the week: the people, each one's days and the sales of the days that differ, then the общак,
 // what waits, what nobody's, and the Hub users no card names.
 func printDiff(out *bufio.Writer, d accruals.Diff) {
-	fmt.Fprintf(out, "Неделя %s — %s: таблица выплат против начислений из фактов хаба. Тень: долги и начисления не меняются.\n",
+	fmt.Fprintf(out, "Неделя %s — %s: таблица выплат, отчёты смен и факты хаба. Тень: долги и начисления не меняются.\n",
 		d.Week, d.Until)
+	if d.ReportsFrom != "" {
+		fmt.Fprintf(out, "С %s начисляют отчёты смен: для этих дней таблица — зеркало.\n", d.ReportsFrom)
+	}
 	if d.Facts.Status == "ok" {
 		fmt.Fprintf(out, "Факты недели доказаны, прочитаны %s.\n\n", d.Facts.ReadAt)
 	} else {
@@ -163,44 +190,61 @@ func printDiff(out *bufio.Writer, d accruals.Diff) {
 		fmt.Fprintln(out)
 	}
 	rows := make([][]string, 0, len(d.People))
-	var sheet, facts int64
+	var sheet, facts, reps, counted int64
 	for _, p := range d.People {
 		sheet += p.SheetMicros
+		reps += p.ReportsMicros
+		counted += p.SheetReportsCountedMicros
 		if p.FactsMicros != nil {
 			facts += *p.FactsMicros
 		}
 		unpriced := "—"
-		if p.UnpricedMicros != nil && *p.UnpricedMicros != 0 {
-			unpriced = usd(*p.UnpricedMicros)
+		if n := p.ReportsUnpricedMicros + orZero(p.UnpricedMicros); n != 0 {
+			unpriced = usd(n)
 		}
-		rows = append(rows, []string{p.Name + " (" + p.Person + ")", usd(p.SheetMicros), orUnknown(p.FactsMicros, usd),
-			orUnknown(p.DiffMicros, signed), orUnknown(p.FactsNetMicros, usd), unpriced})
+		rows = append(rows, []string{p.Name + " (" + p.Person + ")", usd(p.SheetMicros), usd(p.ReportsMicros), orUnknown(p.FactsMicros, usd),
+			signed(p.SheetReportsCountedMicros), orUnknown(p.ReportsFactsDiffMicros, signed), orUnknown(p.DiffMicros, signed), unpriced})
 	}
 	if len(rows) > 0 {
-		factsTotal, diffTotal := usd(facts), signed(facts-sheet)
+		factsTotal, diffTotal, rfTotal := usd(facts), signed(facts-sheet), signed(facts-reps)
 		if d.Facts.Status != "ok" {
-			factsTotal, diffTotal = "неизвестно", "неизвестно"
+			factsTotal, diffTotal, rfTotal = "неизвестно", "неизвестно", "неизвестно"
 		}
-		rows = append(rows, []string{"Итого", usd(sheet), factsTotal, diffTotal, "", ""})
+		rows = append(rows, []string{"Итого", usd(sheet), usd(reps), factsTotal, signed(counted), rfTotal, diffTotal, ""})
 	}
-	writeTable(out, []string{"человек", "таблица", "факты", "разница", "net фактов", "без ставки"}, rows,
-		[]bool{false, true, true, true, true, true})
+	writeTable(out, []string{"человек", "таблица", "отчёты", "факты", "отчёты − табл.", "факты − отчёты", "факты − табл.", "без ставки"}, rows,
+		[]bool{false, true, true, true, true, true, true, true})
+	fmt.Fprintln(out, "«отчёты − табл.» без округления таблицы: разница меньше доллара на странице, где в таблице целое число, не считается.")
 	for _, p := range d.People {
-		if len(p.Notes) == 0 && len(p.Sales) == 0 && len(p.Claimed) == 0 {
+		if len(p.Notes) == 0 && len(p.Sales) == 0 && len(p.Claimed) == 0 && !reportsDiffer(p) {
 			continue
 		}
-		fmt.Fprintf(out, "\n%s (%s): таблица %s, факты %s, разница %s\n", p.Name, p.Person, usd(p.SheetMicros),
-			orUnknown(p.FactsMicros, usd), orUnknown(p.DiffMicros, signed))
+		fmt.Fprintf(out, "\n%s (%s): таблица %s, отчёты %s, факты %s; отчёты − таблица %s, факты − таблица %s\n", p.Name, p.Person,
+			usd(p.SheetMicros), usd(p.ReportsMicros), orUnknown(p.FactsMicros, usd), signed(p.SheetReportsCountedMicros), orUnknown(p.DiffMicros, signed))
 		for _, n := range p.Notes {
 			fmt.Fprintf(out, "  ! %s\n", n)
 		}
 		days := [][]string{}
 		for _, x := range p.Days {
-			days = append(days, []string{x.Day, fmt.Sprintf("%.2f", x.SheetRevenue), usd(x.FactsNetMicros), usd(x.SheetMicros),
-				usd(x.FactsMicros), signed(x.DiffMicros)})
+			days = append(days, []string{x.Day, fmt.Sprintf("%.2f", x.SheetRevenue), usd(x.ReportRevenueMicros), usd(x.FactsNetMicros),
+				usd(x.SheetMicros), usd(x.ReportsMicros), usd(x.FactsMicros), signed(x.SheetReportsDiffMicros),
+				orUnknown(x.ReportsFactsDiffMicros, signed), x.Presence})
 		}
-		writeTable(indent{out}, []string{"день", "выручка табл.", "net фактов", "таблица", "факты", "разница"}, days,
-			[]bool{false, true, true, true, true, true})
+		writeTable(indent{out}, []string{"день", "выручка табл.", "выручка отч.", "net фактов", "таблица", "отчёты", "факты",
+			"отч. − табл.", "факты − отч.", ""}, days, []bool{false, true, true, true, true, true, true, true, true, false})
+		for _, x := range p.Days {
+			if len(x.Pages) == 0 {
+				continue
+			}
+			fmt.Fprintf(out, "  %s по страницам:\n", x.Day)
+			for _, pg := range x.Pages {
+				line := fmt.Sprintf("    %s: таблица %s, отчёт %s", pg.Page, orDash(pg.SheetMicros), orDash(pg.ReportMicros))
+				if pg.Rounding {
+					line += " — округление таблицы"
+				}
+				fmt.Fprintln(out, line)
+			}
+		}
 		if len(p.Sales) > 0 {
 			fmt.Fprintln(out, "  Продажи, из которых разница:")
 			writeTable(indent{out}, saleHeader, saleRows(p.Sales), saleRight)

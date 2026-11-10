@@ -51,6 +51,8 @@ type Diff struct {
 	Unknown    Group      `json:"unknown"`
 	BeforeRule Group      `json:"beforeRule"`
 	Unmapped   []Unmapped `json:"unmapped"`
+	// ReportsFrom is the switch to the shift reports (settings.payroll_reports_from); "" — the reports are a shadow.
+	ReportsFrom string `json:"reportsFrom,omitempty"`
 }
 
 // WeekFacts says whether the week's facts are proven.
@@ -75,7 +77,18 @@ type PersonDiff struct {
 	Sales          []SaleLine `json:"sales"` // of the days that differ
 	// Claimed are the nobody's sales of the week the owner gave the person by a claim (sale_claims), every one.
 	Claimed []SaleLine `json:"claimed,omitempty"`
-	terms   map[key]rate
+	// ReportsMicros is what the posted shift reports accrue for the week (report_accruals); ReportsNetMicros their
+	// revenue, ReportsUnpricedMicros the part of it «без ставки».
+	ReportsMicros         int64 `json:"reportsMicros"`
+	ReportsNetMicros      int64 `json:"reportsNetMicros"`
+	ReportsUnpricedMicros int64 `json:"reportsUnpricedNetMicros"`
+	// SheetReportsDiffMicros is reports − sheet; SheetReportsCountedMicros the same without the sheet's rounding of
+	// whole-dollar cells (what the totals count).
+	SheetReportsDiffMicros    int64 `json:"sheetReportsDifferenceMicros"`
+	SheetReportsCountedMicros int64 `json:"sheetReportsCountedMicros"`
+	// ReportsFactsDiffMicros is facts − reports; nil — the facts of the week are unknown.
+	ReportsFactsDiffMicros *int64 `json:"reportsFactsDifferenceMicros"`
+	terms                  map[key]rate
 }
 
 type key struct {
@@ -95,6 +108,28 @@ type DayDiff struct {
 	FactsNetMicros int64   `json:"factsNetMicros"`
 	FactsMicros    int64   `json:"factsMicros"`
 	DiffMicros     int64   `json:"differenceMicros"`
+	// The day by the posted reports: their revenue and what they accrue; the difference from the sheet (reports −
+	// sheet), the part of it the sheet's whole-dollar cells explain, and from the facts (facts − reports; nil — unknown).
+	ReportRevenueMicros    int64  `json:"reportRevenueMicros"`
+	ReportsMicros          int64  `json:"reportsMicros"`
+	SheetReportsDiffMicros int64  `json:"sheetReportsDifferenceMicros"`
+	RoundingMicros         int64  `json:"roundingMicros,omitempty"`
+	ReportsFactsDiffMicros *int64 `json:"reportsFactsDifferenceMicros"`
+	// Presence says a day is only on one side: «в таблице есть, отчёта нет» or «отчёт есть, в таблице нет».
+	Presence string `json:"presence,omitempty"`
+	// Pages are the day's pages with both amounts, for a day where the sheet and the reports differ.
+	Pages     []PageDiff `json:"pages,omitempty"`
+	hasSheet  bool
+	hasReport bool
+}
+
+// PageDiff is a page of a day: the sheet's cell and the posted amount (nil — not on that side). Rounding marks a
+// difference under a dollar on a cell the sheet holds in whole dollars: «округление таблицы», not counted.
+type PageDiff struct {
+	Page         string `json:"page"`
+	SheetMicros  *int64 `json:"sheetMicros"`
+	ReportMicros *int64 `json:"reportMicros"`
+	Rounding     bool   `json:"rounding,omitempty"`
 }
 
 // SaleLine is a sale: credited to the person ("+"), held by their shift and gone elsewhere ("−"), or in a group.
@@ -185,6 +220,9 @@ func WeekDiff(ctx context.Context, q ledger.Querier, week string) (Diff, error) 
 		return d, err
 	}
 	rows.Close()
+	if err := extraPeople(ctx, q, &d, known); err != nil {
+		return d, err
+	}
 
 	homes, err := loadHomes(ctx, q, ts.Date(start.AddDate(0, 0, -15)), ts.Date(start.AddDate(0, 0, 8)))
 	if err != nil {
@@ -212,6 +250,10 @@ func WeekDiff(ctx context.Context, q ledger.Querier, week string) (Diff, error) 
 				p.Sales = append(p.Sales, salesOf(p, day.Day, homes, names)...)
 			}
 		}
+	}
+
+	if err := addReports(ctx, q, &d, known); err != nil {
+		return d, err
 	}
 
 	groups := map[string]*Group{split.Pot: &d.Pot, split.Waiting: &d.Waiting, split.Decide: &d.Decide,
@@ -286,6 +328,7 @@ func personDays(ctx context.Context, q ledger.Querier, p *PersonDiff, week, unti
 			continue // an empty day of the block
 		}
 		x := get(day)
+		x.hasSheet = true
 		x.SheetMicros += int64(money.FromFloat(amount))
 		x.SheetRevenue += revenue
 	}

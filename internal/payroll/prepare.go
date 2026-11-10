@@ -70,7 +70,8 @@ type PrepareDay struct {
 	ValueMicros int64        `json:"valueMicros"` // the day's cells summed: the number the line shows
 	PayMicros   int64        `json:"payMicros"`   // unpaid of the day
 	// Source is "facts" for a day accrued from Hub's facts (from settings.payroll_facts_from): the pages are Hub's, the
-	// value is the net of the person's shares. Empty — the sheet's.
+	// value is the net of the person's shares; "reports" for a day accrued from the shift reports (from
+	// settings.payroll_reports_from): the pages are the posted ones. Empty — the sheet's.
 	Source string `json:"source,omitempty"`
 }
 
@@ -79,7 +80,7 @@ type PrepareLine struct {
 	Kind       string       `json:"kind"`
 	Model      string       `json:"model,omitempty"`
 	Tab        string       `json:"tab,omitempty"`
-	Source     string       `json:"source,omitempty"` // of a tab's days: "facts" — the cells are Hub's net of the person's shares; empty — the sheet's
+	Source     string       `json:"source,omitempty"` // of a tab's days: "facts" — Hub's net of the person's shares, "reports" — the posted amounts; empty — the sheet's
 	Week       string       `json:"week,omitempty"`   // the first day of the block
 	From       string       `json:"from"`
 	To         string       `json:"to"`
@@ -135,6 +136,8 @@ type PayoutBrief struct {
 	Status       string             `json:"status"`
 	GeneratedAt  string             `json:"generatedAt"`
 	AccrualFrom  string             `json:"accrualFrom"`
+	FactsFrom    string             `json:"factsFrom"`
+	ReportsFrom  string             `json:"reportsFrom"`
 	AmountMicros int64              `json:"amountMicros"` // v_payables balance now; ≤ 0 — nothing to pay
 	Nothing      string             `json:"nothing,omitempty"`
 	ToPayMicros  *int64             `json:"toPayMicros"` // «К выплате» of the person's tabs
@@ -149,6 +152,8 @@ type PayoutBrief struct {
 	Message     string       `json:"message"`
 	Placeholder string       `json:"placeholder"`
 	Checks      PayoutChecks `json:"checks"`
+	// PendingChanges are the person's paid days whose change waits for the owner (under the reports).
+	PendingChanges []PendingOut `json:"pendingChanges"`
 }
 
 type prepTab struct {
@@ -177,13 +182,19 @@ func tabKey(model, name string) string { return model + "/" + name }
 // up to the amount to the micro; when payable_days lags the books, the difference is a line and a blocker.
 func PreparePayout(ctx context.Context, db *sql.DB, slug string, now time.Time) (PayoutBrief, error) {
 	b := PayoutBrief{OK: true, Slug: slug, GeneratedAt: ts.Format(now), Lines: []PrepareLine{}, Blocks: []PrepareBlock{},
-		Flags: []PrepareFlag{}, Placeholder: TransferPlaceholder}
+		Flags: []PrepareFlag{}, Placeholder: TransferPlaceholder, PendingChanges: []PendingOut{}}
 	tx, err := db.BeginTx(ctx, nil) // on the read pool: one snapshot
 	if err != nil {
 		return b, err
 	}
 	defer tx.Rollback()
 	if b.AccrualFrom, err = AccrualFrom(ctx, tx); err != nil {
+		return b, err
+	}
+	if b.FactsFrom, err = FactsFrom(ctx, tx); err != nil {
+		return b, err
+	}
+	if b.ReportsFrom, err = ReportsFrom(ctx, tx); err != nil {
 		return b, err
 	}
 	people, err := payoutPeople(ctx, tx)
@@ -262,16 +273,25 @@ func PreparePayout(ctx context.Context, db *sql.DB, slug string, now time.Time) 
 	if err := unresolvedFlags(ctx, tx, b.AccrualFrom, res, card, f); err != nil {
 		return b, err
 	}
+	pending, err := OpenChanges(ctx, tx, slug)
+	if err != nil {
+		return b, err
+	}
+	b.PendingChanges = pendingOut(pending)
+	for _, c := range pending {
+		f.add("pending_change", true, "изменение %d за выплаченный день %s (%s): проведено %s, по отчёту %s — %s; решить: ledger payroll change apply|dismiss %d",
+			c.ID, ddmm(c.Date), c.Model, money.Micros(c.PostedMicros).Cents(), money.Micros(c.NewMicros).Cents(), c.ReasonText, c.ID)
+	}
 	sort.SliceStable(b.Flags, func(i, j int) bool { return b.Flags[i].Blocker && !b.Flags[j].Blocker })
 	return b, tx.Commit()
 }
 
-// toPayFlags compare the debt with «К выплате» of the tabs. From the switch to Hub's facts on the sheet is a mirror:
-// what it governs — the debt with the switch's days as the sheet has them — must equal «К выплате»; the days where the
-// mirror and the facts differ are a note, not a blocker.
+// toPayFlags compare the debt with «К выплате» of the tabs. From the switch to a source after the sheets on the sheet
+// is a mirror: what it governs — the debt with the switch's days as the sheet has them — must equal «К выплате»; the
+// days where the mirror and the source differ are a note, not a blocker.
 func toPayFlags(ctx context.Context, q ledger.Querier, b *PayoutBrief, f *flagger) error {
 	governed, what := b.AmountMicros, "долг"
-	factsFrom, err := FactsFrom(ctx, q)
+	factsFrom, source, err := AfterFrom(ctx, q)
 	if err != nil {
 		return err
 	}
@@ -300,9 +320,11 @@ func toPayFlags(ctx context.Context, q ledger.Querier, b *PayoutBrief, f *flagge
 	if len(differ) > 0 {
 		parts := make([]string, len(differ))
 		for i, d := range differ {
-			parts[i] = fmt.Sprintf("%s таблица %s, факты %s", ddmm(d.Date), money.Micros(d.SheetMicros).Cents(), money.Micros(d.BooksMicros).Cents())
+			parts[i] = fmt.Sprintf("%s таблица %s, %s %s", ddmm(d.Date), money.Micros(d.SheetMicros).Cents(), shortSource(source),
+				money.Micros(d.BooksMicros).Cents())
 		}
-		f.add("mirror", false, "с %s начисляют факты хаба, таблица — зеркало и расходится с ними: %s", ddmm(factsFrom), strings.Join(parts, "; "))
+		f.add("mirror", false, "с %s начисляют %s, таблица — зеркало и расходится с ними: %s", ddmm(factsFrom), sourceName(source),
+			strings.Join(parts, "; "))
 	}
 	return nil
 }
@@ -397,32 +419,34 @@ func prepareCells(ctx context.Context, q ledger.Querier, slug, from string, unpa
 	if err := sheetCells(ctx, q, slug, from, out); err != nil {
 		return nil, err
 	}
-	var factsTo string
-	for _, u := range unpaid {
-		if u.source == SourceFacts {
-			factsTo = max(factsTo, u.date)
+	for _, source := range []string{SourceFacts, SourceReports} {
+		var to string
+		for _, u := range unpaid {
+			if u.source == source {
+				to = max(to, u.date)
+			}
 		}
-	}
-	if factsTo == "" {
-		return out, nil
-	}
-	facts, err := factCells(ctx, q, from, factsTo)
-	if err != nil {
-		return nil, err
-	}
-	for _, u := range unpaid {
-		if u.source != SourceFacts {
+		if to == "" {
 			continue
 		}
-		f := facts[slug+"\x00"+ledger.Slug(u.model)+"\x00"+u.date]
-		c := prepCells{week: weekOfDate(u.date), pages: f.pages, value: f.value}
-		if sh, ok := out[tabKey(u.model, u.name)+":"+u.date]; ok {
-			c.week = sh.week
+		cells, err := sourceCells(ctx, q, source, from, to)
+		if err != nil {
+			return nil, err
 		}
-		if c.pages == nil {
-			c.pages = []PayoutPage{}
+		for _, u := range unpaid {
+			if u.source != source {
+				continue
+			}
+			f := cells[slug+"\x00"+ledger.Slug(u.model)+"\x00"+u.date]
+			c := prepCells{week: weekOfDate(u.date), pages: f.pages, value: f.value}
+			if sh, ok := out[tabKey(u.model, u.name)+":"+u.date]; ok {
+				c.week = sh.week
+			}
+			if c.pages == nil {
+				c.pages = []PayoutPage{}
+			}
+			out[tabKey(u.model, u.name)+":"+u.date+suffixOf(source)] = c
 		}
-		out[tabKey(u.model, u.name)+":"+u.date+sourceSuffix] = c
 	}
 	return out, nil
 }
@@ -499,8 +523,8 @@ func prepareLines(unpaid []prepUnpaid, cells map[string]prepCells, tabs map[stri
 		case "day":
 			key := tabKey(u.model, u.name)
 			source, cellKey := "", key+":"+u.date
-			if u.source == SourceFacts {
-				source, cellKey = SourceFacts, cellKey+sourceSuffix
+			if u.source == SourceFacts || u.source == SourceReports {
+				source, cellKey = u.source, cellKey+suffixOf(u.source)
 			}
 			c, ok := cells[cellKey]
 			day := PrepareDay{Date: u.date, Pages: c.pages, ValueMicros: c.value, PayMicros: u.unpaid, Source: source}
@@ -829,9 +853,10 @@ func tabFlags(tabs map[string]*prepTab, unpaid []prepUnpaid, f *flagger) {
 // their slot; a day it could not prove is a note per tab. From the switch to Hub's facts on, a day the facts did not
 // accrue (week not proven, no Hub user, no rate) is a blocker: the debt may lack it.
 func unenteredFlags(ctx context.Context, q ledger.Querier, slug, from string, f *flagger) error {
-	// A day the facts did not accrue counts whatever the oldest unpaid day: it is not in the debt at all.
+	// A day the facts or the reports did not accrue counts whatever the oldest unpaid day: it is not in the debt at all.
 	rows, err := q.QueryContext(ctx, `SELECT model, date, page, status, COALESCE(reason, ''), net_mills, share FROM payroll_unentered
-		WHERE person = ? AND (date >= ? OR (status = 'unknown' AND reason LIKE ? || '%')) ORDER BY model, date, page`, slug, from, reasonPending)
+		WHERE person = ? AND (date >= ? OR (status = 'unknown' AND (reason LIKE ? || '%' OR reason LIKE ? || '%' OR reason LIKE ? || '%')))
+		ORDER BY model, date, page`, slug, from, reasonPending, reasonReportPending, reasonShiftNoReport)
 	if err != nil {
 		return err
 	}
@@ -844,8 +869,9 @@ func unenteredFlags(ctx context.Context, q ledger.Querier, slug, from string, f 
 		facts       bool // counted from Hub's team facts, not the slot
 	}
 	var days []*day
-	var pending []string             // the days from the switch to Hub's facts the facts did not accrue
-	unknown := map[string][]string{} // model → dates
+	var pending []string                 // the days from the switch to Hub's facts the facts did not accrue
+	var reportPending, noReport []string // the same of the reports, and the shifts without a report
+	unknown := map[string][]string{}     // model → dates
 	reason := map[string]string{}
 	var models []string
 	for rows.Next() {
@@ -858,6 +884,15 @@ func unenteredFlags(ctx context.Context, q ledger.Querier, slug, from string, f 
 		}
 		if status != "ok" && strings.HasPrefix(why, reasonPending) {
 			pending = append(pending, fmt.Sprintf("%s %s: %s", model, ddmm(date), strings.TrimPrefix(strings.TrimPrefix(why, reasonPending), ": ")))
+			continue
+		}
+		if status != "ok" && strings.HasPrefix(why, reasonReportPending) {
+			reportPending = append(reportPending, fmt.Sprintf("%s %s: %s", model, ddmm(date),
+				strings.TrimPrefix(strings.TrimPrefix(why, reasonReportPending), ": ")))
+			continue
+		}
+		if status != "ok" && strings.HasPrefix(why, reasonShiftNoReport) {
+			noReport = append(noReport, fmt.Sprintf("%s %s: %s", model, ddmm(date), strings.TrimPrefix(strings.TrimPrefix(why, reasonShiftNoReport), ": ")))
 			continue
 		}
 		if status != "ok" {
@@ -906,6 +941,12 @@ func unenteredFlags(ctx context.Context, q ledger.Querier, slug, from string, f 
 	for _, p := range pending {
 		f.add("facts_pending", true, "начисление из фактов неизвестно, не ноль — %s", p)
 	}
+	for _, p := range reportPending {
+		f.add("reports_pending", true, "начисление по отчёту неизвестно, не ноль: день стоит как проведён — %s", p)
+	}
+	for _, p := range noReport {
+		f.add("no_report", true, "смена без отчёта, день не начислен — %s", p)
+	}
 	return nil
 }
 
@@ -932,6 +973,14 @@ func unresolvedFlags(ctx context.Context, q ledger.Querier, from string, res *Re
 		f.add("unresolved", false, "ещё строк «Чаттер зарплата» не разнесено ни на кого: %d (ledger payables) — если среди них выплата этому человеку, долг завышен", others)
 	}
 	return nil
+}
+
+// shortSource names a source after the sheets in a comparison: «факты», «отчёт».
+func shortSource(source string) string {
+	if source == SourceReports {
+		return "отчёт"
+	}
+	return "факты"
 }
 
 func orNever(s *string) string {

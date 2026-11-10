@@ -78,6 +78,9 @@ func init() {
 				rep, err = ParsePosts(r.Context(), tx, time.Now())
 				return err
 			})
+			if err == nil {
+				err = Changed(r.Context(), s.Store, time.Now())
+			}
 			if err != nil {
 				s.Log.Error("report parse", "key", auth.KeyName(r.Context()), "err", err)
 				server.WriteError(w, http.StatusInternalServerError, "посты не разобраны: "+err.Error())

@@ -105,7 +105,8 @@ type PersonCheck struct {
 	Diff    money.Micros `json:"diff"`
 	OK      bool         `json:"ok"`
 	Reason  string       `json:"reason,omitempty"`
-	// Facts is what the books accrued from the switch day on; Sheet what the mirror has for those days.
+	// Facts is what the books accrued from the switch day on (from the facts or the reports, whichever is on); Sheet what
+	// the mirror has for those days.
 	Facts money.Micros `json:"facts,omitempty"`
 	Sheet money.Micros `json:"sheet,omitempty"`
 }
@@ -128,16 +129,20 @@ type CheckReport struct {
 	// FactsFrom is the switch to Hub's facts (settings.payroll_facts_from); "" — the sheets accrue everything. From it
 	// the sheet is a mirror: Mirror are its days that differ from the books, Unaccrued the facts no tab takes. Both are
 	// information, not failures.
-	FactsFrom string      `json:"facts_from,omitempty"`
-	Mirror    []MirrorDay `json:"mirror"`
-	Unaccrued []Unaccrued `json:"unaccrued"`
+	FactsFrom string `json:"facts_from,omitempty"`
+	// ReportsFrom is the switch to the shift reports (settings.payroll_reports_from), the same way; only one of the two.
+	ReportsFrom string      `json:"reports_from,omitempty"`
+	Mirror      []MirrorDay `json:"mirror"`
+	Unaccrued   []Unaccrued `json:"unaccrued"`
+	// Pending are the changes of paid days waiting for the owner (payroll_pending_changes, open).
+	Pending []PendingChange `json:"pending_changes"`
 }
 
 // Check compares the debts with the sheets. A person with a tab in error or without any tab is not OK:
 // the comparison has nothing to stand on. From the switch to Hub's facts on it compares what the sheet still governs.
 func Check(ctx context.Context, q ledger.Querier) (CheckReport, error) {
 	rep := CheckReport{OK: true, People: []PersonCheck{}, Rows: []Unresolved{}, Tabs: []TabProblem{}, Mirror: []MirrorDay{},
-		Unaccrued: []Unaccrued{}}
+		Unaccrued: []Unaccrued{}, Pending: []PendingChange{}}
 	people, err := LoadPeople(ctx, q)
 	if err != nil {
 		return rep, err
@@ -146,19 +151,28 @@ func Check(ctx context.Context, q ledger.Querier) (CheckReport, error) {
 	if err != nil {
 		return rep, err
 	}
-	if rep.FactsFrom, err = FactsFrom(ctx, q); err != nil {
+	after, source, err := AfterFrom(ctx, q)
+	if err != nil {
 		return rep, err
 	}
+	if source == SourceReports {
+		rep.ReportsFrom = after
+	} else {
+		rep.FactsFrom = after
+	}
 	var mir map[string]*mirrorSums
-	if rep.FactsFrom != "" {
-		if mir, err = mirror(ctx, q, rep.FactsFrom); err != nil {
+	if after != "" {
+		if mir, err = mirror(ctx, q, after); err != nil {
 			return rep, err
 		}
-		plan, err := planFacts(ctx, q, rep.FactsFrom, ts.Now())
+		plan, err := planAfter(ctx, q, ts.Now())
 		if err != nil {
 			return rep, err
 		}
-		rep.Unaccrued = append(rep.Unaccrued, plan.unaccrued...)
+		rep.Unaccrued = append(rep.Unaccrued, plan.lost()...)
+	}
+	if rep.Pending, err = OpenChanges(ctx, q, ""); err != nil {
+		return rep, err
 	}
 	for _, p := range list {
 		if _, isPerson := people[p.Person]; !isPerson && p.Tabs == 0 {

@@ -93,17 +93,38 @@ func init() {
 			return a.Inserted, nil
 		},
 		Settle: func(ctx context.Context, store *db.Store, now time.Time) error {
-			return brief.InTx(ctx, store, func(tx *sql.Tx) error {
+			if err := brief.InTx(ctx, store, func(tx *sql.Tx) error {
 				_, err := ParsePosts(ctx, tx, now)
 				return err
-			})
+			}); err != nil {
+				return err
+			}
+			return Changed(ctx, store, now)
 		}})
 	server.Every("report-posts", 15*time.Minute, func(ctx context.Context, s *server.Server) error {
-		return brief.InTx(ctx, s.Store, func(tx *sql.Tx) error {
+		if err := brief.InTx(ctx, s.Store, func(tx *sql.Tx) error {
 			_, err := ParsePosts(ctx, tx, time.Now())
 			return err
-		})
+		}); err != nil {
+			return err
+		}
+		return Changed(ctx, s.Store, time.Now())
 	})
+}
+
+// AfterChange runs after the pay base may have changed (a parse of the posts, a saved draft): the accruals from the
+// reports are recomputed, and the debts follow when the reports accrue them. Set by internal/accruals; nil — nothing.
+var AfterChange func(ctx context.Context, store *db.Store, now time.Time) error
+
+// Changed runs AfterChange.
+func Changed(ctx context.Context, store *db.Store, now time.Time) error {
+	if AfterChange == nil {
+		return nil
+	}
+	if err := AfterChange(ctx, store, now); err != nil {
+		return fmt.Errorf("начисления по отчётам: %w", err)
+	}
+	return nil
 }
 
 // ParseReport says what a parsing pass did.

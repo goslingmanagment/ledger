@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/goslingmanagment/ledger/internal/brief"
+	"github.com/goslingmanagment/ledger/internal/db"
 	"github.com/goslingmanagment/ledger/internal/events"
 	"github.com/goslingmanagment/ledger/internal/payroll"
 	"github.com/goslingmanagment/ledger/internal/reports"
@@ -38,10 +40,15 @@ func reportParse(ctx context.Context, args []string) error {
 	}
 	var rep reports.ParseReport
 	if local() {
-		if err := writeLocal(ctx, func(tx *sql.Tx) error {
-			var err error
-			rep, err = reports.ParsePosts(ctx, tx, time.Now())
-			return err
+		if err := readLocal(ctx, func(store *db.Store) error {
+			if err := brief.InTx(ctx, store, func(tx *sql.Tx) error {
+				var err error
+				rep, err = reports.ParsePosts(ctx, tx, time.Now())
+				return err
+			}); err != nil {
+				return err
+			}
+			return reports.Changed(ctx, store, time.Now())
 		}); err != nil {
 			return err
 		}
