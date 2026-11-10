@@ -118,9 +118,26 @@ type DayDiff struct {
 	// Presence says a day is only on one side: «в таблице есть, отчёта нет» or «отчёт есть, в таблице нет».
 	Presence string `json:"presence,omitempty"`
 	// Pages are the day's pages with both amounts, for a day where the sheet and the reports differ.
-	Pages     []PageDiff `json:"pages,omitempty"`
+	Pages []PageDiff `json:"pages,omitempty"`
+	// PotMicros is the part of the report revenue that is the person's pot shares of the day (R3), Pots by pot, and
+	// PotNotes say it: «в т.ч. общак <название>: база X».
+	PotMicros int64      `json:"potMicros,omitempty"`
+	Pots      []PotShare `json:"pots,omitempty"`
+	PotNotes  []string   `json:"potNotes,omitempty"`
 	hasSheet  bool
 	hasReport bool
+}
+
+// PotShare is a person's share of a day's purchases in one pot.
+type PotShare struct {
+	Pot    string `json:"pot"`
+	Name   string `json:"name"`
+	Micros int64  `json:"micros"`
+}
+
+// PotNote says a pot share of a day: «в т.ч. общак <название>: база X».
+func PotNote(name string, micros int64) string {
+	return "в т.ч. общак " + name + ": база " + money.Micros(micros).Cents()
 }
 
 // PageDiff is a page of a day: the sheet's cell and the posted amount (nil — not on that side). Rounding marks a

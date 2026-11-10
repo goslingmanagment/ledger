@@ -67,6 +67,19 @@
   `payroll_pending_changes` (новое того же дня заменяет сумму), решение — `ledger payroll change apply|dismiss <id> [--note]` (право
   decide, `POST /v1/payroll/changes/{id}/apply|dismiss`); `--off` закрывает открытые. Проверки: «у смен есть отчёты» (смены 14 дней,
   кончились больше суток назад; дата отчёта смены — `payroll.ReportDate`) и «изменения за выплаченные дни ждут решения».
+- Договорённости «чья продажа» (R3): `sale_decisions` — решение владельца или договорённость чаттеров о продаже (или ожидаемой, без
+  `--tx`): `owner`, `split` (доли в сумме 100), `pot`, `off_platform`, `exclude`; кто сказал, когда, ссылка, заметка. Пишет агент ключом
+  `reports` или владелец (`decide`): `ledger decision add …` (или `--json` из stdin), `ledger decision applied <id> --person --date`,
+  `ledger decision cancel <id> --note`; второе решение по той же продаже — только с `--supersedes <id>` открытого. Читают `read`, `payouts`,
+  `reports`: `ledger decision list [--open] [--fan] [--person] [--from --to] [--json] [--md]`; `--md` — открытые списком, как файл памяти
+  агента (файл — зеркало). У строк `GET /v1/reports` — поле `agreement`. Ничего не проводит.
+- Общаки (R3): объявляет и меняет только владелец — `ledger pot declare <файл|-|JSON>` (право decide или рядом с базой; тот же slug —
+  правка); покупки пишет агент (`reports`) или владелец: `ledger pot add-sale <код> --tx <ref>` (страница, фан, нетто и время — из
+  `hub_sales`, иначе `--page --net --at`) или `--from-line <отчёт>:<n>`, `ledger pot remove-sale <id> --note` (строка остаётся);
+  `ledger pot list|show <код>|candidates [<код>]` (строки отчётов не в итоге с пометкой «общак»). Доля (`v_pot_shares`) — нетто поровну
+  участникам на дату покупки (МСК), остаток микродолларов — по одному по порядку кода. Доля идёт в выручку дня человека на вкладке модели
+  общака (`report_accruals.pot_micros`, `pots`) и платится по его ставке; день из одной доли фикса не получает. Проводится только через
+  выключатель `payroll_reports_from`; продажу, учтённую в отчёте чаттера, `add-sale` не берёт без `--force`.
 - Бриф: `ledger brief [--text] [--new]` — открытый неотправленный или новый из открытых предложений, номера заморожены; `ledger brief-sent --brief N`, `ledger pending`.
   Решения: `ledger decide --brief N --set 1=confirm --set 2=personal --set 3=custom:{…} --set 4=defer --set 5=recorded:388,389`, весь набор одной транзакцией, ключ с правом decide.
   `mode` shadow: решения только записываются, закрывает их импорт журнала или `import bybit-state`; live: `confirm` и `custom` (JSON-правка: `category`, `counterparty`, `model`, `note`, `type`, `amount`, `split`) пишут строки и проводки, точное правило пишет само.

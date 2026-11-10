@@ -73,6 +73,8 @@ type PrepareDay struct {
 	// value is the net of the person's shares; "reports" for a day accrued from the shift reports (from
 	// settings.payroll_reports_from): the pages are the posted ones. Empty — the sheet's.
 	Source string `json:"source,omitempty"`
+	// Pots are the person's pot shares of a reports day (R3): in the value beside the pages, paid at the tab's rate.
+	Pots []PayoutPot `json:"pots,omitempty"`
 }
 
 // PrepareLine is one line of the brief and of the message. The lines add up to amountMicros.
@@ -172,6 +174,7 @@ type prepUnpaid struct {
 type prepCells struct {
 	week  string
 	pages []PayoutPage
+	pots  []PayoutPot
 	value int64
 }
 
@@ -438,7 +441,7 @@ func prepareCells(ctx context.Context, q ledger.Querier, slug, from string, unpa
 				continue
 			}
 			f := cells[slug+"\x00"+ledger.Slug(u.model)+"\x00"+u.date]
-			c := prepCells{week: weekOfDate(u.date), pages: f.pages, value: f.value}
+			c := prepCells{week: weekOfDate(u.date), pages: f.pages, pots: f.pots, value: f.value}
 			if sh, ok := out[tabKey(u.model, u.name)+":"+u.date]; ok {
 				c.week = sh.week
 			}
@@ -527,7 +530,7 @@ func prepareLines(unpaid []prepUnpaid, cells map[string]prepCells, tabs map[stri
 				source, cellKey = u.source, cellKey+suffixOf(u.source)
 			}
 			c, ok := cells[cellKey]
-			day := PrepareDay{Date: u.date, Pages: c.pages, ValueMicros: c.value, PayMicros: u.unpaid, Source: source}
+			day := PrepareDay{Date: u.date, Pages: c.pages, Pots: c.pots, ValueMicros: c.value, PayMicros: u.unpaid, Source: source}
 			switch {
 			case !ok:
 				day.Pages = []PayoutPage{}
@@ -614,6 +617,10 @@ func prepareLines(unpaid []prepUnpaid, cells map[string]prepCells, tabs map[stri
 			l.Text = fmt.Sprintf("остаток за %s: %s", ddmm(l.From), amt(l.ShownMicros))
 		case LineDay:
 			l.Text = fmt.Sprintf("%s: %s", ddmm(l.From), amt(l.ShownMicros))
+		}
+		switch l.Kind {
+		case LineWeek, LineRemainder, LineDay:
+			l.Text += potText(l.Days)
 		case LineOpening:
 			l.Text = fmt.Sprintf("старый долг: %s — дни до %s", signedAmt(l.ShownMicros), ddmm(accrualFrom))
 		case LineOther:
@@ -624,6 +631,25 @@ func prepareLines(unpaid []prepUnpaid, cells map[string]prepCells, tabs map[stri
 		out[i] = *l
 	}
 	return out
+}
+
+// potText says the pot shares in the days of a line: « (в т.ч. общак <название>: база X)», with the date when the line
+// has several days.
+func potText(days []PrepareDay) string {
+	var parts []string
+	for _, d := range days {
+		for _, p := range d.Pots {
+			when := ""
+			if len(days) > 1 {
+				when = " " + ddmm(d.Date)
+			}
+			parts = append(parts, fmt.Sprintf("общак %s%s: база %s", p.Name, when, cellNum(p.RevenueMicros)))
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " (в т.ч. " + strings.Join(parts, "; ") + ")"
 }
 
 // weekText writes «дд–дд.мм: a+b+… = база × ставка% = зп». A pay above base × rate is the fix when the tab

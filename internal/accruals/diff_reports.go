@@ -77,6 +77,8 @@ type reportRow struct {
 	rate   *float64
 	reason string
 	pages  map[string]int64
+	potNet int64
+	pots   []PotShare
 }
 
 // addReports puts the week's report_accruals beside each person's days.
@@ -86,17 +88,17 @@ func addReports(ctx context.Context, q ledger.Querier, d *Diff, factsKnown bool)
 		return err
 	}
 	byPerson := map[string][]reportRow{}
-	rows, err := q.QueryContext(ctx, `SELECT person, model, day, net_micros, amount_micros, rate, COALESCE(reason, ''), pages
+	rows, err := q.QueryContext(ctx, `SELECT person, model, day, net_micros, amount_micros, rate, COALESCE(reason, ''), pages, pot_micros, pots
 		FROM report_accruals WHERE day BETWEEN ? AND ? ORDER BY person, day, model`, d.Week, d.Until)
 	if err != nil {
 		return err
 	}
 	for rows.Next() {
-		var person, pages string
+		var person, pages, pots string
 		var r reportRow
 		var amount sql.NullInt64
 		var rate sql.NullFloat64
-		if err := rows.Scan(&person, &r.model, &r.day, &r.net, &amount, &rate, &r.reason, &pages); err != nil {
+		if err := rows.Scan(&person, &r.model, &r.day, &r.net, &amount, &rate, &r.reason, &pages, &r.potNet, &pots); err != nil {
 			rows.Close()
 			return err
 		}
@@ -110,6 +112,7 @@ func addReports(ctx context.Context, q ledger.Querier, d *Diff, factsKnown bool)
 		}
 		var list []reportPage
 		_ = json.Unmarshal([]byte(pages), &list)
+		_ = json.Unmarshal([]byte(pots), &r.pots)
 		r.pages = map[string]int64{}
 		for _, p := range list {
 			r.pages[p.Page] += p.Micros
@@ -151,6 +154,11 @@ func addReports(ctx context.Context, q ledger.Querier, d *Diff, factsKnown bool)
 			x.hasReport = true
 			x.ReportRevenueMicros += r.net
 			p.ReportsNetMicros += r.net
+			x.PotMicros += r.potNet
+			for _, pot := range r.pots {
+				x.Pots = append(x.Pots, pot)
+				x.PotNotes = append(x.PotNotes, PotNote(pot.Name, pot.Micros))
+			}
 			if r.amount != nil {
 				x.ReportsMicros += *r.amount
 				p.ReportsMicros += *r.amount

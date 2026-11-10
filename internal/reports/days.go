@@ -115,7 +115,7 @@ type Post struct {
 	FlagTexts   []string      `json:"flag_texts"`
 	Blocked     bool          `json:"blocked"` // a flag keeps the whole post out of the pay base
 	Versions    int           `json:"versions"`
-	Text        string        `json:"text"`
+	Text        string        `json:"text,omitempty"` // only to a key with read: Hub's payouts key gets the list without it
 	Pages       []PostPageOut `json:"pages"`
 }
 

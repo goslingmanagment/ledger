@@ -329,13 +329,18 @@ func TestReportDaysFilterAndScopes(t *testing.T) {
 	want(t, rows(hubKey, "&hub_user_id=42&person=anna"))
 	want(t, rows(hubKey, "&person=anna"), "anna 2026-11-08 page-a -/3152 draft_only", "anna 2026-11-08 page-b -/18160 draft_only")
 
-	// payouts reads the pay base but not the posts with their text; read reads both; reports neither.
-	if code := status(hubKey.Do(ctx, http.MethodGet, "/v1/report-posts?from=2026-11-01&to=2026-11-10", nil, nil)); code != http.StatusForbidden {
-		t.Errorf("payouts on report-posts: %d", code)
+	// payouts reads the pay base and the list of posts without their text; read reads both with the text; reports neither.
+	var bare struct {
+		Posts []map[string]any `json:"posts"`
+	}
+	if err := hubKey.Do(ctx, http.MethodGet, "/v1/report-posts?from=2026-11-01&to=2026-11-10", nil, &bare); err != nil || len(bare.Posts) != 1 {
+		t.Errorf("payouts on report-posts: %v %+v", err, bare)
+	} else if _, has := bare.Posts[0]["text"]; has {
+		t.Errorf("payouts got the text of a post: %+v", bare.Posts[0])
 	}
 	var posts PostsAnswer
 	if err := reader.Do(ctx, http.MethodGet, "/v1/report-posts?from=2026-11-01&to=2026-11-10", nil, &posts); err != nil || len(posts.Posts) != 1 ||
-		posts.Posts[0].Pages[0].Page == nil || *posts.Posts[0].Pages[0].Page != "page-a" {
+		posts.Posts[0].Pages[0].Page == nil || *posts.Posts[0].Pages[0].Page != "page-a" || posts.Posts[0].Text == "" {
 		t.Errorf("read on report-posts: %v %+v", err, posts)
 	}
 	for _, path := range []string{window, "/v1/report-posts?from=2026-11-01&to=2026-11-10"} {
