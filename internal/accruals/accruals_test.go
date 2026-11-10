@@ -359,6 +359,58 @@ func TestTheDiffShowsTheSheetBesideTheFactsAndTheSalesThatMakeIt(t *testing.T) {
 	}
 }
 
+// The facts are read from hub_team_since, before the rule's start too, for «не занесено». A window before the rule's
+// week settles nothing: its sales stay the sheets', no day before the rule gets a row, and the rule's weeks do not move —
+// not even when that window still holds a work the rule's week holds too, as it saw it then.
+func TestAWindowBeforeTheRuleSettlesNothing(t *testing.T) {
+	s, ctx := open(t)
+	sheets(t, s, ctx, map[string][][]payroll.Cell{"Браво": tab("2026-11-02", 0.2, 10, [7]any{50, nil, nil, nil, nil, nil, nil})})
+	// Браво's night shift into the rule's first day holds a tip after midnight: the rule's, on the 2nd.
+	night := work(102, split.Shift, "2026-11-01 22:00", "2026-11-02 06:00", "page-b")
+	putWindow(t, s, "2026-11-02", []hub.TeamWork{night}, []hub.TeamSale{sale("1", split.SaleTip, "page-b", "2026-11-02 01:00", 50_000, night)})
+	putWindow(t, s, "2026-11-09", nil, nil)
+	putWindow(t, s, "2026-11-16", nil, nil)
+	first := rebuild(t, s, ctx)
+	diff := func() string {
+		d, err := WeekDiff(ctx, s.RO, "2026-11-02")
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := json.Marshal(d)
+		return string(b)
+	}
+	before := diff()
+	if n := count(t, s, `SELECT SUM(amount_micros) FROM fact_accruals WHERE person = 'bravo' AND day = '2026-11-02'`); n != 10_000_000 {
+		t.Fatalf("Браво's 2nd: %d, want 20%% of 50", n)
+	}
+
+	// The week before the rule, read while the night was still going: Браво's shift of the 30th with its tip, and the
+	// night as it was then, its first half only.
+	early := work(102, split.Shift, "2026-10-30 10:00", "2026-10-30 18:00", "page-b")
+	going := night
+	going.EndedAt, going.Ongoing = at("2026-11-02 00:30"), true
+	putWindow(t, s, "2026-10-26", []hub.TeamWork{early, going}, []hub.TeamSale{
+		sale("2", split.SaleTip, "page-b", "2026-10-30 11:00", 70_000, early),
+		sale("3", split.SaleTip, "page-b", "2026-11-01 23:00", 9_000, going),
+	})
+	again := rebuild(t, s, ctx)
+	if again.Rewritten != 0 || again.Windows != first.Windows || again.Sales != first.Sales || again.Accruals != first.Accruals {
+		t.Fatalf("the window before the rule moved the facts: %+v, was %+v", again, first)
+	}
+	for _, q := range []string{
+		`SELECT count(*) FROM fact_homes WHERE week < '2026-11-02' OR transaction_ref IN ('2', '3')`,
+		`SELECT count(*) FROM fact_accruals WHERE week < '2026-11-02'`,
+		`SELECT count(*) FROM fact_weeks WHERE week < '2026-11-02'`,
+	} {
+		if n := count(t, s, q); n != 0 {
+			t.Fatalf("%s: %d", q, n)
+		}
+	}
+	if after := diff(); after != before {
+		t.Fatalf("the diff of the rule's first week moved:\n%s\nwas\n%s", after, before)
+	}
+}
+
 func TestTheDiffRouteNeedsTheReadScope(t *testing.T) {
 	s, ctx := open(t)
 	week(t, s)

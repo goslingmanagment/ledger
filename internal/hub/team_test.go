@@ -120,11 +120,17 @@ func newTeamBench(t *testing.T, now string) (*bench, *TeamSyncer) {
 		b.exec(`INSERT INTO hub_pages(page_label, platform, model_slug, model_name, seen_at) VALUES (?, ?, ?, ?, ?)`,
 			p.PageLabel, p.Platform, p.ModelSlug, p.ModelName, now)
 	}
+	setTeamSince(b, "2026-11-02") // the rule's start; TestTeamSyncReadsTheWeeksAndKeepsEachWindowsSnapshot reads earlier
 	sy := NewTeamSyncer(b.store, Config{BaseURL: b.hub.srv.URL, Key: "test-key"})
 	sy.Now = b.clock.Now
 	sy.Client.Sleep = b.clock.Sleep
 	sy.Client.Throttle.Now, sy.Client.Throttle.Sleep = b.clock.Now, b.clock.Sleep
 	return b, sy
+}
+
+func setTeamSince(b *bench, day string) {
+	b.exec(`INSERT INTO settings(key, value, updated_at) VALUES ('hub_team_since', ?, '2026-11-01')
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, day)
 }
 
 func TestTeamAnswerMapsOntoTheSplitRules(t *testing.T) {
@@ -226,7 +232,9 @@ func TestTeamSyncReadsTheWeeksAndKeepsEachWindowsSnapshot(t *testing.T) {
 		teamSaleOf("3", "alfa-1", "ppv", "2026-11-24T10:00:00+03:00", 5_000),
 	}
 
-	// The first run reads every week since the rule.
+	// The first run reads every week since hub_team_since — before the rule's start too; Hub's works begin on a
+	// Wednesday here, and so does the first window: none says «nobody worked» where Hub has no data.
+	setTeamSince(b, "2026-10-28")
 	rep, err := sy.Hourly(b.ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -235,13 +243,14 @@ func TestTeamSyncReadsTheWeeksAndKeepsEachWindowsSnapshot(t *testing.T) {
 	for _, w := range rep.Windows {
 		froms = append(froms, w.From[:10]+"/"+w.Status)
 	}
-	if !rep.Full || strings.Join(froms, " ") != "2026-11-02/ok 2026-11-09/ok 2026-11-16/ok 2026-11-23/ok" {
+	if !rep.Full || strings.Join(froms, " ") != "2026-10-28/ok 2026-11-02/ok 2026-11-09/ok 2026-11-16/ok 2026-11-23/ok" {
 		t.Fatalf("first run %+v", rep)
 	}
-	if rep.Windows[3].To != "2026-11-25T12:00:00+03:00" || rep.Windows[0].To != "2026-11-09T00:00:00+03:00" {
+	if rep.Windows[4].To != "2026-11-25T12:00:00+03:00" || rep.Windows[0].To != "2026-11-02T00:00:00+03:00" ||
+		rep.Windows[1].To != "2026-11-09T00:00:00+03:00" {
 		t.Fatalf("window ends %+v", rep.Windows)
 	}
-	if body := h.bodies[0]; body["from"] != "2026-11-02T00:00:00+03:00" || body["to"] != "2026-11-09T00:00:00+03:00" {
+	if body := h.bodies[0]; body["from"] != "2026-10-28T00:00:00+03:00" || body["to"] != "2026-11-02T00:00:00+03:00" {
 		t.Fatalf("request body %v", body)
 	}
 	if n := b.count(`SELECT count(*) FROM hub_sales`); n != 3 {
@@ -256,7 +265,8 @@ func TestTeamSyncReadsTheWeeksAndKeepsEachWindowsSnapshot(t *testing.T) {
 	if n := b.count(`SELECT count(*) FROM hub_works WHERE ref = ?`, c["ref"]); n != 2 {
 		t.Fatalf("night shift in %d snapshots", n)
 	}
-	if n := b.count(`SELECT count(*) FROM hub_works WHERE ref = ? AND day = '2026-11-05' AND kind = 'shift'`, a["ref"]); n != 1 {
+	if n := b.count(`SELECT count(*) FROM hub_works WHERE ref = ? AND day = '2026-11-05' AND kind = 'shift'
+		AND window_from = '2026-11-02T00:00:00+03:00'`, a["ref"]); n != 1 {
 		t.Fatal("shift of the 5th")
 	}
 	if n := b.count(`SELECT count(*) FROM hub_team_sync WHERE status = 'ok' AND work_to = '2026-11-16T00:00:00.000+03:00'

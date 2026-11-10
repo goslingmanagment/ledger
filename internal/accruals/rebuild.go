@@ -146,6 +146,19 @@ func rebuildTx(ctx context.Context, tx *sql.Tx, now time.Time) (Report, error) {
 	if err != nil {
 		return rep, err
 	}
+	// The facts are read from Hub's first works (hub_team_since) for «не занесено»; the rule settles from its own
+	// week. A window before it holds no sale of the rule, and its works must not stand in for the rule's windows'.
+	ruleWeek := ts.WeekStart(rules.Since)
+	ruled := windows[:0:0]
+	for _, w := range windows {
+		if w.from.Before(ruleWeek) {
+			delete(works, w.key)
+			delete(sales, w.key)
+			continue
+		}
+		ruled = append(ruled, w)
+	}
+	windows = ruled
 
 	// A work at a window's edge is cut (Hub computes it from that window's activity only): its whole version is the one
 	// of the proven window its start falls in.
