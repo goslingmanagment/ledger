@@ -61,7 +61,14 @@ func payouts(ctx context.Context, args []string) error {
 
 // printPayouts renders the window's pay per person; with one person, also the days and what is unpaid.
 func printPayouts(out *bufio.Writer, ans payroll.PayoutsAnswer, detail bool) {
-	fmt.Fprintf(out, "окно %s — %s, начисления по дням с %s\n\n", ans.From, ans.To, ans.AccrualFrom)
+	fmt.Fprintf(out, "окно %s — %s, начисления по дням с %s\n", ans.From, ans.To, ans.AccrualFrom)
+	switch {
+	case ans.ReportsFrom != "":
+		fmt.Fprintf(out, "с %s дни начисляют отчёты смен, таблицы — зеркало\n", ans.ReportsFrom)
+	case ans.FactsFrom != "":
+		fmt.Fprintf(out, "с %s дни начисляют факты хаба, таблицы — зеркало\n", ans.FactsFrom)
+	}
+	fmt.Fprintln(out)
 	rows := make([][]string, 0, len(ans.People))
 	for _, p := range ans.People {
 		toPay, oldest := "—", "—"
@@ -88,7 +95,7 @@ func printPayouts(out *bufio.Writer, ans payroll.PayoutsAnswer, detail bool) {
 				if !d.Worked {
 					mark = " (ячейки пустые)"
 				}
-				line := fmt.Sprintf("  %s %s %s%s", d.Date, d.Model, usd(d.AmountMicros), mark)
+				line := fmt.Sprintf("  %s %s %s%s%s", d.Date, d.Model, usd(d.AmountMicros), mark, sourceMark(d.Source))
 				if len(pages) > 0 {
 					line += ", выручка: " + strings.Join(pages, ", ")
 				}
@@ -105,6 +112,12 @@ func printPayouts(out *bufio.Writer, ans payroll.PayoutsAnswer, detail bool) {
 				}
 				fmt.Fprintf(out, "  не оплачено: %s\n", strings.Join(parts, ", "))
 			}
+		}
+	}
+	for _, p := range ans.People {
+		for _, c := range p.PendingChanges {
+			fmt.Fprintf(out, "\n! %s: изменение %d за выплаченный день %s (%s) ждёт решения: проведено %s, по отчёту %s — %s\n", p.Name, c.ID, c.Date,
+				c.Model, usd(c.PostedMicros), usd(c.NewMicros), c.ReasonText)
 		}
 	}
 	dash := func(s *string) string {
@@ -150,6 +163,17 @@ func payoutPrepare(ctx context.Context, args []string) error {
 	return out.Flush()
 }
 
+// sourceMark says where a day came from when it is not the sheet.
+func sourceMark(source string) string {
+	switch source {
+	case payroll.SourceFacts:
+		return " (факты)"
+	case payroll.SourceReports:
+		return " (отчёт)"
+	}
+	return ""
+}
+
 // printBrief renders the brief for the owner: the amount and the hint, the lines, the blocks to mark, the
 // flags, then the message as it would go.
 func printBrief(out *bufio.Writer, b payroll.PayoutBrief) {
@@ -171,7 +195,7 @@ func printBrief(out *bufio.Writer, b payroll.PayoutBrief) {
 		fmt.Fprintln(out)
 		rows := make([][]string, 0, len(b.Lines))
 		for _, l := range b.Lines {
-			rows = append(rows, []string{l.Model, l.Text, usd(l.ShownMicros)})
+			rows = append(rows, []string{l.Model + sourceMark(l.Source), l.Text, usd(l.ShownMicros)})
 		}
 		writeTable(out, []string{"вкладка", "строка", "сумма"}, rows, []bool{false, false, true})
 		if len(b.Blocks) > 0 {

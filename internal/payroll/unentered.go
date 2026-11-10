@@ -99,6 +99,22 @@ func pageResolver(ctx context.Context, q ledger.Querier) (func(string) (string, 
 	}, rows.Err()
 }
 
+// PageLabeler maps a sheet's page row to Hub's label the way «не занесено» does; a row it cannot map is spelled as a
+// label ("Page 1" → "page-1") all the same, so that a comparison still lists it.
+func PageLabeler(ctx context.Context, q ledger.Querier) (func(string) string, error) {
+	label, err := pageResolver(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	return func(page string) string {
+		l, _ := label(page)
+		if l == "" {
+			l = strings.ToLower(strings.Join(strings.Fields(page), "-"))
+		}
+		return l
+	}, nil
+}
+
 // HubPageModels is the ledger model of each page of the hub grant: settings.hub_model_slugs of its modelSlug, or the
 // slug itself.
 func HubPageModels(ctx context.Context, q ledger.Querier) (map[string]string, error) {
@@ -222,15 +238,15 @@ func computeUnentered(ctx context.Context, q ledger.Querier, now time.Time) ([]u
 	if err != nil {
 		return nil, err
 	}
-	// From the switch to Hub's facts on, an empty cell is no gap: the facts accrue the day. What they could not is
-	// marked unknown (planFacts).
-	factsFrom, err := FactsFrom(ctx, q)
+	// From the switch to a source after the sheets on, an empty cell is no gap: the source accrues the day. What it
+	// could not is marked unknown (planFacts, planReports); under the reports so is a worked shift without a report.
+	plan, err := planAfter(ctx, q, now)
 	if err != nil {
 		return nil, err
 	}
-	plan, err := planFacts(ctx, q, factsFrom, now)
-	if err != nil {
-		return nil, err
+	afterFrom := ""
+	if plan != nil {
+		afterFrom = plan.start()
 	}
 	nowMSK := now.In(ts.MSK)
 	today := time.Date(nowMSK.Year(), nowMSK.Month(), nowMSK.Day(), 0, 0, 0, 0, ts.MSK)
@@ -332,7 +348,7 @@ func computeUnentered(ctx context.Context, q ledger.Querier, now time.Time) ([]u
 				return nil, err
 			}
 			if date.Before(first) || date.After(until) || d.date < firstValue || d.hasValue() || d.date <= paid[t.person] ||
-				(factsFrom != "" && d.date >= factsFrom) {
+				(afterFrom != "" && d.date >= afterFrom) {
 				continue
 			}
 			if facts.cover(t.person, t.model, d.date) {
@@ -425,7 +441,7 @@ func computeUnentered(ctx context.Context, q ledger.Querier, now time.Time) ([]u
 	}
 	kept = append(kept, fromFacts...)
 	if plan != nil {
-		kept = append(kept, plan.markers...)
+		kept = append(kept, plan.marks()...)
 	}
 	return kept, nil
 }

@@ -64,7 +64,8 @@ type PayoutDay struct {
 	AmountMicros int64        `json:"amountMicros"`
 	Worked       bool         `json:"worked"`
 	Pages        []PayoutPage `json:"pages,omitempty"`
-	// Source is where the day came from: "sheet" — the payout tab, "facts" — Hub's facts (from settings.payroll_facts_from).
+	// Source is where the day came from: "sheet" — the payout tab, "facts" — Hub's facts (from settings.payroll_facts_from),
+	// "reports" — the chatter's posted shift reports (from settings.payroll_reports_from).
 	Source string `json:"source"`
 }
 
@@ -93,6 +94,28 @@ type PayoutPerson struct {
 	// own sales by Hub's team facts where a week is proven, else the page money in their scheduled shift — pay the
 	// sheet has not got yet, so not in the debt.
 	Unentered PayoutUnentered `json:"unentered"`
+	// PendingChanges are the changes of the person's paid days that wait for the owner's decision (under the reports).
+	PendingChanges []PendingOut `json:"pendingChanges"`
+}
+
+// PendingOut is a pending change as the payouts show it.
+type PendingOut struct {
+	ID           int64  `json:"id"`
+	Date         string `json:"date"`
+	Model        string `json:"model"`
+	PostedMicros int64  `json:"postedMicros"`
+	NewMicros    int64  `json:"newMicros"`
+	Reason       string `json:"reason"`
+	ReasonText   string `json:"reasonText"`
+}
+
+func pendingOut(list []PendingChange) []PendingOut {
+	out := make([]PendingOut, 0, len(list))
+	for _, c := range list {
+		out = append(out, PendingOut{ID: c.ID, Date: c.Date, Model: c.Model, PostedMicros: c.PostedMicros, NewMicros: c.NewMicros,
+			Reason: c.Reason, ReasonText: c.ReasonText})
+	}
+	return out
 }
 
 // PayoutUnentered is «не занесено» of a person: days, the share estimated at the tab's rate, and the days Hub
@@ -112,10 +135,13 @@ type PayoutChecks struct {
 
 // PayoutsAnswer is the reply of GET /v1/payouts.
 type PayoutsAnswer struct {
-	OK          bool           `json:"ok"`
-	From        string         `json:"from"`
-	To          string         `json:"to"`
-	AccrualFrom string         `json:"accrualFrom"` // days before it are in the opening debt, not one by one
+	OK          bool   `json:"ok"`
+	From        string `json:"from"`
+	To          string `json:"to"`
+	AccrualFrom string `json:"accrualFrom"` // days before it are in the opening debt, not one by one
+	// FactsFrom and ReportsFrom are the switch days to Hub's facts and to the shift reports; "" — off (one at most is on).
+	FactsFrom   string         `json:"factsFrom"`
+	ReportsFrom string         `json:"reportsFrom"`
 	GeneratedAt string         `json:"generatedAt"`
 	People      []PayoutPerson `json:"people"`
 	Checks      PayoutChecks   `json:"checks"`
@@ -166,7 +192,17 @@ func ReadPayouts(ctx context.Context, db *sql.DB, from, to string, now time.Time
 	if ans.AccrualFrom, err = AccrualFrom(ctx, tx); err != nil {
 		return ans, err
 	}
+	if ans.FactsFrom, err = FactsFrom(ctx, tx); err != nil {
+		return ans, err
+	}
+	if ans.ReportsFrom, err = ReportsFrom(ctx, tx); err != nil {
+		return ans, err
+	}
 	people, err := payoutPeople(ctx, tx)
+	if err != nil {
+		return ans, err
+	}
+	pending, err := OpenChanges(ctx, tx, "")
 	if err != nil {
 		return ans, err
 	}
@@ -182,6 +218,11 @@ func ReadPayouts(ctx context.Context, db *sql.DB, from, to string, now time.Time
 	}
 	if err := payoutUnpaid(ctx, tx, byID); err != nil {
 		return ans, err
+	}
+	for _, c := range pending {
+		if p := byID[c.Person]; p != nil {
+			p.PendingChanges = append(p.PendingChanges, pendingOut([]PendingChange{c})...)
+		}
 	}
 	if ans.Checks, err = payoutChecks(ctx, tx, now); err != nil {
 		return ans, err
@@ -204,7 +245,7 @@ func payoutPeople(ctx context.Context, q ledger.Querier) ([]PayoutPerson, error)
 	defer rows.Close()
 	out := []PayoutPerson{}
 	for rows.Next() {
-		p := PayoutPerson{Days: []PayoutDay{}, UnpaidDays: []UnpaidDay{}}
+		p := PayoutPerson{Days: []PayoutDay{}, UnpaidDays: []UnpaidDay{}, PendingChanges: []PendingOut{}}
 		var aliases string
 		var toPay sql.NullFloat64
 		var oldest sql.NullString
@@ -284,13 +325,15 @@ func payoutDays(ctx context.Context, q ledger.Querier, from, to, accrualFrom str
 	}
 	rows.Close()
 
-	factsFrom, err := FactsFrom(ctx, q)
+	afterFrom, _, err := AfterFrom(ctx, q)
 	if err != nil {
 		return err
 	}
-	facts, err := factCells(ctx, q, from, to)
-	if err != nil {
-		return err
+	cells := map[string]map[string]factCell{}
+	for _, source := range []string{SourceFacts, SourceReports} {
+		if cells[source], err = sourceCells(ctx, q, source, from, to); err != nil {
+			return err
+		}
 	}
 
 	rows, err = q.QueryContext(ctx, `SELECT substr(l.account, 9), COALESCE(e.source_key, ''), l.amount
@@ -321,8 +364,8 @@ func payoutDays(ctx context.Context, q ledger.Querier, from, to, accrualFrom str
 			continue
 		}
 		d := PayoutDay{Date: date, Model: model, AmountMicros: -amt, Source: source}
-		if source == SourceFacts {
-			c := facts[slug+"\x00"+ledger.Slug(model)+"\x00"+date]
+		if source != SourceSheet {
+			c := cells[source][slug+"\x00"+ledger.Slug(model)+"\x00"+date]
 			d.Worked, d.Pages = true, c.pages
 		} else if s := sheet[day]; s != nil {
 			d.Worked, d.Pages = s.worked, s.pages
@@ -336,15 +379,15 @@ func payoutDays(ctx context.Context, q ledger.Querier, from, to, accrualFrom str
 	}
 	rows.Close()
 
-	// A worked day that came to zero has no posting, and is still a day of work — of the sheet before the switch to
-	// Hub's facts; from it the sheet is a mirror.
+	// A worked day that came to zero has no posting, and is still a day of work — of the sheet before the switch to a
+	// source after the sheets; from it the sheet is a mirror.
 	for day, s := range sheet {
 		p := people[s.person]
 		if p == nil || posted[day] || !s.worked || s.amount != 0 {
 			continue
 		}
 		model, _, date, ok := splitDayKey(day)
-		if !ok || date < accrualFrom || (factsFrom != "" && date >= factsFrom) {
+		if !ok || date < accrualFrom || (afterFrom != "" && date >= afterFrom) {
 			continue
 		}
 		p.Days = append(p.Days, PayoutDay{Date: date, Model: model, Worked: true, Pages: s.pages, Source: "sheet"})

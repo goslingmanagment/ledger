@@ -38,8 +38,13 @@ const reasonPending = "факты хаба не начислили"
 
 // FactsFrom is the switch day, "" when the sheets still accrue everything.
 func FactsFrom(ctx context.Context, q ledger.Querier) (string, error) {
+	return settingDay(ctx, q, SettingFactsFrom)
+}
+
+// settingDay reads a switch day of the settings: "" — not set.
+func settingDay(ctx context.Context, q ledger.Querier, key string) (string, error) {
 	var v string
-	err := q.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, SettingFactsFrom).Scan(&v)
+	err := q.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, key).Scan(&v)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
@@ -51,7 +56,7 @@ func FactsFrom(ctx context.Context, q ledger.Querier) (string, error) {
 		return "", nil
 	}
 	if t, err := time.Parse(ts.DateLayout, v); err != nil || t.Format(ts.DateLayout) != v {
-		return "", fmt.Errorf("настройка %s: нужна дата ГГГГ-ММ-ДД, а не %q", SettingFactsFrom, v)
+		return "", fmt.Errorf("настройка %s: нужна дата ГГГГ-ММ-ДД, а не %q", key, v)
 	}
 	return v, nil
 }
@@ -74,6 +79,13 @@ func SetFactsFrom(ctx context.Context, q ledger.Querier, day string, now time.Ti
 		if day < from {
 			return fmt.Errorf("дата переключения %s раньше accrual_from %s", day, from)
 		}
+		other, err := ReportsFrom(ctx, q)
+		if err != nil {
+			return err
+		}
+		if other != "" {
+			return fmt.Errorf("уже включены начисления из отчётов смен с %s: два источника после таблиц сразу нельзя — сначала ledger payroll reports-from --off", other)
+		}
 	}
 	_, err := q.ExecContext(ctx, `INSERT INTO settings(key, value, note, updated_at) VALUES (?, ?, ?, ?)
 		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
@@ -93,10 +105,11 @@ func weekOfDate(day string) string {
 	return ts.Date(ts.WeekStart(t))
 }
 
-// factDay is a tab's day as the facts accrue it.
+// factDay is a tab's day as a source after the sheets accrues it.
 type factDay struct {
 	model, name, person, date string
 	amount                    money.Micros
+	basis                     *reportBasis // of a day from the reports: what the amount was counted from
 }
 
 // Unaccrued are the facts from the switch on that no tab takes: a Hub user no card names, or a person without a tab of
@@ -122,6 +135,12 @@ type factPlan struct {
 	markers   []unenteredRow    // the days the facts did not accrue, for «не занесено»
 	unaccrued []Unaccrued
 }
+
+func (p *factPlan) source() string             { return SourceFacts }
+func (p *factPlan) start() string              { return p.from }
+func (p *factPlan) wanted() map[string]factDay { return p.want }
+func (p *factPlan) marks() []unenteredRow      { return p.markers }
+func (p *factPlan) lost() []Unaccrued          { return p.unaccrued }
 
 // holds says whether a tab's day from the switch on is the facts' to change: it is not while its week is unproven, the
 // person is no Hub user, or the facts cannot price it. Such a day keeps what is posted.
@@ -177,32 +196,9 @@ func planFacts(ctx context.Context, q ledger.Querier, from string, now time.Time
 		return nil, err
 	}
 
-	// The tab of each person and model: a listed one first, then by name; several of one model share the rate (the
-	// facts refuse to price them otherwise).
-	var tabs []planTab
-	rows, err = q.QueryContext(ctx, `SELECT model, name, person, listed FROM payroll_tabs WHERE person IS NOT NULL
-		ORDER BY listed DESC, model, name`)
+	tabs, tabOf, err := planTabs(ctx, q)
 	if err != nil {
 		return nil, err
-	}
-	for rows.Next() {
-		var t planTab
-		if err := rows.Scan(&t.model, &t.name, &t.person, &t.listed); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		tabs = append(tabs, t)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	tabOf := map[string]planTab{}
-	for _, t := range tabs {
-		k := t.person + "\x00" + ledger.Slug(t.model)
-		if _, ok := tabOf[k]; !ok {
-			tabOf[k] = t
-		}
 	}
 
 	// A person is a Hub user of the facts when one of the users of the rule's windows resolves to them on the model.
@@ -296,6 +292,37 @@ func planFacts(ctx context.Context, q ledger.Querier, from string, now time.Time
 		return nil, err
 	}
 	return p, nil
+}
+
+// planTabs reads the tab of each person and model, by "<person>\x00<model slug>": a listed one first, then by name;
+// several of one model share the rate (the sources refuse to price them otherwise).
+func planTabs(ctx context.Context, q ledger.Querier) ([]planTab, map[string]planTab, error) {
+	var tabs []planTab
+	rows, err := q.QueryContext(ctx, `SELECT model, name, person, listed FROM payroll_tabs WHERE person IS NOT NULL
+		ORDER BY listed DESC, model, name`)
+	if err != nil {
+		return nil, nil, err
+	}
+	for rows.Next() {
+		var t planTab
+		if err := rows.Scan(&t.model, &t.name, &t.person, &t.listed); err != nil {
+			rows.Close()
+			return nil, nil, err
+		}
+		tabs = append(tabs, t)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	tabOf := map[string]planTab{}
+	for _, t := range tabs {
+		k := t.person + "\x00" + ledger.Slug(t.model)
+		if _, ok := tabOf[k]; !ok {
+			tabOf[k] = t
+		}
+	}
+	return tabs, tabOf, nil
 }
 
 // factUsers are the Hub users of the proven windows from the split rule's week on.
@@ -524,21 +551,71 @@ func (m *mirrorSums) days(person, name string) []MirrorDay {
 	return out
 }
 
-// sourceSuffix marks a facts accrual's source_key; a sheet's has none, as before the switch.
-const sourceSuffix = ":" + SourceFacts
+// sourceSuffix marks a facts accrual's source_key, reportsSuffix a reports one; a sheet's has none, as before the switch.
+const (
+	sourceSuffix  = ":" + SourceFacts
+	reportsSuffix = ":" + SourceReports
+)
 
-func formatCounter(n int, source string) string {
-	s := strconv.Itoa(n)
-	if source == SourceFacts {
-		s += sourceSuffix
+// suffixOf is the source_key suffix (and cell key suffix) of a source after the sheets; "" for the sheet.
+func suffixOf(source string) string {
+	switch source {
+	case SourceFacts, SourceReports:
+		return ":" + source
 	}
-	return s
+	return ""
 }
 
-// factCell is a person's day on a model by the facts: the net of their shares by Hub page (the base the rate takes).
+func formatCounter(n int, source string) string {
+	return strconv.Itoa(n) + suffixOf(source)
+}
+
+// factCell is a person's day on a model by a source after the sheets: the revenue by Hub page the rate takes — the net
+// of their shares by the facts, the posted amounts by the reports.
 type factCell struct {
 	pages []PayoutPage
 	value int64
+}
+
+// sourceCells reads the cells of a source after the sheets in [from, to] by "<person>\x00<model slug>\x00<day>".
+func sourceCells(ctx context.Context, q ledger.Querier, source, from, to string) (map[string]factCell, error) {
+	if source == SourceReports {
+		return reportCells(ctx, q, from, to)
+	}
+	return factCells(ctx, q, from, to)
+}
+
+// reportCells reads report_accruals of the days in [from, to]: the posted amount of each page.
+func reportCells(ctx context.Context, q ledger.Querier, from, to string) (map[string]factCell, error) {
+	rows, err := q.QueryContext(ctx, `SELECT person, model, day, pages, net_micros FROM report_accruals WHERE day BETWEEN ? AND ?
+		ORDER BY person, model, day`, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]factCell{}
+	for rows.Next() {
+		var person, model, day, pages string
+		var net int64
+		if err := rows.Scan(&person, &model, &day, &pages, &net); err != nil {
+			return nil, err
+		}
+		var list []struct {
+			Page   string `json:"page"`
+			Micros int64  `json:"micros"`
+		}
+		if err := json.Unmarshal([]byte(pages), &list); err != nil {
+			return nil, fmt.Errorf("report_accruals %s %s %s: pages: %w", person, model, day, err)
+		}
+		k := person + "\x00" + ledger.Slug(model) + "\x00" + day
+		c := out[k]
+		for _, p := range list {
+			c.pages = append(c.pages, PayoutPage{Page: p.Page, RevenueMicros: p.Micros})
+		}
+		c.value += net
+		out[k] = c
+	}
+	return out, rows.Err()
 }
 
 // factCells reads fact_accruals of the sales in [from, to] by "<person>\x00<model slug>\x00<day>".

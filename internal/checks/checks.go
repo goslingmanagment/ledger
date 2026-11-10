@@ -547,13 +547,17 @@ func Payables(ctx context.Context, e Env) Result {
 	if len(bad) > 0 {
 		return fail(name, "warn", strings.Join(bad, "; "), nil)
 	}
-	if c.FactsFrom == "" {
+	after, source, short := c.FactsFrom, "факты хаба", "факты"
+	if c.ReportsFrom != "" {
+		after, source, short = c.ReportsFrom, "отчёты смен", "отчёт"
+	}
+	if after == "" {
 		return pass(name, fmt.Sprintf("%d человек: долг равен К выплате ±$1", len(c.People)))
 	}
-	// From the switch to Hub's facts on the sheet is a mirror: its difference from the facts, and the facts no tab takes,
-	// are said, never a failure.
-	summary := fmt.Sprintf("%d человек: долг с днями с %s по таблице равен К выплате ±$1; с %s начисляют факты хаба", len(c.People),
-		c.FactsFrom, c.FactsFrom)
+	// From the switch to a source after the sheets on the sheet is a mirror: its difference from the source, and what
+	// no tab takes, are said, never a failure.
+	summary := fmt.Sprintf("%d человек: долг с днями с %s по таблице равен К выплате ±$1; с %s начисляют %s", len(c.People),
+		after, after, source)
 	if len(c.Mirror) > 0 {
 		const shown = 8
 		var parts []string
@@ -562,7 +566,7 @@ func Payables(ctx context.Context, e Env) Result {
 				parts = append(parts, fmt.Sprintf("и ещё %d", len(c.Mirror)-shown))
 				break
 			}
-			parts = append(parts, fmt.Sprintf("%s %s: таблица %s, факты %s", d.Person, d.Date, money.Micros(d.SheetMicros).Cents(),
+			parts = append(parts, fmt.Sprintf("%s %s: таблица %s, %s %s", d.Person, d.Date, money.Micros(d.SheetMicros).Cents(), short,
 				money.Micros(d.BooksMicros).Cents()))
 		}
 		summary += "; таблица-зеркало расходится в " + fmt.Sprint(len(c.Mirror)) + " дн.: " + strings.Join(parts, ", ")
@@ -572,7 +576,10 @@ func Payables(ctx context.Context, e Env) Result {
 		if u.Person != "" {
 			who = u.Person
 		}
-		summary += fmt.Sprintf("; не начислено фактами: %s, %s, %s за %d дн. — %s", who, u.Model, money.Micros(u.NetMicros).Cents(), u.Days, u.Reason)
+		if u.UserID == 0 && u.Username == "" {
+			who = u.Person
+		}
+		summary += fmt.Sprintf("; не начислено (%s): %s, %s, %s за %d дн. — %s", source, who, u.Model, money.Micros(u.NetMicros).Cents(), u.Days, u.Reason)
 	}
 	return Result{Name: name, OK: true, Severity: "info", Summary: summary, Details: map[string]any{"mirror": c.Mirror, "unaccrued": c.Unaccrued}}
 }
@@ -755,9 +762,51 @@ func ReportPosts(ctx context.Context, e Env) Result {
 	return pass(name, "посты «Отчётности» за 14 дней разобраны без блокирующих пометок")
 }
 
+// ShiftReports: every shift of Hub's team facts of the last 14 days that ended more than a day ago has the person's
+// posted report for its report date (payroll.ReportDate). A warning: before the switch to the reports nothing is
+// accrued from them, from it such a day is not accrued at all.
+func ShiftReports(ctx context.Context, e Env) Result {
+	const name = "у смен есть отчёты"
+	today := ts.Date(e.Now)
+	from := ts.Date(e.Now.In(ts.MSK).AddDate(0, 0, -14))
+	gaps, err := payroll.ShiftsWithoutReport(ctx, e.Q, from, today, e.Now)
+	if err != nil {
+		return fail(name, "warn", err.Error(), nil)
+	}
+	if len(gaps) == 0 {
+		return pass(name, "у каждой законченной смены хаба за 14 дней есть опубликованный отчёт")
+	}
+	var parts []string
+	for _, g := range gaps {
+		parts = append(parts, fmt.Sprintf("%s %s (%s, смена %s — %s)", g.Person, g.ReportDate, g.Model,
+			g.StartedAt.In(ts.MSK).Format("02.01 15:04"), g.EndedAt.In(ts.MSK).Format("02.01 15:04")))
+	}
+	return fail(name, "warn", fmt.Sprintf("%d смен без опубликованного отчёта: %s", len(gaps), strings.Join(parts, "; ")), gaps)
+}
+
+// PendingChanges: the changes of paid days that wait for the owner (under the reports a paid day does not change by
+// itself). A warning until decided: ledger payroll change apply|dismiss <id>.
+func PendingChanges(ctx context.Context, e Env) Result {
+	const name = "изменения за выплаченные дни ждут решения"
+	list, err := payroll.OpenChanges(ctx, e.Q, "")
+	if err != nil {
+		return fail(name, "warn", err.Error(), nil)
+	}
+	if len(list) == 0 {
+		return pass(name, "изменений за выплаченные дни, ждущих решения, нет")
+	}
+	var parts []string
+	for _, c := range list {
+		parts = append(parts, fmt.Sprintf("#%d %s %s (%s): проведено %s, по отчёту %s — %s", c.ID, c.Person, c.Date, c.Model,
+			money.Micros(c.PostedMicros).Cents(), money.Micros(c.NewMicros).Cents(), c.ReasonText))
+	}
+	return fail(name, "warn", fmt.Sprintf("%d ждут решения (ledger payroll change apply|dismiss <id>): %s", len(list), strings.Join(parts, "; ")), list)
+}
+
 // Run executes every check. A coverage that cannot be built fails its own checks, not the rest.
 func Run(ctx context.Context, e Env) []Result {
-	out := []Result{Balanced(ctx, e), BybitBalance(ctx, e), Coins(ctx, e), CoinsAtCost(ctx, e), CardAnchors(ctx, e), CardCover(ctx, e), Unlinked(ctx, e), Payables(ctx, e), Copies(ctx, e), Sources(ctx, e), ReportPosts(ctx, e)}
+	out := []Result{Balanced(ctx, e), BybitBalance(ctx, e), Coins(ctx, e), CoinsAtCost(ctx, e), CardAnchors(ctx, e), CardCover(ctx, e), Unlinked(ctx, e), Payables(ctx, e), Copies(ctx, e), Sources(ctx, e), ReportPosts(ctx, e),
+		ShiftReports(ctx, e), PendingChanges(ctx, e)}
 	cv, tabs, _, err := month.PrepareCover(ctx, e.Q, month.Inputs{})
 	if err != nil {
 		for _, n := range []string{"заявки равны покрытому net", "k переводов в норме", "переводы не просрочены", "депозиты сходятся с заявками", "дрейф закрытых месяцев"} {

@@ -37,6 +37,12 @@ func init() {
 				s.Log.Error("reports save", "key", auth.KeyName(r.Context()), "err", err)
 				server.WriteError(w, http.StatusInternalServerError, "отчёт не сохранён: сбой сервиса, подробности в журнале")
 			default:
+				// The draft is saved; the accruals from the reports follow, and a failure there is the hourly job's to retry.
+				if out.Created {
+					if err := Changed(r.Context(), s.Store, ts.Now()); err != nil {
+						s.Log.Error("reports save: accruals", "key", auth.KeyName(r.Context()), "err", err)
+					}
+				}
 				server.WriteJSON(w, http.StatusOK, out)
 			}
 		})))
