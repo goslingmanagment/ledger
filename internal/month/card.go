@@ -116,6 +116,8 @@ type Card struct {
 	Notes    []string
 	InMonth  []*Payment
 	M0, M1   time.Time
+	// RaiseFrom is the day the raise the safeguard tests is already in force (accepted before the close), or "".
+	RaiseFrom string
 }
 
 func (c *Card) line(k LineKey) *Line {

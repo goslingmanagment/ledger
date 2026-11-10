@@ -211,7 +211,7 @@ func monthBrief(ctx context.Context, args []string) error {
 		if *rate != 0 {
 			r = rate
 		}
-		lines, fl, err := month.BriefAt(ctx, store.RO, time.Now(), r)
+		lines, fl, err := month.BriefAt(ctx, store.RO, time.Now(), r, false)
 		if err != nil {
 			return dataExit(err)
 		}

@@ -134,6 +134,7 @@ var settingKinds = map[string]string{
 	"full_ledger_from": "time", "hub_window_start": "time", "accrual_from": "date", SettingTeamSince: "date",
 	"fansly_payout_methods": "list", "hold_types": "list",
 	"hub_model_slugs": "map", "tab_aliases": "map", "sheet_pages": "map",
+	"owner_salary_rate": "owner_rates", "category_caps": "caps",
 }
 
 func checkSetting(key, value string) error {
@@ -159,6 +160,13 @@ func checkSetting(key, value string) error {
 		_, err = s.List(key)
 	case "map":
 		_, err = s.Map(key)
+	case "owner_rates":
+		_, err = ledger.ParseOwnerRates(value)
+	case "caps":
+		caps := map[string]float64{}
+		if jerr := json.Unmarshal([]byte(value), &caps); jerr != nil {
+			err = fmt.Errorf("настройка %s: нужен JSON-объект {\"категория\": лимит}: %v", key, jerr)
+		}
 	}
 	return err
 }

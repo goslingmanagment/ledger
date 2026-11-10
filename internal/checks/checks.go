@@ -20,6 +20,7 @@ import (
 
 	"github.com/goslingmanagment/ledger/internal/bybit"
 	"github.com/goslingmanagment/ledger/internal/events"
+	"github.com/goslingmanagment/ledger/internal/free"
 	"github.com/goslingmanagment/ledger/internal/hub"
 	"github.com/goslingmanagment/ledger/internal/ledger"
 	"github.com/goslingmanagment/ledger/internal/money"
@@ -286,6 +287,60 @@ func CardAnchors(ctx context.Context, e Env) Result {
 }
 
 // loadFeesBy sums the fees of card loads made by t that wait for the owner: the wallet paid them, the books not yet.
+// coverDays is how far ahead an account must already hold the money of its coming charges.
+const coverDays = 3
+
+func accountName(code string) string {
+	if n, ok := strings.CutPrefix(code, "card:"); ok {
+		return "карта •" + n
+	}
+	return code
+}
+
+// CardCover: the charges of the next days against the money on the account they are taken from. A
+// subscription that finds its card empty lapses, so the warning comes while the card can still be loaded.
+// Today's charges are left out: they may be taken already.
+func CardCover(ctx context.Context, e Env) Result {
+	const name = "карты покрывают списания"
+	n := e.Now.In(ts.MSK)
+	from := time.Date(n.Year(), n.Month(), n.Day()+1, 0, 0, 0, 0, ts.MSK)
+	charges, err := free.Charges(ctx, e.Q, from, from.AddDate(0, 0, coverDays-1))
+	if err != nil {
+		return fail(name, "warn", err.Error(), nil)
+	}
+	need, last, names := map[string]float64{}, map[string]string{}, map[string][]string{}
+	var order []string
+	for _, c := range charges {
+		if _, ok := need[c.Account]; !ok {
+			order = append(order, c.Account)
+		}
+		need[c.Account] += c.Amount
+		last[c.Account] = c.Due
+		names[c.Account] = append(names[c.Account], c.Name)
+	}
+	var short []string
+	for _, a := range order {
+		have, err := book(ctx, e.Q, a)
+		if err != nil {
+			return fail(name, "warn", err.Error(), nil)
+		}
+		if have+0.005 >= need[a] {
+			continue
+		}
+		due, _ := time.Parse(ts.DateLayout, last[a])
+		short = append(short, fmt.Sprintf("%s: на счёте %.2f, к списанию %.2f до %s (%s), не хватает %.2f",
+			accountName(a), have, need[a], due.Format("02.01"), strings.Join(names[a], ", "), need[a]-have))
+	}
+	if len(short) == 0 {
+		return pass(name, fmt.Sprintf("списаний на %d дня вперёд: %d, деньги на счетах есть", coverDays, len(charges)))
+	}
+	sum := strings.Join(short, "; ")
+	if w, err := book(ctx, e.Q, "cincin_wallet"); err == nil && w >= 0.005 {
+		sum += fmt.Sprintf("; в кошельке CinCin %.2f", w)
+	}
+	return fail(name, "warn", sum, nil)
+}
+
 func loadFeesBy(ctx context.Context, q ledger.Querier, t time.Time) (float64, error) {
 	rows, err := q.QueryContext(ctx, `SELECT COALESCE(CAST(json_extract(content, '$.fee') AS REAL), 0), COALESCE(json_extract(content, '$.at'), '')
 		FROM proposals WHERE status = 'open' AND json_extract(content, '$.loaded_card') IS NOT NULL`)
@@ -662,7 +717,7 @@ func Sources(ctx context.Context, e Env) Result {
 
 // Run executes every check. A coverage that cannot be built fails its own checks, not the rest.
 func Run(ctx context.Context, e Env) []Result {
-	out := []Result{Balanced(ctx, e), BybitBalance(ctx, e), Coins(ctx, e), CoinsAtCost(ctx, e), CardAnchors(ctx, e), Unlinked(ctx, e), Payables(ctx, e), Copies(ctx, e), Sources(ctx, e)}
+	out := []Result{Balanced(ctx, e), BybitBalance(ctx, e), Coins(ctx, e), CoinsAtCost(ctx, e), CardAnchors(ctx, e), CardCover(ctx, e), Unlinked(ctx, e), Payables(ctx, e), Copies(ctx, e), Sources(ctx, e)}
 	cv, tabs, _, err := month.PrepareCover(ctx, e.Q, month.Inputs{})
 	if err != nil {
 		for _, n := range []string{"заявки равны покрытому net", "k переводов в норме", "переводы не просрочены", "депозиты сходятся с заявками", "дрейф закрытых месяцев"} {

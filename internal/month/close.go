@@ -207,6 +207,11 @@ func Close(ctx context.Context, tx *sql.Tx, month string, asOf time.Time, ceoRat
 	verdict := Verdict(*tot.Decision, candidate, cv.Cfg.GuardShare, &tot.Transit)
 	snap["status"], snap["source"], snap["closed_at"] = "закрыт", source, ts.Format(now)
 	snap["ceo_rate"], snap["candidate"], snap["verdict"] = ceoRate, candidate, verdict
+	if from, err := raiseFrom(ctx, tx, month, candidate); err != nil {
+		return nil, nil, err
+	} else if from != "" {
+		snap["raise_from"] = from
+	}
 	snap["checks"] = res
 	snap["payroll"] = PayrollOf(tabs, month)
 	raw, err := json.Marshal(snap)
