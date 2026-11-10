@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/goslingmanagment/ledger/internal/accruals"
 	"github.com/goslingmanagment/ledger/internal/events"
 	"github.com/goslingmanagment/ledger/internal/money"
 	"github.com/goslingmanagment/ledger/internal/payroll"
@@ -25,6 +26,58 @@ func init() {
 	Command(Cmd{Name: "payroll open", Summary: "заморозить стартовые долги: сначала таблица [--dry-run] [--force]", Run: payrollOpen})
 	Command(Cmd{Name: "payroll rebuild", Summary: "свести начисления, клиринг, дни и «не занесено» сейчас", Run: payrollRebuild})
 	Command(Cmd{Name: "payables", Summary: "кому сколько должны и за какие дни: [--person имя] [--json]", Run: payables})
+	Command(Cmd{Name: "payroll facts-from", Run: payrollFactsFrom,
+		Summary: "начисления из фактов хаба с дня (рядом с базой): [ГГГГ-ММ-ДД | --off]; без аргумента — показать; затем пересборка"})
+}
+
+// payrollFactsFrom sets or clears the switch of the accruals to Hub's facts and rebuilds: the facts' accruals first,
+// then the debts. --off gives back the sheets' books exactly.
+func payrollFactsFrom(ctx context.Context, args []string) error {
+	fs := Flags("payroll facts-from")
+	off := fs.Bool("off", false, "выключить: все дни снова из таблиц выплат (откат)")
+	pos, err := ParseArgs(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) > 1 || (*off && len(pos) > 0) {
+		return Exit{Code: 2, Msg: "ledger payroll facts-from [ГГГГ-ММ-ДД | --off]"}
+	}
+	store, err := OpenStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	if len(pos) == 0 && !*off {
+		from, err := payroll.FactsFrom(ctx, store.RO)
+		if err != nil {
+			return err
+		}
+		return printJSON(map[string]any{"ok": true, "factsFrom": from})
+	}
+	day := ""
+	if !*off {
+		day = pos[0]
+	}
+	tx, err := store.RW.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := payroll.SetFactsFrom(ctx, tx, day, ts.Now()); err != nil {
+		return Exit{Code: 2, Msg: "не записано: " + err.Error()}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	facts, err := accruals.Rebuild(ctx, store, ts.Now())
+	if err != nil {
+		return err
+	}
+	rep, err := payroll.Rebuild(ctx, store, ts.Now())
+	if err != nil {
+		return err
+	}
+	return printJSON(map[string]any{"ok": true, "factsFrom": day, "facts": facts, "report": rep})
 }
 
 func collectSheets(ctx context.Context, args []string) error {
@@ -365,4 +418,29 @@ func printPayables(out *bufio.Writer, ans payroll.Answer) {
 		}
 	}
 	printProblems(out, ans.Check)
+	printMirror(out, ans.Check)
+}
+
+// printMirror: from the switch to Hub's facts on, the sheet's days that differ from the facts, and the facts no tab takes.
+func printMirror(w *bufio.Writer, c payroll.CheckReport) {
+	if c.FactsFrom == "" {
+		return
+	}
+	fmt.Fprintf(w, "\nС %s начисляют факты хаба; таблицы — зеркало (разница с «К выплате» — их дни).\n", c.FactsFrom)
+	if len(c.Mirror) > 0 {
+		fmt.Fprintf(w, "Таблица расходится с фактами:\n")
+		for _, d := range c.Mirror {
+			fmt.Fprintf(w, "  %s %s: таблица %s, факты %s\n", d.Name, d.Date, amount(money.Micros(d.SheetMicros)), amount(money.Micros(d.BooksMicros)))
+		}
+	}
+	if len(c.Unaccrued) > 0 {
+		fmt.Fprintf(w, "Факты, которые никому не начислены:\n")
+		for _, u := range c.Unaccrued {
+			who := fmt.Sprintf("%s (хаб %d)", u.Username, u.UserID)
+			if u.Person != "" {
+				who = u.Person
+			}
+			fmt.Fprintf(w, "  %s, %s: %s за %d дн. — %s\n", who, u.Model, amount(money.Micros(u.NetMicros)), u.Days, u.Reason)
+		}
+	}
 }

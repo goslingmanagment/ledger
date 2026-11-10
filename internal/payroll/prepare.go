@@ -69,6 +69,9 @@ type PrepareDay struct {
 	Pages       []PayoutPage `json:"pages"`
 	ValueMicros int64        `json:"valueMicros"` // the day's cells summed: the number the line shows
 	PayMicros   int64        `json:"payMicros"`   // unpaid of the day
+	// Source is "facts" for a day accrued from Hub's facts (from settings.payroll_facts_from): the pages are Hub's, the
+	// value is the net of the person's shares. Empty — the sheet's.
+	Source string `json:"source,omitempty"`
 }
 
 // PrepareLine is one line of the brief and of the message. The lines add up to amountMicros.
@@ -76,7 +79,8 @@ type PrepareLine struct {
 	Kind       string       `json:"kind"`
 	Model      string       `json:"model,omitempty"`
 	Tab        string       `json:"tab,omitempty"`
-	Week       string       `json:"week,omitempty"` // the first day of the block
+	Source     string       `json:"source,omitempty"` // of a tab's days: "facts" — the cells are Hub's net of the person's shares; empty — the sheet's
+	Week       string       `json:"week,omitempty"`   // the first day of the block
 	From       string       `json:"from"`
 	To         string       `json:"to"`
 	Days       []PrepareDay `json:"days,omitempty"`
@@ -156,8 +160,8 @@ type prepTab struct {
 }
 
 type prepUnpaid struct {
-	kind, date, model, name string
-	amount, paid, unpaid    int64
+	kind, date, model, name, source string
+	amount, paid, unpaid            int64
 }
 
 type prepCells struct {
@@ -220,7 +224,7 @@ func PreparePayout(ctx context.Context, db *sql.DB, slug string, now time.Time) 
 		}
 		oldest = b.Period.From
 	}
-	cells, err := prepareCells(ctx, tx, slug, oldest)
+	cells, err := prepareCells(ctx, tx, slug, oldest, unpaid)
 	if err != nil {
 		return b, err
 	}
@@ -248,14 +252,8 @@ func PreparePayout(ctx context.Context, db *sql.DB, slug string, now time.Time) 
 	}
 	tabFlags(tabs, unpaid, f)
 	if b.ToPayMicros != nil {
-		diff := b.AmountMicros - *b.ToPayMicros
-		switch {
-		case diff > int64(tolerance) || diff < -int64(tolerance):
-			f.add("to_pay", true, "долг %s ≠ «К выплате» вкладок %s: разница %s — сначала понять, откуда", money.Micros(b.AmountMicros).Cents(),
-				money.Micros(*b.ToPayMicros).Cents(), signedCents(diff))
-		case diff >= 10_000 || diff <= -10_000:
-			f.add("to_pay", false, "долг %s, «К выплате» вкладок %s: разница %s в пределах округления таблиц", money.Micros(b.AmountMicros).Cents(),
-				money.Micros(*b.ToPayMicros).Cents(), signedCents(diff))
+		if err := toPayFlags(ctx, tx, &b, f); err != nil {
+			return b, err
 		}
 	}
 	if err := unenteredFlags(ctx, tx, slug, oldest, f); err != nil {
@@ -266,6 +264,47 @@ func PreparePayout(ctx context.Context, db *sql.DB, slug string, now time.Time) 
 	}
 	sort.SliceStable(b.Flags, func(i, j int) bool { return b.Flags[i].Blocker && !b.Flags[j].Blocker })
 	return b, tx.Commit()
+}
+
+// toPayFlags compare the debt with «К выплате» of the tabs. From the switch to Hub's facts on the sheet is a mirror:
+// what it governs — the debt with the switch's days as the sheet has them — must equal «К выплате»; the days where the
+// mirror and the facts differ are a note, not a blocker.
+func toPayFlags(ctx context.Context, q ledger.Querier, b *PayoutBrief, f *flagger) error {
+	governed, what := b.AmountMicros, "долг"
+	factsFrom, err := FactsFrom(ctx, q)
+	if err != nil {
+		return err
+	}
+	var differ []MirrorDay
+	if factsFrom != "" {
+		m, err := mirror(ctx, q, factsFrom)
+		if err != nil {
+			return err
+		}
+		if ms := m[b.Slug]; ms != nil {
+			books, sheet := ms.total()
+			governed += int64(sheet - books)
+			differ = ms.days(b.Slug, b.Name)
+		}
+		what = "долг с днями с " + ddmm(factsFrom) + " по таблице"
+	}
+	diff := governed - *b.ToPayMicros
+	switch {
+	case diff > int64(tolerance) || diff < -int64(tolerance):
+		f.add("to_pay", true, "%s %s ≠ «К выплате» вкладок %s: разница %s — сначала понять, откуда", what, money.Micros(governed).Cents(),
+			money.Micros(*b.ToPayMicros).Cents(), signedCents(diff))
+	case diff >= 10_000 || diff <= -10_000:
+		f.add("to_pay", false, "%s %s, «К выплате» вкладок %s: разница %s в пределах округления таблиц", what, money.Micros(governed).Cents(),
+			money.Micros(*b.ToPayMicros).Cents(), signedCents(diff))
+	}
+	if len(differ) > 0 {
+		parts := make([]string, len(differ))
+		for i, d := range differ {
+			parts[i] = fmt.Sprintf("%s таблица %s, факты %s", ddmm(d.Date), money.Micros(d.SheetMicros).Cents(), money.Micros(d.BooksMicros).Cents())
+		}
+		f.add("mirror", false, "с %s начисляют факты хаба, таблица — зеркало и расходится с ними: %s", ddmm(factsFrom), strings.Join(parts, "; "))
+	}
+	return nil
 }
 
 type flagger struct {
@@ -329,7 +368,7 @@ func prepareTabs(ctx context.Context, q ledger.Querier, slug string) (map[string
 }
 
 func prepareUnpaid(ctx context.Context, q ledger.Querier, slug string) ([]prepUnpaid, error) {
-	rows, err := q.QueryContext(ctx, `SELECT kind, date, model, name, amount, paid, unpaid FROM payable_days
+	rows, err := q.QueryContext(ctx, `SELECT kind, date, model, name, source, amount, paid, unpaid FROM payable_days
 		WHERE person = ? AND unpaid > 0 ORDER BY seq`, slug)
 	if err != nil {
 		return nil, err
@@ -338,7 +377,7 @@ func prepareUnpaid(ctx context.Context, q ledger.Querier, slug string) ([]prepUn
 	var out []prepUnpaid
 	for rows.Next() {
 		var u prepUnpaid
-		if err := rows.Scan(&u.kind, &u.date, &u.model, &u.name, &u.amount, &u.paid, &u.unpaid); err != nil {
+		if err := rows.Scan(&u.kind, &u.date, &u.model, &u.name, &u.source, &u.amount, &u.paid, &u.unpaid); err != nil {
 			return nil, err
 		}
 		out = append(out, u)
@@ -346,25 +385,62 @@ func prepareUnpaid(ctx context.Context, q ledger.Querier, slug string) ([]prepUn
 	return out, rows.Err()
 }
 
-// prepareCells reads the person's sheet days from the oldest unpaid one on, by "<model>/<name>:<date>".
-func prepareCells(ctx context.Context, q ledger.Querier, slug, from string) (map[string]prepCells, error) {
+// prepareCells reads the person's days from the oldest unpaid one on, by "<model>/<name>:<date>" — the sheet's cells of
+// a day the sheet accrued, and under "<model>/<name>:<date>:facts" Hub's net of the person's shares by page of a day
+// the facts accrued, in the sheet's week block where the sheet still has the day (the owner marks it there), else in
+// the Monday's.
+func prepareCells(ctx context.Context, q ledger.Querier, slug, from string, unpaid []prepUnpaid) (map[string]prepCells, error) {
 	out := map[string]prepCells{}
 	if from == "" {
 		return out, nil
 	}
-	rows, err := q.QueryContext(ctx, `SELECT model, name, date, week, pages FROM payroll_days WHERE person = ? AND date >= ?`, slug, from)
+	if err := sheetCells(ctx, q, slug, from, out); err != nil {
+		return nil, err
+	}
+	var factsTo string
+	for _, u := range unpaid {
+		if u.source == SourceFacts {
+			factsTo = max(factsTo, u.date)
+		}
+	}
+	if factsTo == "" {
+		return out, nil
+	}
+	facts, err := factCells(ctx, q, from, factsTo)
 	if err != nil {
 		return nil, err
+	}
+	for _, u := range unpaid {
+		if u.source != SourceFacts {
+			continue
+		}
+		f := facts[slug+"\x00"+ledger.Slug(u.model)+"\x00"+u.date]
+		c := prepCells{week: weekOfDate(u.date), pages: f.pages, value: f.value}
+		if sh, ok := out[tabKey(u.model, u.name)+":"+u.date]; ok {
+			c.week = sh.week
+		}
+		if c.pages == nil {
+			c.pages = []PayoutPage{}
+		}
+		out[tabKey(u.model, u.name)+":"+u.date+sourceSuffix] = c
+	}
+	return out, nil
+}
+
+func sheetCells(ctx context.Context, q ledger.Querier, slug, from string, out map[string]prepCells) error {
+	rows, err := q.QueryContext(ctx, `SELECT model, name, date, week, pages FROM payroll_days WHERE person = ? AND date >= ?`, slug, from)
+	if err != nil {
+		return err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var model, name, date, pages string
 		var c prepCells
 		if err := rows.Scan(&model, &name, &date, &c.week, &pages); err != nil {
-			return nil, err
+			return err
 		}
 		if c.pages, err = sheetPages(pages); err != nil {
-			return nil, fmt.Errorf("payroll_days %s/%s %s: pages: %w", model, name, date, err)
+			return fmt.Errorf("payroll_days %s/%s %s: pages: %w", model, name, date, err)
 		}
 		if c.pages == nil {
 			c.pages = []PayoutPage{}
@@ -374,7 +450,7 @@ func prepareCells(ctx context.Context, q ledger.Querier, slug, from string) (map
 		}
 		out[tabKey(model, name)+":"+date] = c
 	}
-	return out, rows.Err()
+	return rows.Err()
 }
 
 type memo struct {
@@ -422,25 +498,30 @@ func prepareLines(unpaid []prepUnpaid, cells map[string]prepCells, tabs map[stri
 			tail = append(tail, &PrepareLine{Kind: LineOpening, From: u.date, To: u.date, PayMicros: u.unpaid})
 		case "day":
 			key := tabKey(u.model, u.name)
-			c, ok := cells[key+":"+u.date]
-			day := PrepareDay{Date: u.date, Pages: c.pages, ValueMicros: c.value, PayMicros: u.unpaid}
+			source, cellKey := "", key+":"+u.date
+			if u.source == SourceFacts {
+				source, cellKey = SourceFacts, cellKey+sourceSuffix
+			}
+			c, ok := cells[cellKey]
+			day := PrepareDay{Date: u.date, Pages: c.pages, ValueMicros: c.value, PayMicros: u.unpaid, Source: source}
 			switch {
 			case !ok:
 				day.Pages = []PayoutPage{}
-				byTab[key] = append(byTab[key], &PrepareLine{Kind: LineDay, Model: u.model, Tab: u.name, From: u.date, To: u.date,
+				byTab[key] = append(byTab[key], &PrepareLine{Kind: LineDay, Model: u.model, Tab: u.name, Source: source, From: u.date, To: u.date,
 					Days: []PrepareDay{day}, PayMicros: u.unpaid})
 				f.add("no_cells", false, "%s %s: долг %s за день, которого во вкладке больше нет", u.model, ddmm(u.date), money.Micros(u.unpaid).Cents())
 			case u.paid > 0:
-				byTab[key] = append(byTab[key], &PrepareLine{Kind: LineRemainder, Model: u.model, Tab: u.name, Week: c.week, From: u.date, To: u.date,
-					Days: []PrepareDay{day}, PayMicros: u.unpaid})
+				byTab[key] = append(byTab[key], &PrepareLine{Kind: LineRemainder, Model: u.model, Tab: u.name, Source: source, Week: c.week,
+					From: u.date, To: u.date, Days: []PrepareDay{day}, PayMicros: u.unpaid})
 			default:
-				w := weeks[key+":"+c.week]
+				// The sheet's days and the facts' of one block are two lines: their cells are not the same numbers.
+				w := weeks[key+":"+c.week+":"+source]
 				if w == nil {
-					w = &PrepareLine{Kind: LineWeek, Model: u.model, Tab: u.name, Week: c.week, From: u.date, To: u.date}
+					w = &PrepareLine{Kind: LineWeek, Model: u.model, Tab: u.name, Source: source, Week: c.week, From: u.date, To: u.date}
 					if t := tabs[key]; t != nil {
 						w.Rate = t.rate
 					}
-					weeks[key+":"+c.week] = w
+					weeks[key+":"+c.week+":"+source] = w
 					byTab[key] = append(byTab[key], w)
 				}
 				w.Days = append(w.Days, day)
@@ -745,10 +826,12 @@ func tabFlags(tabs map[string]*prepTab, unpaid []prepUnpaid, f *flagger) {
 
 // unenteredFlags: «не занесено» on or after the oldest unpaid day (all of it when nothing is owed). A day
 // the hub shows money for is a blocker, saying whether it is the person's own sales by the facts or the page money of
-// their slot; a day it could not prove is a note per tab.
+// their slot; a day it could not prove is a note per tab. From the switch to Hub's facts on, a day the facts did not
+// accrue (week not proven, no Hub user, no rate) is a blocker: the debt may lack it.
 func unenteredFlags(ctx context.Context, q ledger.Querier, slug, from string, f *flagger) error {
+	// A day the facts did not accrue counts whatever the oldest unpaid day: it is not in the debt at all.
 	rows, err := q.QueryContext(ctx, `SELECT model, date, page, status, COALESCE(reason, ''), net_mills, share FROM payroll_unentered
-		WHERE person = ? AND date >= ? ORDER BY model, date, page`, slug, from)
+		WHERE person = ? AND (date >= ? OR (status = 'unknown' AND reason LIKE ? || '%')) ORDER BY model, date, page`, slug, from, reasonPending)
 	if err != nil {
 		return err
 	}
@@ -761,6 +844,7 @@ func unenteredFlags(ctx context.Context, q ledger.Querier, slug, from string, f 
 		facts       bool // counted from Hub's team facts, not the slot
 	}
 	var days []*day
+	var pending []string             // the days from the switch to Hub's facts the facts did not accrue
 	unknown := map[string][]string{} // model → dates
 	reason := map[string]string{}
 	var models []string
@@ -771,6 +855,10 @@ func unenteredFlags(ctx context.Context, q ledger.Querier, slug, from string, f 
 		if err := rows.Scan(&model, &date, &page, &status, &why, &net, &share); err != nil {
 			rows.Close()
 			return err
+		}
+		if status != "ok" && strings.HasPrefix(why, reasonPending) {
+			pending = append(pending, fmt.Sprintf("%s %s: %s", model, ddmm(date), strings.TrimPrefix(strings.TrimPrefix(why, reasonPending), ": ")))
+			continue
 		}
 		if status != "ok" {
 			if _, ok := unknown[model]; !ok {
@@ -814,6 +902,9 @@ func unenteredFlags(ctx context.Context, q ledger.Querier, slug, from string, f 
 	}
 	for _, m := range models {
 		f.add("unentered_unknown", false, "не занесено? %s: %s — хаб не доказал: %s", m, strings.Join(unknown[m], ", "), reason[m])
+	}
+	for _, p := range pending {
+		f.add("facts_pending", true, "начисление из фактов неизвестно, не ноль — %s", p)
 	}
 	return nil
 }

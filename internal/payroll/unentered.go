@@ -222,6 +222,16 @@ func computeUnentered(ctx context.Context, q ledger.Querier, now time.Time) ([]u
 	if err != nil {
 		return nil, err
 	}
+	// From the switch to Hub's facts on, an empty cell is no gap: the facts accrue the day. What they could not is
+	// marked unknown (planFacts).
+	factsFrom, err := FactsFrom(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	plan, err := planFacts(ctx, q, factsFrom, now)
+	if err != nil {
+		return nil, err
+	}
 	nowMSK := now.In(ts.MSK)
 	today := time.Date(nowMSK.Year(), nowMSK.Month(), nowMSK.Day(), 0, 0, 0, 0, ts.MSK)
 	first := today.AddDate(0, 0, -unenteredDays)
@@ -321,7 +331,8 @@ func computeUnentered(ctx context.Context, q ledger.Querier, now time.Time) ([]u
 			if err != nil {
 				return nil, err
 			}
-			if date.Before(first) || date.After(until) || d.date < firstValue || d.hasValue() || d.date <= paid[t.person] {
+			if date.Before(first) || date.After(until) || d.date < firstValue || d.hasValue() || d.date <= paid[t.person] ||
+				(factsFrom != "" && d.date >= factsFrom) {
 				continue
 			}
 			if facts.cover(t.person, t.model, d.date) {
@@ -412,7 +423,11 @@ func computeUnentered(ctx context.Context, q ledger.Querier, now time.Time) ([]u
 		}
 		kept = append(kept, r)
 	}
-	return append(kept, fromFacts...), nil
+	kept = append(kept, fromFacts...)
+	if plan != nil {
+		kept = append(kept, plan.markers...)
+	}
+	return kept, nil
 }
 
 func personDay(person, model, date string) string {
