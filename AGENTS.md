@@ -73,6 +73,10 @@
   `ledger decision cancel <id> --note`; второе решение по той же продаже — только с `--supersedes <id>` открытого. Читают `read`, `payouts`,
   `reports`: `ledger decision list [--open] [--fan] [--person] [--from --to] [--json] [--md]`; `--md` — открытые списком, как файл памяти
   агента (файл — зеркало). У строк `GET /v1/reports` — поле `agreement`. Ничего не проводит.
+  Открытые вопросы «чья продажа» (кого спросили: `owner` или `chatters`) — `sale_questions`, те же права: `ledger question add …`,
+  `ledger question answer <id> [--decision <id>] [--answer "…"]`, `ledger question drop <id> --note`, `ledger question list [--open]
+  [--asked-of] [--fan] [--json] [--md]` (`--md` — «Ждёт Диму» и «Решают сами чаттеры»). Решение с `--answers <id>` закрывает открытый вопрос
+  в той же транзакции; закрытый или несуществующий вопрос — отказ, решение не пишется.
 - Общаки (R3): объявляет и меняет только владелец — `ledger pot declare <файл|-|JSON>` (право decide или рядом с базой; тот же slug —
   правка); покупки пишет агент (`reports`) или владелец: `ledger pot add-sale <код> --tx <ref>` (страница, фан, нетто и время — из
   `hub_sales`, иначе `--page --net --at`) или `--from-line <отчёт>:<n>`, `ledger pot remove-sale <id> --note` (строка остаётся);

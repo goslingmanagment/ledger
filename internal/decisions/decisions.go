@@ -79,6 +79,7 @@ type Input struct {
 	SourceLink     string  `json:"source_link,omitempty"`
 	Note           string  `json:"note,omitempty"`
 	Supersedes     *int64  `json:"supersedes,omitempty"`
+	Answers        *int64  `json:"answers,omitempty"` // the open question this decision answers (sale_questions.id)
 }
 
 // Decision is a stored decision as the API serves it.
@@ -203,6 +204,9 @@ func normalize(ctx context.Context, q ledger.Querier, in Input) (Input, error) {
 	if in.Supersedes != nil && *in.Supersedes <= 0 {
 		return in, refuse("supersedes: нужен номер решения больше нуля")
 	}
+	if in.Answers != nil && *in.Answers <= 0 {
+		return in, refuse("answers: нужен номер вопроса больше нуля")
+	}
 	switch in.Kind {
 	case KindOwner, KindSplit, KindOffPlatform:
 		if in.Pot != "" {
@@ -279,7 +283,8 @@ func checkShares(ctx context.Context, q ledger.Querier, kind string, shares []Sh
 }
 
 // Add checks a decision and writes it; a decision that supersedes another cancels it in the same transaction. A
-// decision on a sale that already has an open decision must name it in supersedes.
+// decision on a sale that already has an open decision must name it in supersedes. A decision that answers a question
+// closes that open question in the same transaction; a missing or closed question refuses the whole decision.
 func Add(ctx context.Context, store *db.Store, in Input, keyName string, now time.Time) (Decision, error) {
 	tx, err := store.RW.BeginTx(ctx, nil)
 	if err != nil {
@@ -337,6 +342,11 @@ func Add(ctx context.Context, store *db.Store, in Input, keyName string, now tim
 	if in.Supersedes != nil {
 		if _, err := tx.ExecContext(ctx, `UPDATE sale_decisions SET cancel_note = ? WHERE id = ?`,
 			fmt.Sprintf("заменено решением %d", id), *in.Supersedes); err != nil {
+			return Decision{}, err
+		}
+	}
+	if in.Answers != nil {
+		if err := closeQuestion(ctx, tx, *in.Answers, &id, "", now); err != nil {
 			return Decision{}, err
 		}
 	}
