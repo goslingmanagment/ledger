@@ -723,11 +723,22 @@ func Sources(ctx context.Context, e Env) Result {
 	return pass(name, "хаб, Bybit и сборщики мака в порядке")
 }
 
+// reportsOn says from which day the reports accrue ("" — they do not: the sheets still pay). While they do not, a post
+// the pay base cannot use and a shift without a report cost nobody anything: both checks pass and keep the list in
+// their details. From the switch day on they are warnings, and only for days the reports pay for.
+func reportsOn(ctx context.Context, e Env) (string, error) {
+	return payroll.ReportsFrom(ctx, e.Q)
+}
+
 // ReportPosts: the chatters' posts of the last 14 days that the pay base cannot use — an author or a page name not in
-// the settings, a total that does not add up, a date that does not read or lies far from the day of posting. A warning:
-// nothing is accrued from posts yet, but a missing mapping should be noticed before it is.
+// the settings, a total that does not add up, a date that does not read or lies far from the day of posting. A warning
+// once the reports accrue (reportsOn); before that, information.
 func ReportPosts(ctx context.Context, e Env) Result {
 	const name = "отчёты разобраны"
+	on, err := reportsOn(ctx, e)
+	if err != nil {
+		return fail(name, "warn", err.Error(), nil)
+	}
 	from := ts.Date(e.Now.Add(-13 * 24 * time.Hour))
 	list, err := reports.Posts(ctx, e.Q, from, ts.Date(e.Now), true)
 	if err != nil {
@@ -754,7 +765,14 @@ func ReportPosts(ctx context.Context, e Env) Result {
 		if p.ReportDate != nil {
 			date = *p.ReportDate
 		}
+		if on != "" && p.ReportDate != nil && *p.ReportDate < on {
+			continue // a day the sheets paid for
+		}
 		bad = append(bad, fmt.Sprintf("%s, %s (сообщение %d): %s", who, date, p.MsgID, strings.Join(why, "; ")))
+	}
+	if len(bad) > 0 && on == "" {
+		return Result{Name: name, OK: true, Severity: "info", Details: bad,
+			Summary: fmt.Sprintf("в тени, отчёты ещё не начисляют: %d постов «Отчётности» не идут в базу оплаты целиком — ledger report posts --flagged", len(bad))}
 	}
 	if len(bad) > 0 {
 		return fail(name, "warn", fmt.Sprintf("%d постов «Отчётности» не идут в базу оплаты целиком: %s", len(bad), strings.Join(bad, " | ")), bad)
@@ -763,18 +781,29 @@ func ReportPosts(ctx context.Context, e Env) Result {
 }
 
 // ShiftReports: every shift of Hub's team facts of the last 14 days that ended more than a day ago has the person's
-// posted report for its report date (payroll.ReportDate). A warning: before the switch to the reports nothing is
-// accrued from them, from it such a day is not accrued at all.
+// posted report for its report date (payroll.ReportDate). A warning once the reports accrue (reportsOn): from the
+// switch day such a day is not accrued at all. Before that, information.
 func ShiftReports(ctx context.Context, e Env) Result {
 	const name = "у смен есть отчёты"
+	on, err := reportsOn(ctx, e)
+	if err != nil {
+		return fail(name, "warn", err.Error(), nil)
+	}
 	today := ts.Date(e.Now)
 	from := ts.Date(e.Now.In(ts.MSK).AddDate(0, 0, -14))
+	if on > from {
+		from = on
+	}
 	gaps, err := payroll.ShiftsWithoutReport(ctx, e.Q, from, today, e.Now)
 	if err != nil {
 		return fail(name, "warn", err.Error(), nil)
 	}
 	if len(gaps) == 0 {
 		return pass(name, "у каждой законченной смены хаба за 14 дней есть опубликованный отчёт")
+	}
+	if on == "" {
+		return Result{Name: name, OK: true, Severity: "info", Details: gaps,
+			Summary: fmt.Sprintf("в тени, отчёты ещё не начисляют: %d смен без опубликованного отчёта за 14 дней", len(gaps))}
 	}
 	var parts []string
 	for _, g := range gaps {
