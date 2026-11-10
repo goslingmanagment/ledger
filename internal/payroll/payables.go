@@ -133,6 +133,9 @@ type CheckReport struct {
 	// ReportsFrom is the switch to the shift reports (settings.payroll_reports_from), the same way; only one of the two.
 	ReportsFrom string      `json:"reports_from,omitempty"`
 	Mirror      []MirrorDay `json:"mirror"`
+	// MirrorCells, under the reports, are the cells the sheets as last read hold differently from the posted reports:
+	// what `ledger mirror sheets` is for (mirrorLagCells).
+	MirrorCells int         `json:"mirror_cells,omitempty"`
 	Unaccrued   []Unaccrued `json:"unaccrued"`
 	// Pending are the changes of paid days waiting for the owner (payroll_pending_changes, open).
 	Pending []PendingChange `json:"pending_changes"`
@@ -170,6 +173,11 @@ func Check(ctx context.Context, q ledger.Querier) (CheckReport, error) {
 			return rep, err
 		}
 		rep.Unaccrued = append(rep.Unaccrued, plan.lost()...)
+		if source == SourceReports {
+			if rep.MirrorCells, err = mirrorLagCells(ctx, q, after); err != nil {
+				return rep, err
+			}
+		}
 	}
 	if rep.Pending, err = OpenChanges(ctx, q, ""); err != nil {
 		return rep, err

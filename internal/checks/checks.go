@@ -571,6 +571,9 @@ func Payables(ctx context.Context, e Env) Result {
 		}
 		summary += "; таблица-зеркало расходится в " + fmt.Sprint(len(c.Mirror)) + " дн.: " + strings.Join(parts, ", ")
 	}
+	if c.ReportsFrom != "" && c.MirrorCells > 0 {
+		summary += "; " + payroll.MirrorLagText(c.MirrorCells)
+	}
 	for _, u := range c.Unaccrued {
 		who := u.Username + " (хаб " + fmt.Sprint(u.UserID) + ")"
 		if u.Person != "" {

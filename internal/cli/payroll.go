@@ -529,6 +529,9 @@ func printMirror(w *bufio.Writer, c payroll.CheckReport) {
 		return
 	}
 	fmt.Fprintf(w, "\nС %s начисляют %s; таблицы — зеркало (разница с «К выплате» — их дни).\n", from, source)
+	if c.ReportsFrom != "" && c.MirrorCells > 0 {
+		fmt.Fprintln(w, payroll.MirrorLagText(c.MirrorCells))
+	}
 	if len(c.Mirror) > 0 {
 		fmt.Fprintf(w, "Таблица расходится с %s:\n", with)
 		for _, d := range c.Mirror {
