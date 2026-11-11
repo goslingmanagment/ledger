@@ -50,13 +50,23 @@ func ParseSet(spec string) (Decision, error) {
 	if !ok || err != nil || num <= 0 {
 		return Decision{}, fmt.Errorf("--set %s: нужно <номер>=<решение>[:текст]", spec)
 	}
-	kind, text, _ := strings.Cut(strings.TrimSpace(val), ":")
+	d, err := ParseDecision(val)
+	if err != nil {
+		return Decision{}, fmt.Errorf("--set %s: %w", spec, err)
+	}
+	d.Num = num
+	return d, nil
+}
+
+// ParseDecision reads "confirm", "custom:{…}", "recorded:388,389": a decision without an item number.
+func ParseDecision(spec string) (Decision, error) {
+	kind, text, _ := strings.Cut(strings.TrimSpace(spec), ":")
 	switch kind {
 	case Confirm, Personal, Custom, Defer, Recorded:
 	default:
-		return Decision{}, fmt.Errorf("--set %s: решение — confirm, personal, custom, defer или recorded", spec)
+		return Decision{}, errors.New("решение — confirm, personal, custom, defer или recorded")
 	}
-	return Decision{Num: num, Kind: kind, Text: strings.TrimSpace(text)}, nil
+	return Decision{Kind: kind, Text: strings.TrimSpace(text)}, nil
 }
 
 // Patch is the JSON of custom: fields over the suggested row; split makes several rows of it.
@@ -276,6 +286,7 @@ type Written struct {
 	Decision  string `json:"decision"`
 	Status    string `json:"status"`
 	Documents []int  `json:"documents,omitempty"`
+	Proposal  int64  `json:"proposal,omitempty"` // decided directly, without a brief
 }
 
 // Result of Decide.
@@ -287,30 +298,31 @@ type Result struct {
 }
 
 type planned struct {
-	d    Decision
-	item Item
-	p    Proposal
-	c    Content
-	docs []bybit.SuggestedDocument
-	nums []int
+	label string // «п.3» in a brief, «предложение #32» when decided directly
+	d     Decision
+	item  Item
+	p     Proposal
+	c     Content
+	docs  []bybit.SuggestedDocument
+	nums  []int
 }
 
 func validate(ctx context.Context, q ledger.Querier, mode string, b *Brief, d Decision) (planned, error) {
-	pl := planned{d: d}
+	for _, it := range b.Items {
+		if it.Num == d.Num {
+			return validateItem(ctx, q, mode, it, d, fmt.Sprintf("п.%d", d.Num))
+		}
+	}
+	return planned{d: d}, fmt.Errorf("нет пункта %d", d.Num)
+}
+
+// validateItem checks one decision on one question; label names it in the refusals.
+func validateItem(ctx context.Context, q ledger.Querier, mode string, it Item, d Decision, label string) (planned, error) {
+	pl := planned{label: label, d: d, item: it}
 	switch d.Kind {
 	case Confirm, Personal, Custom, Defer, Recorded:
 	default:
-		return pl, fmt.Errorf("п.%d: решение «%s»: допустимо confirm, personal, custom, defer, recorded", d.Num, d.Kind)
-	}
-	found := false
-	for _, it := range b.Items {
-		if it.Num == d.Num {
-			pl.item, found = it, true
-			break
-		}
-	}
-	if !found {
-		return pl, fmt.Errorf("нет пункта %d", d.Num)
+		return pl, fmt.Errorf("%s: решение «%s»: допустимо confirm, personal, custom, defer, recorded", label, d.Kind)
 	}
 	var err error
 	if pl.p, err = GetProposal(ctx, q, pl.item.ProposalID); err != nil {
@@ -321,13 +333,13 @@ func validate(ctx context.Context, q ledger.Querier, mode string, b *Brief, d De
 		return pl, err
 	}
 	if last.Version != pl.item.ProposalVersion {
-		return pl, fmt.Errorf("п.%d: предложение изменилось (в брифе версия %d, сейчас %d), нужен новый бриф", d.Num, pl.item.ProposalVersion, last.Version)
+		return pl, fmt.Errorf("%s: предложение изменилось (в брифе версия %d, сейчас %d), нужен новый бриф", label, pl.item.ProposalVersion, last.Version)
 	}
 	switch pl.p.Status {
 	case "open":
 	case "auto":
 		if d.Kind != Confirm {
-			return pl, fmt.Errorf("п.%d: записано само по правилу, исправление через ledger dispute", d.Num)
+			return pl, fmt.Errorf("%s: записано само по правилу, исправление через ledger dispute", label)
 		}
 		return pl, nil
 	default:
@@ -335,7 +347,7 @@ func validate(ctx context.Context, q ledger.Querier, mode string, b *Brief, d De
 		if pl.p.Decision != "" {
 			closedBy += ", " + pl.p.Decision
 		}
-		return pl, fmt.Errorf("п.%d уже закрыт (%s), решение не нужно", d.Num, closedBy)
+		return pl, fmt.Errorf("%s: вопрос уже закрыт (%s), решение не нужно", label, closedBy)
 	}
 	if pl.c, err = pl.p.ParseContent(); err != nil {
 		return pl, err
@@ -346,15 +358,15 @@ func validate(ctx context.Context, q ledger.Querier, mode string, b *Brief, d De
 	switch d.Kind {
 	case Confirm:
 		if pl.c.AwaitDeposit { // the row is the amount that reached the wallet: the bot has not said it yet
-			return pl, fmt.Errorf("п.%d: пополнение CinCin ждёт депозита от бота; отложи или custom с суммой, дошедшей до кошелька", d.Num)
+			return pl, fmt.Errorf("%s: пополнение CinCin ждёт депозита от бота; отложи или custom с суммой, дошедшей до кошелька", label)
 		}
 		if len(pl.c.Documents) == 0 {
-			return pl, fmt.Errorf("п.%d: предложенной строки нет, нужен custom, personal или recorded", d.Num)
+			return pl, fmt.Errorf("%s: предложенной строки нет, нужен custom, personal или recorded", label)
 		}
 		pl.docs = pl.c.Documents
 	case Custom:
 		if pl.docs, err = patched(pl.c, pl.c.Key, d.Text); err != nil {
-			return pl, fmt.Errorf("п.%d: %w", d.Num, err)
+			return pl, fmt.Errorf("%s: %w", label, err)
 		}
 	case Personal:
 		if pl.c.PersonalDraw {
@@ -366,17 +378,17 @@ func validate(ctx context.Context, q ledger.Querier, mode string, b *Brief, d De
 		text := d.Text
 		if text == "" {
 			if strings.Contains(pl.item.LedgerMatch, ",") || pl.item.LedgerMatch == "" {
-				return pl, fmt.Errorf("п.%d: recorded без номеров строк, а подсказка неоднозначна: recorded:<номер,номер>", d.Num)
+				return pl, fmt.Errorf("%s: recorded без номеров строк, а подсказка неоднозначна: recorded:<номер,номер>", label)
 			}
 			text = pl.item.LedgerMatch
 		}
 		if pl.nums, err = parseNums(text); err != nil {
-			return pl, fmt.Errorf("п.%d: %w", d.Num, err)
+			return pl, fmt.Errorf("%s: %w", label, err)
 		}
 		for _, n := range pl.nums {
 			if _, err := ledger.CurrentDocument(ctx, q, n); err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
-					return pl, fmt.Errorf("п.%d: строки #%d нет", d.Num, n)
+					return pl, fmt.Errorf("%s: строки #%d нет", label, n)
 				}
 				return pl, err
 			}
@@ -384,7 +396,7 @@ func validate(ctx context.Context, q ledger.Querier, mode string, b *Brief, d De
 	}
 	if len(pl.docs) > 0 {
 		if err := checkRows(ctx, q, pl.c, pl.docs); err != nil {
-			return pl, fmt.Errorf("п.%d: %w", d.Num, err)
+			return pl, fmt.Errorf("%s: %w", label, err)
 		}
 	}
 	return pl, nil
@@ -452,10 +464,80 @@ func Decide(ctx context.Context, q ledger.Querier, briefID int64, set []Decision
 	return res, nil
 }
 
+// DecideProposal applies one owner decision to one proposal without a brief: the owner said it in the chat
+// of the session that calls it. The proposal must be the latest version of its question; a question about
+// it in a brief is answered with it. A deferral has nothing to do here: the brief asks anyway.
+func DecideProposal(ctx context.Context, q ledger.Querier, id int64, d Decision, by string, now time.Time) (*Result, error) {
+	label := fmt.Sprintf("предложение #%d", id)
+	if d.Kind == Defer {
+		return nil, refuse("%s: defer без брифа не нужен, вопрос и так придёт в бриф", label)
+	}
+	p, err := GetProposal(ctx, q, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, refuse("%s не найдено", label)
+	}
+	if err != nil {
+		return nil, err
+	}
+	last, _, err := LatestProposal(ctx, q, p.Key)
+	if err != nil {
+		return nil, err
+	}
+	if last.ID != p.ID {
+		return nil, refuse("%s устарело: по %s сейчас #%d", label, p.Key, last.ID)
+	}
+	it := Item{ProposalID: p.ID, ProposalVersion: p.Version, Key: p.Key}
+	if d.Kind == Recorded && d.Text == "" {
+		c, err := p.ParseContent()
+		if err != nil {
+			return nil, err
+		}
+		matches, err := matchRows(ctx, q, c)
+		if err != nil {
+			return nil, err
+		}
+		it.LedgerMatch = matchText(matches)
+	}
+	mode, err := bybit.Mode(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	pl, err := validateItem(ctx, q, mode, it, d, label)
+	if err != nil {
+		return nil, &Refusal{Problems: []string{err.Error()}}
+	}
+	w, err := execute(ctx, q, mode, 0, pl, by, now)
+	if err != nil {
+		return nil, err
+	}
+	w.Proposal = p.ID
+	if err := closeResolved(ctx, q, now); err != nil {
+		return nil, err
+	}
+	text := fmt.Sprintf("%s (%s): %s, %s", label, p.Summary, d.Kind, w.Status)
+	if len(w.Documents) > 0 {
+		text += ", строки #" + formatNums(w.Documents)
+	}
+	return &Result{Mode: mode, Written: []Written{w}, Text: text}, nil
+}
+
 func execute(ctx context.Context, q ledger.Querier, mode string, briefID int64, pl planned, by string, now time.Time) (Written, error) {
 	w := Written{Num: pl.d.Num, Key: pl.item.Key, Decision: pl.d.Kind, Status: pl.p.Status}
 	at := ts.Format(now)
+	// Decided directly (briefID 0): no brief and item of its own; a question about it in a brief is
+	// answered with it, so the brief does not ask again.
+	var bID, bItem any
+	ref := fmt.Sprintf("ledger:proposal/%d", pl.p.ID)
+	if briefID != 0 {
+		bID, bItem = briefID, pl.d.Num
+		ref = fmt.Sprintf("ledger:%d/%d", briefID, pl.d.Num)
+	}
 	markItem := func() error {
+		if briefID == 0 {
+			_, err := q.ExecContext(ctx, `UPDATE brief_items SET decision = ?, decision_text = ?, decided_at = ?, decided_by = ?, document_nums = ?
+				WHERE proposal_id = ? AND decision IS NULL`, pl.d.Kind, pl.d.Text, at, by, formatNums(w.Documents), pl.p.ID)
+			return err
+		}
 		_, err := q.ExecContext(ctx, `UPDATE brief_items SET decision = ?, decision_text = ?, decided_at = ?, decided_by = ?, document_nums = ?
 			WHERE brief_id = ? AND num = ?`, pl.d.Kind, pl.d.Text, at, by, formatNums(w.Documents), briefID, pl.d.Num)
 		return err
@@ -468,7 +550,7 @@ func execute(ctx context.Context, q ledger.Querier, mode string, briefID int64, 
 	// the owner's answer itself closes it, and the row is for /OS.
 	if pl.p.Kind == KindAgent && mode != "live" && pl.d.Kind != Defer {
 		if _, err := q.ExecContext(ctx, `UPDATE proposals SET status = 'approved', decided_at = ?, decided_by = ?, decision = ?, decision_text = ?,
-			brief_id = ?, brief_item = ? WHERE id = ? AND status = 'open'`, at, by, pl.d.Kind, pl.d.Text, briefID, pl.d.Num, pl.p.ID); err != nil {
+			brief_id = ?, brief_item = ? WHERE id = ? AND status = 'open'`, at, by, pl.d.Kind, pl.d.Text, bID, bItem, pl.p.ID); err != nil {
 			return w, err
 		}
 		w.Status = "approved"
@@ -476,16 +558,15 @@ func execute(ctx context.Context, q ledger.Querier, mode string, briefID int64, 
 	}
 	if mode != "live" || pl.d.Kind == Defer {
 		if _, err := q.ExecContext(ctx, `UPDATE proposals SET decided_at = ?, decided_by = ?, decision = ?, decision_text = ?,
-			brief_id = ?, brief_item = ? WHERE id = ? AND status = 'open'`, at, by, pl.d.Kind, pl.d.Text, briefID, pl.d.Num, pl.p.ID); err != nil {
+			brief_id = ?, brief_item = ? WHERE id = ? AND status = 'open'`, at, by, pl.d.Kind, pl.d.Text, bID, bItem, pl.p.ID); err != nil {
 			return w, err
 		}
 		return w, markItem()
 	}
-	ref := fmt.Sprintf("ledger:%d/%d", briefID, pl.d.Num)
 	if len(pl.docs) > 0 {
 		nums, err := writeRows(ctx, q, pl.p, pl.c, pl.docs, "mark", pl.d.Kind, ref, by, now)
 		if err != nil {
-			return w, &Refusal{Problems: []string{fmt.Sprintf("п.%d: %v", pl.d.Num, err)}}
+			return w, &Refusal{Problems: []string{fmt.Sprintf("%s: %v", pl.label, err)}}
 		}
 		w.Documents = nums
 	}
@@ -501,12 +582,12 @@ func execute(ctx context.Context, q ledger.Querier, mode string, briefID int64, 
 		}
 	}
 	res, err := q.ExecContext(ctx, `UPDATE proposals SET status = 'approved', decided_at = ?, decided_by = ?, decision = ?, decision_text = ?,
-		brief_id = ?, brief_item = ? WHERE id = ? AND status = 'open'`, at, by, pl.d.Kind, pl.d.Text, briefID, pl.d.Num, pl.p.ID)
+		brief_id = ?, brief_item = ? WHERE id = ? AND status = 'open'`, at, by, pl.d.Kind, pl.d.Text, bID, bItem, pl.p.ID)
 	if err != nil {
 		return w, err
 	}
 	if n, _ := res.RowsAffected(); n != 1 {
-		return w, &Refusal{Problems: []string{fmt.Sprintf("п.%d: предложение закрылось во время решения", pl.d.Num)}}
+		return w, &Refusal{Problems: []string{fmt.Sprintf("%s: предложение закрылось во время решения", pl.label)}}
 	}
 	w.Status = "approved"
 	return w, markItem()

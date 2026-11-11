@@ -26,7 +26,7 @@ import (
 const (
 	ScopeRead    = "read"    // SQL and schema
 	ScopePropose = "propose" // proposals and disputes
-	ScopeDecide  = "decide"  // the owner's decisions from the brief: openclaw-main only
+	ScopeDecide  = "decide"  // the owner's decisions: openclaw-main from the brief, the owner's agent sessions one proposal at a time
 	ScopeCollect = "collect" // collectors on the Mac send events
 	ScopeImport  = "import"  // one-off imports
 	// ScopePayouts opens GET /v1/payouts, GET /v1/payouts/prepare, GET /v1/reports[/{id}], GET /v1/report-days,
