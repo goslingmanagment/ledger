@@ -170,6 +170,34 @@ func install(s *server.Server) {
 		}
 		server.WriteJSON(w, http.StatusOK, out)
 	})
+	handle("POST /v1/proposals/{id}/decide", auth.ScopeDecide, func(w http.ResponseWriter, r *http.Request) {
+		id, ok := pathID(w, r)
+		if !ok {
+			return
+		}
+		var in struct {
+			Decision string `json:"decision"`
+		}
+		if !decodeBody(w, r, &in) {
+			return
+		}
+		d, err := ParseDecision(in.Decision)
+		if err != nil {
+			fail(s, w, &Refusal{Problems: []string{err.Error()}})
+			return
+		}
+		var out *Result
+		err = InTx(r.Context(), s.Store, func(tx *sql.Tx) error {
+			var err error
+			out, err = DecideProposal(r.Context(), tx, id, d, auth.KeyName(r.Context()), ts.Now())
+			return err
+		})
+		if err != nil {
+			fail(s, w, err)
+			return
+		}
+		server.WriteJSON(w, http.StatusOK, out)
+	})
 	handle("GET /v1/pending", auth.ScopeRead, func(w http.ResponseWriter, r *http.Request) {
 		list, err := Pending(r.Context(), s.Store.RO)
 		if err != nil {

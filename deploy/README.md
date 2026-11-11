@@ -46,7 +46,7 @@ bash deploy/release.sh --build-here  # пока CI на маке (CI_POOL=pc): �
 На VPS, `cd /opt/ledger`; ключ печатается один раз, в базе остаётся только SHA-256:
 
 ```
-bash deploy/compose.sh exec -T app ledger keys create bobr --scope read,propose   # агенты: read,propose; decide — только openclaw-main (read,propose,decide)
+bash deploy/compose.sh exec -T app ledger keys create bobr --scope read,propose   # агенты: read,propose; decide — openclaw-main и сессии владельца claude-mac, codex-mac (read,propose,decide)
 bash deploy/compose.sh exec -T app ledger keys list
 bash deploy/compose.sh exec -T app ledger keys revoke bobr                   # действует сразу
 bash deploy/compose.sh exec -T app ledger keys create bobr --scope read,propose --replace   # новый вместо прежнего

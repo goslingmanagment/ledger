@@ -22,7 +22,7 @@ func init() {
 	Command(Cmd{Name: "brief", Summary: "бриф владельцу: открытый неотправленный или новый из открытых предложений [--text] [--new]; пусто — так и скажет", Run: briefCmd})
 	Command(Cmd{Name: "brief-sent", Summary: "бриф дошёл до владельца: --brief N (считаются только отправленные)", Run: briefSent})
 	Command(Cmd{Name: "pending", Summary: "открытые брифы, где ещё есть что решать [--json]", Run: pendingCmd})
-	Command(Cmd{Name: "decide", Summary: "решения владельца одним набором: --brief N --set 1=confirm --set 2=personal --set 3=custom:{…} --set 4=defer --set 5=recorded:388,389", Run: decideCmd})
+	Command(Cmd{Name: "decide", Summary: "решения владельца одним набором: --brief N --set 1=confirm --set 2=personal --set 3=custom:{…} --set 4=defer --set 5=recorded:388,389; один пункт без брифа (владелец сказал в чате сессии): --proposal N --set confirm|personal|custom:{…}|recorded:388", Run: decideCmd})
 	Command(Cmd{Name: "propose", Summary: "своё предложение агента о деньгах мимо сборщиков: ledger propose <json|->", Run: proposeCmd})
 	Command(Cmd{Name: "rule add", Summary: "запомнить ответ: --kind counterparty|ignore|merchant --uid|--address|--prefix --suffix|--merchant --direction --name --category [--model] [--note]", Run: ruleAdd})
 	Command(Cmd{Name: "note add", Summary: "заметка для расследований: [--status confirmed|hypothesis|refuted|info] \"текст\"", Run: noteAdd})
@@ -175,10 +175,14 @@ func pendingCmd(ctx context.Context, args []string) error {
 func decideCmd(ctx context.Context, args []string) error {
 	fs := Flags("decide")
 	id := fs.Int64("brief", 0, "номер брифа")
+	proposal := fs.Int64("proposal", 0, "номер предложения: решить его без брифа")
 	var sets multi
-	fs.Var(&sets, "set", "<номер>=confirm|personal|custom:…|defer|recorded[:номера]; можно несколько")
+	fs.Var(&sets, "set", "<номер>=confirm|personal|custom:…|defer|recorded[:номера]; можно несколько; с --proposal одно и без номера")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *proposal > 0 {
+		return decideProposal(ctx, *id, *proposal, sets)
 	}
 	if *id <= 0 || len(sets) == 0 {
 		return Exit{Code: 2, Msg: "нужны --brief N и хотя бы один --set"}
@@ -202,6 +206,30 @@ func decideCmd(ctx context.Context, args []string) error {
 			return refused(err)
 		}
 	} else if err := call(ctx, http.MethodPost, fmt.Sprintf("/v1/brief/%d/decide", *id), map[string]any{"set": set}, &out); err != nil {
+		return err
+	}
+	return printJSON(out)
+}
+
+func decideProposal(ctx context.Context, briefID, id int64, sets multi) error {
+	if briefID > 0 || len(sets) != 1 {
+		return Exit{Code: 2, Msg: "с --proposal N нужен ровно один --set без номера пункта и без --brief"}
+	}
+	d, err := brief.ParseDecision(sets[0])
+	if err != nil {
+		return Exit{Code: 2, Msg: "--set " + sets[0] + ": " + err.Error()}
+	}
+	var out *brief.Result
+	if local() {
+		err := writeLocal(ctx, func(tx *sql.Tx) error {
+			var err error
+			out, err = brief.DecideProposal(ctx, tx, id, d, localAuthor(), time.Now())
+			return err
+		})
+		if err != nil {
+			return refused(err)
+		}
+	} else if err := call(ctx, http.MethodPost, fmt.Sprintf("/v1/proposals/%d/decide", id), map[string]any{"decision": sets[0]}, &out); err != nil {
 		return err
 	}
 	return printJSON(out)

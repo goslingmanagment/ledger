@@ -1018,6 +1018,12 @@ func TestAPIScopes(t *testing.T) {
 	if err := s.RW.QueryRow(`SELECT decided_by FROM brief_items WHERE brief_id = ? AND num = 1`, id).Scan(&by); err != nil || by != "decider" {
 		t.Fatal(by, err)
 	}
+	if code, _ := call("POST", "/v1/proposals/1/decide", proposer, `{"decision":"confirm"}`); code != 403 {
+		t.Fatal(code)
+	}
+	if code, out := call("POST", "/v1/proposals/1/decide", decider, `{"decision":"defer"}`); code != 422 || !strings.Contains(fmt.Sprint(out["error"]), "без брифа") {
+		t.Fatal(code, out)
+	}
 	if code, out := call("POST", fmt.Sprintf("/v1/brief/%d/sent", id), proposer, ""); code != 200 || out["sent_at"] == nil {
 		t.Fatal(code, out)
 	}
@@ -1080,5 +1086,71 @@ func TestLiveCustomOfACoinTheOwnerPutsInDollars(t *testing.T) {
 	d, err := ledger.CurrentDocument(ctx, s.RW, 4)
 	if err != nil || d.Amount != "1200.00" || d.Date != "2026-09-05" || d.Note != "по курсу на день; withdrawal:1" {
 		t.Fatalf("%+v %v", d, err)
+	}
+}
+
+func TestDecideProposalWithoutABrief(t *testing.T) {
+	s, ctx := open(t, "live")
+	event := movement(t, s, ctx, "withdrawal", "1", "expense", "TaddrU", "100", "1.5", "2026-09-05T10:00:00+03:00")
+	b := makeBrief(t, s, ctx, Options{}, day)
+	if _, err := MarkSent(ctx, s.RW, b.ID, day); err != nil {
+		t.Fatal(err)
+	}
+	var id int64
+	if err := s.RW.QueryRow(`SELECT id FROM proposals WHERE key = 'withdrawal:1' AND status = 'open'`).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	direct := func(spec string) (*Result, error) {
+		d, err := ParseDecision(spec)
+		if err != nil {
+			return nil, err
+		}
+		var res *Result
+		err = InTx(ctx, s, func(tx *sql.Tx) error {
+			var err error
+			res, err = DecideProposal(ctx, tx, id, d, "session-key", day)
+			return err
+		})
+		return res, err
+	}
+	for spec, want := range map[string]string{
+		"defer":                     "без брифа",
+		"confirm":                   "предложенной строки нет",
+		`custom:{"category":"X"}`:   "контрагента",
+		`custom:{"unknown":"поле"}`: "unknown",
+	} {
+		if _, err := direct(spec); err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("%s: %v", spec, err)
+		}
+	}
+	if n := count(t, s, `SELECT count(*) FROM documents WHERE num >= 4`); n != 0 {
+		t.Fatalf("rows %d", n)
+	}
+	res, err := direct(`custom:{"category":"Трафик","counterparty":"Подрядчик Б"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := res.Written[0]; fmt.Sprint(w.Documents) != "[4 5]" || w.Proposal != id || w.Status != "approved" {
+		t.Fatalf("%+v", w)
+	}
+	row, err := ledger.CurrentDocument(ctx, s.RW, 4)
+	if err != nil || row.Category != "Трафик" || row.Amount != "100.00" || row.Author != "session-key" {
+		t.Fatalf("%+v %v", row, err)
+	}
+	if n := count(t, s, `SELECT count(*) FROM proposals WHERE id = ? AND status = 'approved' AND decided_by = 'session-key' AND brief_id IS NULL`, id); n != 1 {
+		t.Fatal("proposal not closed by the session")
+	}
+	if n := count(t, s, `SELECT count(*) FROM event_links WHERE event_id = ? AND brief_ref = ?`, event, fmt.Sprintf("ledger:proposal/%d", id)); n != 2 {
+		t.Fatalf("links %d", n)
+	}
+	// the question in the sent brief is answered with it, and the brief does not ask again
+	if n := count(t, s, `SELECT count(*) FROM brief_items WHERE brief_id = ? AND decision = 'custom' AND decided_by = 'session-key'`, b.ID); n != 1 {
+		t.Fatal("brief item not answered")
+	}
+	if next := makeBrief(t, s, ctx, Options{New: true}, day); next != nil {
+		t.Fatalf("asked again: %s", nums(next))
+	}
+	if _, err := direct("confirm"); err == nil || !strings.Contains(err.Error(), "уже закрыт") {
+		t.Fatal(err)
 	}
 }
