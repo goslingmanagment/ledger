@@ -39,10 +39,14 @@ const (
 	// purchases (POST /v1/pots/{slug}/sales, POST /v1/pot-sales/{id}/remove) and reading the pots, and nothing else:
 	// the team's chat agent saves the breakdown of a shift report and what it was told with it.
 	ScopeReports = "reports"
+	// ScopeBudgets opens GET /v1/budgets (the budget by month: the journal's paid rows, plans, the pages' turnover plan,
+	// the month cards) and POST /v1/budgets/plans, and nothing else: Hub's server shows the owner his budgets with it
+	// and writes the plans he sets in the console. No SQL, no people's debts, no reports.
+	ScopeBudgets = "budgets"
 )
 
 // Scopes lists every scope in canonical order.
-var Scopes = []string{ScopeRead, ScopePropose, ScopeDecide, ScopeCollect, ScopeImport, ScopePayouts, ScopeReports}
+var Scopes = []string{ScopeRead, ScopePropose, ScopeDecide, ScopeCollect, ScopeImport, ScopePayouts, ScopeReports, ScopeBudgets}
 
 // Errors callers branch on.
 var (
