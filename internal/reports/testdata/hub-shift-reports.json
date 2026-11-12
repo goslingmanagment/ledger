@@ -1,0 +1,88 @@
+[
+  {
+    "id": 101, "person": "anna", "hubUserId": 41, "shiftId": 11, "reportDate": "2026-11-10", "version": 1,
+    "submittedAt": "2026-11-11T00:12:00.000Z", "door": "workboard", "telegramMessageRef": null,
+    "totalMills": 100000,
+    "pages": [{"pageLabel": "page-a", "amountMills": 100000}],
+    "lines": [
+      {"transactionId": 9001, "pageLabel": "page-a", "group": "mine", "netMills": 80000, "ruleShareMills": 80000,
+       "ruleHome": "shift", "ruleReason": "holder", "statement": null, "shareWithUserId": null, "note": null,
+       "amountMills": 80000, "added": false, "disputed": false},
+      {"transactionId": 9002, "pageLabel": "page-a", "group": "near", "netMills": 20000, "ruleShareMills": 0,
+       "ruleHome": "shift", "ruleReason": "last_writer", "statement": "mine", "shareWithUserId": null, "note": "мой фан, писала вчера",
+       "amountMills": 20000, "added": false, "disputed": true}
+    ],
+    "offPlatform": [{"id": 1, "amountMills": 15000, "fromWhom": "фан с сайта", "whatFor": "кастом", "state": "pending"}],
+    "comment": "", "dayPaid": false, "ruleVersion": "c2"
+  },
+  {
+    "id": 102, "person": "boris", "hubUserId": 42, "shiftId": 21, "reportDate": "2026-11-10", "version": 1,
+    "submittedAt": "2026-11-10T14:05:00.000Z", "door": "extension", "telegramMessageRef": null,
+    "totalMills": 30000,
+    "pages": [{"pageLabel": "page-a", "amountMills": 30000}],
+    "lines": [
+      {"transactionId": 9003, "pageLabel": "page-a", "group": "mine", "netMills": 29996, "ruleShareMills": 29996,
+       "ruleHome": "shift", "ruleReason": "ppv_sender", "statement": null, "shareWithUserId": null, "note": null,
+       "amountMills": 29996, "added": false, "disputed": false}
+    ],
+    "offPlatform": [], "comment": "утро", "dayPaid": null, "ruleVersion": "c2"
+  },
+  {
+    "id": 103, "person": "anna", "hubUserId": 41, "shiftId": 11, "reportDate": "2026-11-10", "version": 2,
+    "submittedAt": "2026-11-11T09:40:00.000Z", "door": "telegram", "telegramMessageRef": "tg:-1001000000001:777",
+    "totalMills": 120000,
+    "pages": [{"pageLabel": "page-a", "amountMills": 120000}],
+    "lines": [
+      {"transactionId": 9001, "pageLabel": "page-a", "group": "mine", "netMills": 80000, "ruleShareMills": 80000,
+       "ruleHome": "shift", "ruleReason": "holder", "statement": null, "shareWithUserId": null, "note": null,
+       "amountMills": 80000, "added": false, "disputed": false},
+      {"transactionId": 9002, "pageLabel": "page-a", "group": "near", "netMills": 20000, "ruleShareMills": 0,
+       "ruleHome": "shift", "ruleReason": "last_writer", "statement": "mine", "shareWithUserId": null, "note": "мой фан, писала вчера",
+       "amountMills": 20000, "added": false, "disputed": true},
+      {"transactionId": 9004, "pageLabel": "page-a", "group": "mine", "netMills": 40000, "ruleShareMills": 40000,
+       "ruleHome": "shift", "ruleReason": "holder", "statement": "share", "shareWithUserId": 42, "note": "делим с утренней",
+       "amountMills": 20000, "added": true, "disputed": false}
+    ],
+    "offPlatform": [{"id": 1, "amountMills": 15000, "fromWhom": "фан с сайта", "whatFor": "кастом", "state": "pending"}],
+    "comment": "добавила долёт", "dayPaid": false, "ruleVersion": "c2"
+  },
+  {
+    "id": 104, "person": "boris", "hubUserId": 42, "shiftId": 22, "reportDate": "2026-11-10", "version": 1,
+    "submittedAt": "2026-11-10T23:58:00.000Z", "door": "workboard", "telegramMessageRef": null,
+    "totalMills": 25000,
+    "pages": [{"pageLabel": "page-a", "amountMills": 5000}, {"pageLabel": "page-b", "amountMills": 20000}],
+    "lines": [
+      {"transactionId": 9005, "pageLabel": "page-a", "group": "mine", "netMills": 5000, "ruleShareMills": 5000,
+       "ruleHome": "shift", "ruleReason": "holder", "statement": null, "shareWithUserId": null, "note": null,
+       "amountMills": 5000, "added": false, "disputed": false},
+      {"transactionId": 9006, "pageLabel": "page-b", "group": "mine", "netMills": 20000, "ruleShareMills": 20000,
+       "ruleHome": "shift", "ruleReason": "holder", "statement": null, "shareWithUserId": null, "note": null,
+       "amountMills": 20000, "added": false, "disputed": false}
+    ],
+    "offPlatform": [], "comment": "вечер", "dayPaid": false, "ruleVersion": "c2"
+  },
+  {
+    "id": 105, "person": "vera", "hubUserId": 43, "shiftId": 31, "reportDate": "2026-11-10", "version": 1,
+    "submittedAt": "2026-11-10T20:00:00.000Z", "door": "workboard", "telegramMessageRef": null,
+    "totalMills": 10000,
+    "pages": [{"pageLabel": "page-a", "amountMills": 10000}],
+    "lines": [
+      {"transactionId": 9007, "pageLabel": "page-a", "group": "mine", "netMills": 10000, "ruleShareMills": 10000,
+       "ruleHome": "shift", "ruleReason": "holder", "statement": null, "shareWithUserId": null, "note": null,
+       "amountMills": 10000, "added": false, "disputed": false}
+    ],
+    "offPlatform": [], "comment": "", "dayPaid": false, "ruleVersion": "c2"
+  },
+  {
+    "id": 106, "person": "anna", "hubUserId": 41, "shiftId": 12, "reportDate": "2026-11-11", "version": 1,
+    "submittedAt": "2026-11-12T00:30:00.000Z", "door": "workboard", "telegramMessageRef": null,
+    "totalMills": 7000,
+    "pages": [{"pageLabel": "page-z", "amountMills": 7000}],
+    "lines": [
+      {"transactionId": 9008, "pageLabel": "page-z", "group": "mine", "netMills": 7000, "ruleShareMills": 7000,
+       "ruleHome": "shift", "ruleReason": "holder", "statement": null, "shareWithUserId": null, "note": null,
+       "amountMills": 7000, "added": false, "disputed": false}
+    ],
+    "offPlatform": [], "comment": "", "dayPaid": false, "ruleVersion": "c2"
+  }
+]

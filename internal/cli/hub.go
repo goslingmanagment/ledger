@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/goslingmanagment/ledger/internal/hub"
+	"github.com/goslingmanagment/ledger/internal/reports"
 	"github.com/goslingmanagment/ledger/internal/ts"
 )
 
@@ -20,6 +21,7 @@ func init() {
 	Command(Cmd{Name: "hub status", Summary: "что хаб доказал по каждой странице и датасету и по неделям фактов команды", Run: hubStatus})
 	Command(Cmd{Name: "hub team-sync", Summary: "прочитать факты смен и продаж хаба по неделям: [--from ГГГГ-ММ-ДД] [--to ГГГГ-ММ-ДД]", Run: hubTeamSync})
 	Command(Cmd{Name: "hub net", Summary: "оборот страниц месяца по зеркалу хаба: --month ГГГГ-ММ [--as-of]", Run: hubNet})
+	Command(Cmd{Name: "hub reports-sync", Summary: "прочитать отчёты смен, сданные в хабе, сейчас, как джоб hub-reports (рядом с базой)", Run: hubReportsSync})
 }
 
 func importHubExceptions(ctx context.Context, args []string) error {
@@ -218,6 +220,33 @@ func hubTeamSync(ctx context.Context, args []string) error {
 	}
 	if n := rep.Unknown(); n > 0 {
 		return Exit{Code: 3, Msg: fmt.Sprintf("хаб не доказал %d окон из %d — «неизвестно», см. reasons", n, len(rep.Windows))}
+	}
+	return nil
+}
+
+// hubReportsSync reads Hub's feed of the handed-in shift reports now, as the job hub-reports does, next to the database.
+func hubReportsSync(ctx context.Context, args []string) error {
+	if _, err := ParseArgs(Flags("hub reports-sync"), args); err != nil {
+		return err
+	}
+	cfg, err := hub.ConfigFromEnv()
+	if err != nil {
+		return err
+	}
+	store, err := OpenStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	st, err := reports.SyncHub(ctx, store, hub.NewClient(cfg, nil), time.Now())
+	if perr := printJSON(st); perr != nil {
+		return perr
+	}
+	if err != nil {
+		return Exit{Code: 3, Msg: "лента хаба не прочитана целиком: " + err.Error()}
+	}
+	if st.Problems > 0 {
+		return Exit{Code: 3, Msg: fmt.Sprintf("%d версий не сохранены — ledger health", st.Problems)}
 	}
 	return nil
 }

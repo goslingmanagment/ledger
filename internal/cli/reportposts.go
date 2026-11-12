@@ -96,17 +96,31 @@ func reportDays(ctx context.Context, args []string) error {
 		return usd(*v)
 	}
 	states := map[string]string{reports.StatePostedEqual: "пост = черновик", reports.StatePostedChanged: "пост ≠ черновик",
-		reports.StatePostOnly: "только пост", reports.StateDraftOnly: "только черновик"}
+		reports.StatePostOnly: "только пост", reports.StateDraftOnly: "только черновик", reports.StateHubOnly: "только хаб"}
+	hubStates := map[string]string{reports.StateHubEqual: "пост = хаб", reports.StateHubChanged: "пост ≠ хаб",
+		reports.StateHubOnly: "в посте нет", reports.StateHubMissing: "в хабе нет"}
 	rows := make([][]string, 0, len(ans.Days))
 	for _, d := range ans.Days {
 		state := states[d.State]
 		if d.DiffMicros != nil && *d.DiffMicros != 0 {
 			state += " (" + signedUSD(*d.DiffMicros) + ")"
 		}
-		rows = append(rows, []string{d.ReportDate, d.Person, d.Page, opt(d.PostedMicros), opt(d.DraftMicros), state})
+		hubState := ""
+		if d.HubState != nil {
+			hubState = hubStates[*d.HubState]
+			if d.HubDiffMicros != nil && *d.HubDiffMicros != 0 {
+				hubState += " (" + signedUSD(*d.HubDiffMicros) + ")"
+			}
+		}
+		basis := "пост"
+		if d.Basis == reports.BasisHub {
+			basis = "хаб"
+		}
+		rows = append(rows, []string{d.ReportDate, d.Person, d.Page, opt(d.PostedMicros), opt(d.DraftMicros), opt(d.HubMicros), state, hubState,
+			basis})
 	}
-	writeTable(out, []string{"дата", "человек", "страница", "пост", "черновик", "состояние"}, rows,
-		[]bool{false, false, false, true, true, false})
+	writeTable(out, []string{"дата", "человек", "страница", "пост", "черновик", "хаб", "пост и черновик", "пост и хаб", "основа"}, rows,
+		[]bool{false, false, false, true, true, true, false, false, false})
 	return out.Flush()
 }
 

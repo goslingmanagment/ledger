@@ -53,6 +53,31 @@ type Diff struct {
 	Unmapped   []Unmapped `json:"unmapped"`
 	// ReportsFrom is the switch to the shift reports (settings.payroll_reports_from); "" — the reports are a shadow.
 	ReportsFrom string `json:"reportsFrom,omitempty"`
+	// HubFrom is the day from which a reports day accrues from the report handed in in Hub (payroll_basis_hub_from); ""
+	// — the posts only. HubDays are the week's days where Hub's handed-in report and the post differ.
+	HubFrom string   `json:"hubFrom,omitempty"`
+	HubDays []HubDay `json:"hubDays"`
+}
+
+// HubDay is a person's day where the report handed in in Hub and the post differ — a page by another amount, or on one
+// side only — with every page of the day that Hub or the post has.
+type HubDay struct {
+	Person string `json:"person"`
+	Name   string `json:"name"`
+	Day    string `json:"day"`
+	// Basis is what accrues the day: hub — Hub's report (from HubFrom), post — the post.
+	Basis      string    `json:"basis"`
+	PostMicros *int64    `json:"postMicros"` // the post's pages added up; nil — no post
+	HubMicros  *int64    `json:"hubMicros"`  // Hub's pages added up
+	Pages      []HubPage `json:"pages"`
+}
+
+// HubPage is a page of a HubDay: the post's amount and Hub's (nil — not on that side), and how they compare.
+type HubPage struct {
+	Page       string `json:"page"`
+	PostMicros *int64 `json:"postMicros"`
+	HubMicros  *int64 `json:"hubMicros"`
+	State      string `json:"state"` // hub_equal, hub_changed, hub_only, hub_missing
 }
 
 // WeekFacts says whether the week's facts are proven.
@@ -270,6 +295,9 @@ func WeekDiff(ctx context.Context, q ledger.Querier, week string) (Diff, error) 
 	}
 
 	if err := addReports(ctx, q, &d, known); err != nil {
+		return d, err
+	}
+	if err := addHub(ctx, q, &d); err != nil {
 		return d, err
 	}
 
