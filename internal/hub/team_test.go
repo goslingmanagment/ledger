@@ -383,3 +383,36 @@ func mustRun(t *testing.T, b *bench, sy *TeamSyncer, fault string) TeamReport {
 	}
 	return rep
 }
+
+// A sale Hub serves without its fan after a fan erasure keeps the fan's reference here until ledger's own erasure job
+// (internal/erasure) has cleared the words about the fan: that reference is how the job finds the fan's sales, and the
+// hourly read of the last weeks must not cut it first.
+func TestASalesFanIsKeptUntilTheErasureJobClearsIt(t *testing.T) {
+	b, sy := newTeamBench(t, "2026-11-25T12:00:00+03:00")
+	h := &b.hub.team
+	a := teamShift(101, "shift", "2026-11-24T09:00:00+03:00", "2026-11-24T17:00:00+03:00", "alfa-1")
+	h.works = []map[string]any{a}
+	sale := teamSaleOf("3", "alfa-1", "ppv", "2026-11-24T10:00:00+03:00", 5_000, a)
+	h.sales = []map[string]any{sale}
+	setTeamSince(b, "2026-11-23")
+	if _, err := sy.Hourly(b.ctx); err != nil {
+		t.Fatal(err)
+	}
+	sale["fanRef"] = nil // Hub erased the fan
+	b.clock.advance(time.Hour)
+	if _, err := sy.Hourly(b.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := b.count(`SELECT count(*) FROM hub_sales WHERE transaction_ref = '3' AND json_extract(payload, '$.fanRef') = 'fan-3'`); n != 1 {
+		t.Fatal("the fan's reference was cut before the erasure job")
+	}
+	// Once the job has cleared it, it stays cleared.
+	b.exec(`UPDATE hub_sales SET payload = json_set(payload, '$.fanRef', json('null')) WHERE transaction_ref = '3'`)
+	b.clock.advance(time.Hour)
+	if _, err := sy.Hourly(b.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := b.count(`SELECT count(*) FROM hub_sales WHERE transaction_ref = '3' AND json_extract(payload, '$.fanRef') IS NULL`); n != 1 {
+		t.Fatal("the cleared reference came back")
+	}
+}
