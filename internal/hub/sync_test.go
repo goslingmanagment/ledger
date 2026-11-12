@@ -465,3 +465,35 @@ func TestOneSyncAtATime(t *testing.T) {
 		t.Fatalf("after release: %v", err)
 	}
 }
+
+// A page of a platform without sales (Telegram) in the key's grant is no source: nothing is fetched for it and no
+// status row says «неизвестно». A page that left the grant without ever being proven leaves no status behind; one
+// proven before keeps alarming (a lost grant of a real source must be noticed).
+func TestAPageWithoutSalesOrNeverProvenIsNoSource(t *testing.T) {
+	b := newBench(t)
+	b.hub.tx("alfa-of", "1", "2026-09-02T10:00:00Z", "tip", 10_000, "USD", "101")
+	b.hub.grant = append(b.hub.grant, GrantPage{PageLabel: "alfa-tg", Platform: "telegram", ModelSlug: "Alfa", ModelName: "Alfa"})
+	b.sync()
+	if st, _ := loadStatus(b.ctx, b.store.RW, "alfa-tg", "transactions"); st != nil {
+		t.Fatalf("a page without sales was fetched: %+v", st)
+	}
+	// As an older ledger left it: a status row of a page never proven, which then leaves the grant.
+	b.exec(`INSERT INTO hub_sync(page_label, dataset, status, reasons, checked_at) VALUES ('beta-x', 'transactions', 'unknown',
+		'["no dataset"]', '2026-11-04T06:00:00+03:00')`)
+	b.hub.grant = b.hub.grant[:1] // alfa-of and alfa-tg leave the grant
+	b.clock.advance(time.Hour)
+	b.sync()
+	sts, err := Statuses(b.ctx, b.store.RO)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var left []string
+	for _, s := range sts {
+		if s.Status != "ok" {
+			left = append(left, s.Page+"/"+s.Dataset)
+		}
+	}
+	if strings.Join(left, ",") != "alfa-of/ofapi_payout_requests,alfa-of/transactions" {
+		t.Fatalf("statuses not ok: %v", left)
+	}
+}

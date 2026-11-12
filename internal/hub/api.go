@@ -330,6 +330,26 @@ type Page struct {
 	Model     string `json:"model"` // hub_model_slugs of modelSlug, or modelSlug itself
 }
 
+// NoSalePages are the pages of the grant whose platform has no sales, «label (platform)»: skipped by the money.
+func NoSalePages(ctx context.Context, q ledger.Querier) ([]string, error) {
+	rows, err := q.QueryContext(ctx, `SELECT page_label, platform FROM hub_pages ORDER BY page_label`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var label, platform string
+		if err := rows.Scan(&label, &platform); err != nil {
+			return nil, err
+		}
+		if !HasSales(platform) {
+			out = append(out, label+" ("+platform+")")
+		}
+	}
+	return out, rows.Err()
+}
+
 // GrantPages returns the grant of the last run (month.py Hub.pages).
 func GrantPages(ctx context.Context, q ledger.Querier) ([]Page, error) {
 	st, err := loadStatus(ctx, q, "*", "capabilities")
@@ -559,6 +579,9 @@ func MonthNet(ctx context.Context, q ledger.Querier, month string, asOf time.Tim
 	for _, g := range grant {
 		if _, ok := routes[g.Label]; ok {
 			continue
+		}
+		if !HasSales(g.Platform) {
+			continue // a page of a platform without sales (Telegram): no money of its own
 		}
 		pn := PageNet{Page: g.Label, Model: g.Model, Status: "ok",
 			Notes: []string{g.Label + ": страница без строки в таблице маршрутов — условия не согласованы, в цифру не входит"}}

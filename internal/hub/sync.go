@@ -185,6 +185,10 @@ func (s *Syncer) Run(ctx context.Context, pages []string) (rep Report, err error
 		if !ok {
 			return rep, fmt.Errorf("страницы %s нет в гранте ключа хаба", label)
 		}
+		if !HasSales(p.Platform) {
+			s.logf("%s (%s): площадка без продаж — не выгружается", label, p.Platform)
+			continue
+		}
 		steps := []string{"transactions"}
 		switch p.Platform {
 		case "fansly":
@@ -858,14 +862,28 @@ func failStatus(ctx context.Context, tx *sql.Tx, page, ds string, reasons []stri
 	return err
 }
 
-// saveGrant replaces the grant; datasets of a page that left it become unknown.
+// NoSalePlatforms are Hub's platforms whose pages have no money datasets (no sales, no transactions): such a page (a
+// Telegram channel) is in the key's grant for a handed-in report's lines only and is never a source of money here.
+var NoSalePlatforms = map[string]bool{"telegram": true}
+
+// HasSales says a page's platform has money datasets; any platform but the ones known to have none.
+func HasSales(platform string) bool { return !NoSalePlatforms[platform] }
+
+// saveGrant replaces the grant. Datasets of a page that left it become unknown once they were proven (a lost grant of
+// a real source is noticed); a status a page never proved — it left the grant, or its platform has no sales — is no
+// source and goes.
 func saveGrant(ctx context.Context, tx *sql.Tx, grant []GrantPage, now time.Time, requests int) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM hub_pages`); err != nil {
 		return err
 	}
 	in := map[string]bool{"*": true}
+	var noSales []string
 	for _, p := range grant {
-		in[p.PageLabel] = true
+		if !HasSales(p.Platform) {
+			noSales = append(noSales, p.PageLabel)
+		} else {
+			in[p.PageLabel] = true
+		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO hub_pages(page_label, platform, model_slug, model_name, seen_at)
 			VALUES (?, ?, ?, ?, ?)`, p.PageLabel, p.Platform, p.ModelSlug, p.ModelName, ts.Format(now)); err != nil {
 			return err
@@ -887,6 +905,16 @@ func saveGrant(ctx context.Context, tx *sql.Tx, grant []GrantPage, now time.Time
 		}
 	}
 	rows.Close()
+	for _, p := range append(gone, noSales...) {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM hub_sync WHERE page_label = ? AND ok_at IS NULL`, p); err != nil {
+			return err
+		}
+	}
+	for _, p := range noSales {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM hub_sync WHERE page_label = ?`, p); err != nil {
+			return err
+		}
+	}
 	for _, p := range gone {
 		rs, _ := json.Marshal([]string{"страницы " + p + " нет в гранте ключа хаба"})
 		if _, err := tx.ExecContext(ctx, `UPDATE hub_sync SET status = 'unknown', reasons = ?, checked_at = ? WHERE page_label = ?`,
