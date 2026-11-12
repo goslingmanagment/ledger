@@ -351,3 +351,22 @@ func TestALateVersionBehindTheCursorIsReadOnTheNextPass(t *testing.T) {
 		t.Fatalf("third pass %+v %v", st, err)
 	}
 }
+
+// A 404 after the feed has been read (a cursor past zero) is not «nothing yet»: the route went away or the address is
+// wrong, and the pass fails until it answers again.
+func TestA404AfterTheFeedWasReadIsAFailure(t *testing.T) {
+	s := book(t)
+	ctx := context.Background()
+	stub, c := newStubHub(t, fixture(t))
+	if st, err := SyncHub(ctx, s, c, hubNow); err != nil || st.Next != "106" {
+		t.Fatalf("first pass %+v %v", st, err)
+	}
+	stub.status = http.StatusNotFound
+	st, err := SyncHub(ctx, s, c, hubNow.Add(5*time.Minute))
+	if err == nil || st.OK || st.Absent || !strings.Contains(st.Error, "404") || !strings.Contains(st.Error, "106") {
+		t.Fatalf("404 past the cursor: %+v %v", st, err)
+	}
+	if st.LastOKAt != ts.Format(hubNow) {
+		t.Fatalf("the last good read moved: %+v", st)
+	}
+}

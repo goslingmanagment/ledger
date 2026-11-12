@@ -835,6 +835,22 @@ func HubReports(ctx context.Context, e Env) Result {
 	if err != nil {
 		return fail(name, "warn", err.Error(), nil)
 	}
+	// A day accrued from Hub's report that leaves out a posted page: the page accrues nothing, never silently.
+	lost, err := reports.HubLostPages(ctx, e.Q)
+	if err != nil {
+		return fail(name, "warn", err.Error(), nil)
+	}
+	var failures []string
+	details := map[string]any{}
+	if len(lost) > 0 {
+		parts := make([]string, 0, len(lost))
+		for _, l := range lost {
+			parts = append(parts, fmt.Sprintf("%s %s %s (в посте %s)", l.Person, l.Day, l.Page, money.Micros(l.PostedMicros).Cents()))
+		}
+		failures = append(failures, fmt.Sprintf("%d страниц поста нет в отчёте хаба, а день начисляется по отчёту хаба — не начислены: %s; "+
+			"поправьте отчёт в хабе (новая версия) или пост", len(lost), strings.Join(parts, "; ")))
+		details["lostPages"] = lost
+	}
 	if len(problems) > 0 {
 		parts := make([]string, 0, len(problems))
 		for _, p := range problems {
@@ -849,8 +865,12 @@ func HubReports(ctx context.Context, e Env) Result {
 			}
 			parts = append(parts, fmt.Sprintf("версия %d (смена %d, %s, %s): %s", p.ID, p.ShiftID, who, p.ReportDate, p.Problem))
 		}
-		return fail(name, "warn", fmt.Sprintf("%d сданных в хабе версий не сохранены — карточку в people или страницу в hub_pages, джоб попробует снова: %s",
-			len(problems), strings.Join(parts, " | ")), problems)
+		failures = append(failures, fmt.Sprintf("%d сданных в хабе версий не сохранены — карточку в people или страницу в hub_pages, джоб попробует снова: %s",
+			len(problems), strings.Join(parts, " | ")))
+		details["problems"] = problems
+	}
+	if len(failures) > 0 {
+		return fail(name, "warn", strings.Join(failures, " || "), details)
 	}
 	if st == nil {
 		return pass(name, "сданные в хабе отчёты ещё не читались: джоб "+reports.HubJob+" или ledger hub reports-sync")
