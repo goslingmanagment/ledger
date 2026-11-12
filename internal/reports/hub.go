@@ -533,6 +533,35 @@ type HubProblem struct {
 	ReceivedAt string  `json:"receivedAt"`
 }
 
+// LostPage is a page a day accrued from Hub's report leaves out although the post has it (v_report_pages: basis hub,
+// hub_state hub_missing): the day is one basis, so the page accrues nothing until the report or the post is put right.
+type LostPage struct {
+	Person       string `json:"person"`
+	Day          string `json:"day"`
+	Page         string `json:"page"`
+	PostedMicros int64  `json:"postedMicros"`
+}
+
+// HubLostPages lists those pages, by person and day.
+func HubLostPages(ctx context.Context, q ledger.Querier) ([]LostPage, error) {
+	rows, err := q.QueryContext(ctx, `SELECT person, report_date, page, posted_micros FROM v_report_pages
+		WHERE basis = ? AND hub_state = ? AND posted_micros IS NOT NULL AND posted_micros <> 0 ORDER BY person, report_date, page`,
+		BasisHub, StateHubMissing)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []LostPage{}
+	for rows.Next() {
+		var l LostPage
+		if err := rows.Scan(&l.Person, &l.Day, &l.Page, &l.PostedMicros); err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
 // HubProblems lists the current versions kept with a problem, oldest first.
 func HubProblems(ctx context.Context, q ledger.Querier) ([]HubProblem, error) {
 	rows, err := q.QueryContext(ctx, `SELECT id, shift_id, version, person, hub_person, hub_user_id, report_date, problem, received_at

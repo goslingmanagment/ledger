@@ -303,3 +303,31 @@ func TestHubsReportIsABasisOfTheReportsOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A day accrued from Hub's report (basis hub) that leaves out a page the post has loses that page: the day is one basis.
+// The loss is not silent: the health check of Hub's reports fails, naming the person, the day and the page, until the
+// report or the post is put right.
+func TestAHubDayMissingAPostedPageFailsTheCheck(t *testing.T) {
+	s, ctx := reportWeek(t)
+	setReports(t, s, ctx, "2026-11-10")
+	// Альфа posted page-a 100 + page-b 40 for the 10th; her Hub report has page-a only.
+	handIn(t, s, hubVersion(1, 1, 1, "alfa", "2026-11-10", hubPage{"page-a", 100}))
+	if r := checks.HubReports(ctx, checks.Env{Q: s.RO, Now: reportNow}); !r.OK {
+		t.Fatalf("before the hub day: %+v", r)
+	}
+	setHub(t, s, ctx, "2026-11-10")
+	if got := cols(t, s, `SELECT page, COALESCE(posted_micros, '-'), COALESCE(accrue_micros, '-'), hub_state, basis FROM v_report_pages
+		WHERE person = 'alfa' AND report_date = '2026-11-10' ORDER BY page`); got != "page-a 100000000 100000000 hub_equal hub\npage-b 40000000 - hub_missing hub" {
+		t.Fatalf("the pay base:\n%s", got)
+	}
+	r := checks.HubReports(ctx, checks.Env{Q: s.RO, Now: reportNow})
+	if r.OK || r.Severity != "warn" || !strings.Contains(r.Summary, "alfa 2026-11-10 page-b") {
+		t.Fatalf("the lost page is silent: %+v", r)
+	}
+	// Hub's corrected report has both pages: the check passes again.
+	handIn(t, s, hubVersion(1, 1, 1, "alfa", "2026-11-10", hubPage{"page-a", 100}),
+		hubVersion(2, 1, 2, "alfa", "2026-11-10", hubPage{"page-a", 100}, hubPage{"page-b", 40}))
+	if r := checks.HubReports(ctx, checks.Env{Q: s.RO, Now: reportNow}); !r.OK {
+		t.Fatalf("after the corrected report: %+v", r)
+	}
+}
