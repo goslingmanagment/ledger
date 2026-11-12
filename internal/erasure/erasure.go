@@ -8,6 +8,7 @@
 //   - decisions, questions and pot purchases on those sales or naming that fan on a page of the platform — by his id,
 //     by "u" + the id or by a login ledger holds for him (namesOf): fan reference, fan name, the note, the question and
 //     answer texts;
+//   - the mirror of Hub's decisions (hub_sale_decisions): the note of a decision on those sales;
 //   - hub_sales: the fan reference in the payload, which also makes a second pass find nothing (idempotent).
 //
 // What no fan reference ties to the fan stays: «мимо площадки» (who paid, what for), the shift's comment, the posts of
@@ -281,6 +282,14 @@ func Apply(ctx context.Context, tx *sql.Tx, e hub.Erasure, now time.Time) (map[s
 	if err := exec("pot_sales", `UPDATE pot_sales SET fan_ref = '', fan_name = '', note = ''
 		WHERE (fan_ref <> '' OR fan_name <> '' OR note <> '') AND `+where, args...); err != nil {
 		return nil, err
+	}
+	// Hub's decisions as ledger mirrors them (hub_sale_decisions): the note of a decision on the fan's sale. Hub clears
+	// its own and its feed brings that; the copy here does not wait for the feed.
+	if len(refs) > 0 {
+		if err := exec("hub_sale_decisions", `UPDATE hub_sale_decisions SET note = NULL WHERE note IS NOT NULL AND transaction_ref IN `+refList,
+			refArgs...); err != nil {
+			return nil, err
+		}
 	}
 	// Last, the link itself: a second pass finds no sale of the fan.
 	if len(refs) > 0 {

@@ -1021,7 +1021,7 @@ func WeekColumns(ctx context.Context, e Env) Result {
 // Run executes every check. A coverage that cannot be built fails its own checks, not the rest.
 func Run(ctx context.Context, e Env) []Result {
 	out := []Result{Balanced(ctx, e), BybitBalance(ctx, e), Coins(ctx, e), CoinsAtCost(ctx, e), CardAnchors(ctx, e), CardCover(ctx, e), Unlinked(ctx, e), Payables(ctx, e), Copies(ctx, e), Sources(ctx, e), ReportPosts(ctx, e),
-		ShiftReports(ctx, e), HubReports(ctx, e), PayTerms(ctx, e), PendingChanges(ctx, e), WeekColumns(ctx, e)}
+		ShiftReports(ctx, e), HubReports(ctx, e), HubDecisions(ctx, e), PayTerms(ctx, e), PendingChanges(ctx, e), WeekColumns(ctx, e)}
 	cv, tabs, _, err := month.PrepareCover(ctx, e.Q, month.Inputs{})
 	if err != nil {
 		for _, n := range []string{"заявки равны покрытому net", "k переводов в норме", "переводы не просрочены", "депозиты сходятся с заявками", "дрейф закрытых месяцев"} {

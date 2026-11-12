@@ -15,7 +15,9 @@ import (
 
 	"github.com/goslingmanagment/ledger/internal/db"
 	"github.com/goslingmanagment/ledger/internal/decisions"
+	"github.com/goslingmanagment/ledger/internal/hub"
 	"github.com/goslingmanagment/ledger/internal/money"
+	"github.com/goslingmanagment/ledger/internal/pots"
 )
 
 func init() {
@@ -29,7 +31,38 @@ func init() {
 	Command(Cmd{Name: "decision cancel", Run: decisionCancel,
 		Summary: `отменить решение: ledger decision cancel <id> --note "…"`})
 	Command(Cmd{Name: "decision hub-from", Run: decisionHubFrom,
-		Summary: "с дня решения, вопросы и заявки «чья продажа» пишет только хаб (рядом с базой): [ГГГГ-ММ-ДД | --off]; без аргумента — показать"})
+		Summary: "с дня решения, вопросы и заявки «чья продажа» пишет только хаб, а продажи этого дня и позже идут по решениям хаба — факты, общаки, договорённость строки (рядом с базой): [ГГГГ-ММ-ДД | --off]; без аргумента — показать"})
+	Command(Cmd{Name: "hub decisions-sync", Run: hubDecisionsSync,
+		Summary: "прочитать решения «чья продажа» хаба сейчас и привести общаки в соответствие, как джоб hub-decisions (рядом с базой)"})
+}
+
+// hubDecisionsSync reads Hub's feed of decisions now, as the job hub-decisions does, next to the database: the mirror,
+// then — from settings.sale_decisions_hub_from — the pots.
+func hubDecisionsSync(ctx context.Context, args []string) error {
+	if _, err := ParseArgs(Flags("hub decisions-sync"), args); err != nil {
+		return err
+	}
+	cfg, err := hub.ConfigFromEnv()
+	if err != nil {
+		return err
+	}
+	store, err := OpenStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	st, err := decisions.SyncHub(ctx, store, hub.NewClient(cfg, nil), time.Now())
+	if perr := printJSON(st); perr != nil {
+		return perr
+	}
+	if err != nil {
+		return Exit{Code: 3, Msg: "лента решений хаба не прочитана или общаки не приведены: " + err.Error()}
+	}
+	rep, _ := st.Pots.(pots.FollowReport)
+	if st.Held > 0 || len(rep.Problems) > 0 {
+		return Exit{Code: 3, Msg: fmt.Sprintf("придержано изменений: %d, решений «в общак» без покупки: %d — ledger health", st.Held, len(rep.Problems))}
+	}
+	return nil
 }
 
 // decisionHubFrom sets or clears the day from which only Hub writes whose a sale is (settings.sale_decisions_hub_from).

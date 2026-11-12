@@ -82,6 +82,10 @@ func book(t *testing.T) (*db.Store, context.Context) {
 			(4, 'page-a', 'Other', '', NULL, 'другой фан чей?', 'chatters', '2026-11-11', '', 'open', 'x', 'agent')`,
 		`INSERT INTO pot_sales(id, pot, transaction_ref, page_label, fan_ref, fan_name, net_micros, occurred_at, day, source, note, added_at, key_name)
 			VALUES (1, 'set-one', '1001', 'page-a', '777', 'Romeo', 20000000, '2026-11-10T20:00:00+03:00', '2026-11-10', 'agent', 'набор', 'x', 'agent')`,
+		// Hub's decisions as ledger mirrors them: on the erased fan's sale and on the other fan's.
+		`INSERT INTO hub_sale_decisions(id, transaction_ref, page_label, kind, shares, state, source, said_by, note, seq, change, changed_at, read_at)
+			VALUES (31, '1001', 'page-a', 'owner', '[{"person":"anna","userId":6,"percent":100}]', 'active', 'agent', 'владелец', 'Ромео писал только ей', 1, 'made', 'x', 'x'),
+			(32, '1002', 'page-a', 'exclude', '[]', 'active', 'agent', 'владелец', 'возврат другого фана', 2, 'made', 'x', 'x')`,
 	} {
 		if _, err := s.RW.ExecContext(ctx, q); err != nil {
 			t.Fatalf("%v\n%s", err, q)
@@ -175,6 +179,8 @@ func TestAnErasedFansWordsGoAndTheMoneyStays(t *testing.T) {
 		{`SELECT id, fan_ref, fan_name, question, note, COALESCE(answer, '∅'), status FROM sale_questions ORDER BY id`,
 			"1|||" + Erased + "||" + Erased + "|answered\n2|||" + Erased + "||∅|open\n3|||" + Erased + "||∅|open\n4|Other||другой фан чей?||∅|open"},
 		{`SELECT fan_ref, fan_name, note, net_micros, pot FROM pot_sales`, "|||20000000|set-one"},
+		{`SELECT id, COALESCE(note, '∅'), kind, shares, said_by FROM hub_sale_decisions ORDER BY id`,
+			"31|∅|owner|[{\"person\":\"anna\",\"userId\":6,\"percent\":100}]|владелец\n32|возврат другого фана|exclude|[]|владелец"},
 		{`SELECT transaction_ref, COALESCE(json_extract(payload, '$.fanRef'), '∅'), net_mills FROM hub_sales ORDER BY transaction_ref`,
 			"1001|∅|20000\n1002|888|5000\n1003|777|7000"},
 		{`SELECT id, platform, erased_at FROM hub_erasures`, "41|fansly|2026-11-13T08:00:00.000Z"},
