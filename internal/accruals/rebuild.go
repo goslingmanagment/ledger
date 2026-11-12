@@ -1,7 +1,8 @@
 // Package accruals counts what each person would be paid from Hub's facts (ledger release 2, L3), in shadow. Every
 // sale of a proven window of the team's facts (hub_team_sync) goes through the split rules (internal/split). Each share
 // of a shift or a look-in goes to its person at the rate of their tab for the page's model: payroll.Terms, the same
-// header the sheet's days are counted by — «Ставка %» of the revenue, and «Фикс/см» for a day with a shift. The общак
+// header the sheet's days are counted by — «Ставка %» of the revenue, and «Фикс/см» for a day with a shift (from
+// settings.payroll_terms_hub_from the person's term holding on the day in Hub's people registry, people.terms). The общак
 // is summed per week with its sales; what waits, waits for a decision, is nobody's or unknown is listed with its
 // sales, not accrued. Nothing here posts; from settings.payroll_facts_from on payroll.Rebuild posts fact_accruals of the
 // proven weeks as the debts (L4), before it they are a shadow. `ledger accruals diff` puts a week of it beside the
@@ -280,7 +281,7 @@ func rebuildTx(ctx context.Context, tx *sql.Tx, now time.Time) (Report, error) {
 			unmapped[fmt.Sprintf("%s (hub %d)", a.username, k.user)] = true
 			continue
 		}
-		t, reason := who.terms(a.person, k.model)
+		t, reason := who.terms(a.person, k.model, k.day)
 		switch {
 		case reason != "":
 			a.reason = reason
@@ -668,11 +669,15 @@ func loadSales(ctx context.Context, q ledger.Querier) (map[string][]hub.TeamSale
 	return out, rows.Err()
 }
 
-// people finds the person of a Hub user and their terms on a model's tab.
+// people finds the person of a Hub user and their terms on a model's tab: the tab's header, or from
+// settings.payroll_terms_hub_from the registry's term holding on the day (ecosystem H3).
 type people struct {
 	res   *payroll.Resolver
 	tabs  []payroll.Terms
 	cache map[string][2]string
+	// termsFrom is settings.payroll_terms_hub_from; "" — the headers price every day and hub is not read.
+	termsFrom string
+	hub       payroll.HubTerms
 }
 
 func newPeople(ctx context.Context, q ledger.Querier) (*people, error) {
@@ -684,7 +689,16 @@ func newPeople(ctx context.Context, q ledger.Querier) (*people, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &people{res: res, tabs: terms, cache: map[string][2]string{}}, nil
+	p := &people{res: res, tabs: terms, cache: map[string][2]string{}}
+	if p.termsFrom, err = payroll.TermsHubFrom(ctx, q); err != nil {
+		return nil, err
+	}
+	if p.termsFrom != "" {
+		if p.hub, err = payroll.LoadHubTerms(ctx, q); err != nil {
+			return nil, err
+		}
+	}
+	return p, nil
 }
 
 // person is the card of a Hub user (payroll.Resolver.HubPerson). "" and why — nobody to credit.
@@ -703,14 +717,41 @@ func (p *people) person(user int64, username, model string) (string, string) {
 	return slug, reason
 }
 
-// terms are the person's terms on their tab of the model. Several tabs of one model must agree.
-func (p *people) terms(person, model string) (payroll.Terms, string) {
+// terms are the person's terms of the day on their tab of the model: from settings.payroll_terms_hub_from the registry's
+// term holding on the day (the first tab of the model takes the day), else — or with no registry term for the day — the
+// tab's header. Several tabs of one model must agree on the header.
+func (p *people) terms(person, model, day string) (payroll.Terms, string) {
+	found := p.tabsOf(person, model)
+	if len(found) == 0 {
+		return payroll.Terms{}, "нет вкладки человека в таблице выплат модели «" + model + "»: ставки нет"
+	}
+	if h := p.hubTerm(person, model, day); h != nil {
+		return h.Terms(found[0]), ""
+	}
+	return p.tabTerms(person, model)
+}
+
+// hubTerm is the registry's term that prices the person's day of the model; nil — the tab's header does.
+func (p *people) hubTerm(person, model, day string) *payroll.HubTerm {
+	if p.termsFrom == "" || day < p.termsFrom {
+		return nil
+	}
+	return p.hub.On(person, model, day)
+}
+
+func (p *people) tabsOf(person, model string) []payroll.Terms {
 	var found []payroll.Terms
 	for _, t := range p.tabs {
 		if t.Person == person && ledger.Slug(t.Model) == ledger.Slug(model) {
 			found = append(found, t)
 		}
 	}
+	return found
+}
+
+// tabTerms are the person's terms on their tab of the model as its header states them. Several tabs of one model must agree.
+func (p *people) tabTerms(person, model string) (payroll.Terms, string) {
+	found := p.tabsOf(person, model)
 	if len(found) == 0 {
 		return payroll.Terms{}, "нет вкладки человека в таблице выплат модели «" + model + "»: ставки нет"
 	}

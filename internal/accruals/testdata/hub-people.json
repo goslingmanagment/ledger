@@ -1,0 +1,49 @@
+{
+  "people": [
+    {
+      "id": 11, "code": "alfa", "displayName": "Альфа", "kind": "human", "role": "chatter", "state": "working", "leftOn": null,
+      "telegram": {"userId": 501, "handle": "alfa_chat", "reportTag": "#alfa"},
+      "logins": [{"userId": 101, "username": "Alfa", "active": true}], "agentKeys": [],
+      "workingPages": [{"pageLabel": "page-a", "modelSlug": "alpha-hub"}, {"pageLabel": "page-b", "modelSlug": "alpha-hub"}],
+      "schedule": null, "scheduleSlots": [], "rights": [],
+      "updatedAt": "2026-11-12T10:00:00.000Z",
+      "payTerms": [
+        {"id": 201, "modelSlug": "alpha-hub", "modelName": "Alpha", "validFrom": "2026-11-02", "validTo": "2026-11-10",
+         "shareBasisPoints": 2500, "fixPerShiftMills": 0, "note": null, "updatedAt": "2026-11-12T09:00:00.000Z"},
+        {"id": 202, "modelSlug": "alpha-hub", "modelName": "Alpha", "validFrom": "2026-11-11", "validTo": null,
+         "shareBasisPoints": 3000, "fixPerShiftMills": 0, "note": "повышение с 11-го", "updatedAt": "2026-11-12T10:00:00.000Z"}
+      ]
+    },
+    {
+      "id": 12, "code": "bravo", "displayName": "Браво", "kind": "human", "role": "chatter", "state": "working", "leftOn": null,
+      "telegram": {"userId": 502, "handle": null, "reportTag": "#bravo"},
+      "logins": [{"userId": 102, "username": "Bravo", "active": true}], "agentKeys": [],
+      "workingPages": [{"pageLabel": "page-a", "modelSlug": "alpha-hub"}],
+      "schedule": null, "scheduleSlots": [], "rights": [],
+      "updatedAt": "2026-11-12T09:30:00.000Z",
+      "payTerms": [
+        {"id": 203, "modelSlug": "alpha-hub", "modelName": "Alpha", "validFrom": "2026-11-02", "validTo": null,
+         "shareBasisPoints": 2000, "fixPerShiftMills": 0, "note": null, "updatedAt": "2026-11-12T09:30:00.000Z"}
+      ]
+    },
+    {
+      "id": 13, "code": "carol", "displayName": "Кэрол", "kind": "human", "role": "chatter", "state": "left", "leftOn": "2026-10-20",
+      "telegram": {"userId": null, "handle": null, "reportTag": null},
+      "logins": [{"userId": 103, "username": "Carol", "active": false}], "agentKeys": [],
+      "workingPages": [], "schedule": null, "scheduleSlots": [], "rights": [],
+      "updatedAt": "2026-11-12T08:00:00.000Z",
+      "payTerms": []
+    },
+    {
+      "id": 14, "code": "helper", "displayName": "Helper", "kind": "agent", "role": "agent", "state": "working", "leftOn": null,
+      "telegram": {"userId": null, "handle": null, "reportTag": null},
+      "logins": [], "agentKeys": [{"name": "helper-2026-11", "active": true}],
+      "workingPages": [], "schedule": null, "scheduleSlots": [], "rights": [],
+      "updatedAt": "2026-11-12T08:00:00.000Z",
+      "payTerms": []
+    }
+  ],
+  "payTermsIncluded": true,
+  "keyGrantExcludedPages": 0,
+  "serverNow": "2026-11-12T10:05:00.000Z"
+}

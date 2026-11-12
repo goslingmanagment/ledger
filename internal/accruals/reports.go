@@ -26,6 +26,8 @@ import (
 // every save of a draft, every read of Hub's handed-in reports and before every rebuild of the debts; before
 // settings.payroll_reports_from it is a shadow. From settings.payroll_basis_hub_from a person's day with a report handed in
 // in Hub takes its pages from it (v_report_pages.accrue_micros, basis hub; hub_reports names the versions), not from the post.
+// From settings.payroll_terms_hub_from a day takes the person's term holding on it from Hub's people registry
+// (hub_pay_terms) instead of the tab's header; a day the registry has no term for keeps the header (ecosystem H3).
 
 func init() {
 	payroll.Refresh = func(ctx context.Context, store *db.Store, now time.Time) error {
@@ -231,7 +233,8 @@ func reportDays(ctx context.Context, q ledger.Querier) ([]reportDay, error) {
 	return out, nil
 }
 
-// price puts the terms of the person's tab of the model on the day: revenue × rate, plus the fix once.
+// price puts the terms of the person's tab of the model on the day (from settings.payroll_terms_hub_from the registry's
+// term holding on the day, people.terms): revenue × rate, plus the fix once.
 func price(d *reportDay, who *people) {
 	if d.model == "" {
 		pages := ""
@@ -244,7 +247,7 @@ func price(d *reportDay, who *people) {
 		d.reason = "модель страницы неизвестна (" + pages + "): нет в hub_pages — ставки нет"
 		return
 	}
-	t, reason := who.terms(d.person, d.model)
+	t, reason := who.terms(d.person, d.model, d.day)
 	if reason != "" {
 		d.reason = reason
 		return
@@ -260,9 +263,13 @@ func price(d *reportDay, who *people) {
 	}
 	r := *t.Rate
 	d.rate = &r
-	// As the sheet counts a day: dollars of the day's revenue × rate, to micros, then the fix of the shift.
-	v := int64(money.FromFloat(float64(float64(d.net)/money.Scale)*r)) + d.fix
+	v := dayAmount(d.net, r, d.fix)
 	d.amount = &v
+}
+
+// dayAmount is a reports day as the sheet counts it: dollars of the day's revenue × rate, to micros, then the fix of the shift.
+func dayAmount(net int64, rate float64, fix int64) int64 {
+	return int64(money.FromFloat(float64(float64(net)/money.Scale)*rate)) + fix
 }
 
 func rebuildReportsTx(ctx context.Context, tx *sql.Tx, now time.Time) (ReportsReport, error) {
