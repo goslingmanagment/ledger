@@ -23,7 +23,7 @@ const hubDecisionsStale = time.Hour
 // holds a change back from ledger's key (a decision on a page outside the key's pages: ledger does not see it), and for
 // every decision of kind pot that cannot become a purchase — an unknown or closed pot, a page or a day outside the pot,
 // a sale a report still counts in a person's page, a sale already in another pot by hand, a sale that never reached
-// ledger's mirror of Hub's sales.
+// ledger's mirror of Hub's sales, or of Hub's transactions (where its other reference is: the guards need both).
 func HubDecisions(ctx context.Context, e Env) Result {
 	const name = hubDecisionsCheck
 	from, err := decisions.HubFrom(ctx, e.Q)
@@ -111,7 +111,7 @@ func HubDecisions(ctx context.Context, e Env) Result {
 		line += fmt.Sprintf(", ждут прохода джоба — %d", n)
 	}
 	if len(plan.Waiting) > 0 {
-		line += fmt.Sprintf(", ждут фактов продажи — %d", len(plan.Waiting))
+		line += fmt.Sprintf(", ждут фактов или транзакции продажи — %d", len(plan.Waiting))
 	}
 	return pass(name, line)
 }

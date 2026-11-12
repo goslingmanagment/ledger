@@ -173,14 +173,13 @@ func table(t *testing.T, s *db.Store, q string, args ...any) string {
 	return strings.Join(out, "\n")
 }
 
-// hubSale puts a sale into ledger's mirror of Hub's sales, as the team's facts leave it.
+// hubSale puts a sale into ledger's mirrors of Hub as the hourly reads leave it: the team's fact under Hub's id
+// (hub_sales) and the transaction with both of the sale's references — Hub's id and the platform's, "pf-<id>"
+// (hub_transactions).
 func hubSale(t *testing.T, s *db.Store, ref int64, page, at string, mills int64) {
 	t.Helper()
-	if _, err := s.RW.Exec(`INSERT INTO hub_sales(transaction_ref, window_from, page_label, platform, kind, net_mills, occurred_at,
-		post_tip, campaign, payload, first_seen_at, read_at) VALUES (?, '2026-11-09T00:00:00+03:00', ?, 'fansly', 'ppv', ?, ?, 0, 0, ?,
-		'2026-11-12', '2026-11-12')`, strconv.FormatInt(ref, 10), page, mills, at, `{"fanRef": "fan-`+strconv.FormatInt(ref, 10)+`"}`); err != nil {
-		t.Fatal(err)
-	}
+	hubFact(t, s, ref, page, at, mills)
+	hubTransaction(t, s, ref, "pf-"+strconv.FormatInt(ref, 10), page, at, mills)
 }
 
 // Every change of a decision is taken in the feed's order and the mirror holds each decision as it is now; a change Hub
