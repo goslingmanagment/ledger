@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/goslingmanagment/ledger/internal/db"
+	"github.com/goslingmanagment/ledger/internal/decisions"
 	"github.com/goslingmanagment/ledger/internal/hub"
 	"github.com/goslingmanagment/ledger/internal/ledger"
 	"github.com/goslingmanagment/ledger/internal/money"
@@ -165,6 +166,10 @@ func rebuildTx(ctx context.Context, tx *sql.Tx, now time.Time) (Report, error) {
 	if err != nil {
 		return rep, err
 	}
+	hubFrom, err := decisions.HubFrom(ctx, tx)
+	if err != nil {
+		return rep, err
+	}
 	// The facts are read from Hub's first works (hub_team_since) for «не занесено»; the rule settles from its own
 	// week. A window before it holds no sale of the rule, and its works must not stand in for the rule's windows'.
 	ruleWeek := ts.WeekStart(rules.Since)
@@ -219,6 +224,12 @@ func rebuildTx(ctx context.Context, tx *sql.Tx, now time.Time) (Report, error) {
 		splitSales := make([]split.Sale, len(list))
 		for i, s := range list {
 			splitSales[i] = s.Split()
+			// Hub's decision of the sale, and the shares it gives (they come as the resolution), rule the sales of the switch
+			// day and later (settings.sale_decisions_hub_from). A sale before it, and every sale while the setting is empty,
+			// goes by ledger's own rows as it did: the claims below, and a resolution Hub's old tables held.
+			if s.Decision != nil && !decisions.HubRules(hubFrom, ts.Date(s.OccurredAt)) {
+				splitSales[i].Decision, splitSales[i].Resolution = nil, nil
+			}
 			if c, ok := claims[s.TransactionRef]; ok {
 				if user, ok := who.userOf(c.person, models[s.PageLabel], usernames); ok {
 					splitSales[i].ClaimedBy = &user

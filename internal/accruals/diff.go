@@ -517,6 +517,9 @@ func whereTo(h homeRow, names map[string]string) string {
 		}
 		return "смене"
 	case split.Pot:
+		if h.pot != "" && h.pot != split.PotObshak {
+			return "общак " + h.pot
+		}
 		return "общак"
 	case split.Waiting:
 		return "ждёт смены отправителя"
@@ -567,6 +570,8 @@ var reasonText = map[string]string{
 	split.ReasonMarks:              "по меткам чаттеров",
 	split.ReasonOwnerSplit:         "решение владельца",
 	split.ReasonOwnerClaim:         "ничья, заявка по слову владельца",
+	split.ReasonOwnerNobody:        "решение владельца в хабе: никому",
+	split.ReasonOwnerPot:           "решение владельца в хабе: в общак",
 }
 
 const homeColumns = `SELECT transaction_ref, seq, window_from, occurred_at, page_label, model, sale_kind, net_micros, home,

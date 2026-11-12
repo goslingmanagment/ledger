@@ -16,6 +16,10 @@
 //     night of 1 November past midnight), is BeforeRule: the weeks before the rule do not move by a cent.
 //  5. A Nobody's sale someone claimed, by the owner's word (Sale.ClaimedBy, ledger's sale_claims), is the claimer's
 //     whole, on no work (the owner, 2026-11-09, decision 3). A claim moves no other home.
+//  6. Hub's decision of the sale (Sale.Decision, hub#1279; Hub's `ownerOrAgreed`) comes before all of it but 4: «никому»
+//     is Nobody's, a pot decision is that pot's, a decision that gives the sale to people goes by its shares
+//     (Sale.Resolution) — a whole sale given where the rule finds nobody is the claim of 5. The caller sets Decision only
+//     for the sales Hub's word rules (settings.sale_decisions_hub_from): without it Resolution splits a Decide alone.
 //
 // Pure: no database and no clock, `now` is an argument. Money is Hub's mills (1/1000 USD), split as Hub splits it.
 package split
@@ -81,6 +85,15 @@ const (
 	ReasonMarks              = "marks"          // the chatters' confirmed marks agree
 	ReasonOwnerSplit         = "owner_split"    // the owner's split of a disputed sale
 	ReasonOwnerClaim         = "owner_claim"    // a nobody's sale the owner gave the person who claimed it
+	ReasonOwnerNobody        = "owner_nobody"   // Hub's decision: the sale is nobody's («никому»)
+	ReasonOwnerPot           = "owner_pot"      // Hub's decision: the sale is a pot's (Home.Pot)
+)
+
+// The kinds of Hub's decision of a sale, as its team facts carry them (`decision.kind`).
+const (
+	DecisionSplit  = "split"  // the sale is given to people: Sale.Resolution has the shares (one of 100 — a whole sale)
+	DecisionNobody = "nobody" // «никому»
+	DecisionPot    = "pot"    // a pot's: Decision.Pot
 )
 
 // Rules are the rule's dates and wait; Default is the seeded split_rules rows'.
@@ -133,10 +146,18 @@ type Sale struct {
 	LastWriter *int64 `json:"lastWriter"`
 	// Marks are the chatters' marks of the sale in their shift reports.
 	Marks []Mark `json:"marks"`
-	// Resolution is the owner's split of a disputed sale; nil — none.
+	// Resolution is the owner's split of a disputed sale; nil — none. With Decision it is the shares Hub's decision gives.
 	Resolution []OwnerShare `json:"resolution"`
+	// Decision is Hub's active decision of the sale, which comes before the rule; nil — none, or not to be read.
+	Decision *Decision `json:"decision"`
 	// ClaimedBy is the user the owner gives the sale if it is nobody's (ledger's sale_claims, not Hub's); nil — none.
 	ClaimedBy *int64 `json:"-"`
+}
+
+// Decision is Hub's decision of a sale: its kind and, for a pot, which.
+type Decision struct {
+	Kind string `json:"kind"` // DecisionSplit, DecisionNobody, DecisionPot
+	Pot  string `json:"pot"`
 }
 
 // Person is the PPV's sender with their role now.
@@ -226,10 +247,73 @@ func indexOf(works []Work) index {
 
 func (r Rules) home(sale Sale, ix index, now time.Time) Home {
 	h := r.ruleHome(sale, ix, now)
+	if h.Kind != BeforeRule {
+		if d, ok := decidedHome(sale, h, ix); ok {
+			return d
+		}
+	}
 	if h.Kind == Nobody && sale.ClaimedBy != nil {
-		return Home{Kind: Shift, Reason: ReasonOwnerClaim, Shares: []Share{{UserID: *sale.ClaimedBy, Percent: 100, Mills: sale.NetMills}}}
+		return claimed(*sale.ClaimedBy, sale.NetMills)
 	}
 	return h
+}
+
+// claimed is a nobody's sale given whole to a person, on no work.
+func claimed(user, net int64) Home {
+	return Home{Kind: Shift, Reason: ReasonOwnerClaim, Shares: []Share{{UserID: user, Percent: 100, Mills: net}}}
+}
+
+// decidedHome is the home Hub's decision gives the sale, before the rule's (`found`): «никому» is nobody's, a pot
+// decision with a pot named is that pot's, a decision that gives the sale to people goes by its shares — a whole sale
+// given where the rule finds nobody is the claim's form. false — no decision, or nothing in it to go by: the rule's home
+// stands (a Decide the shares already split is the same home).
+func decidedHome(sale Sale, found Home, ix index) (Home, bool) {
+	if sale.Decision == nil {
+		return Home{}, false
+	}
+	switch sale.Decision.Kind {
+	case DecisionNobody:
+		return Home{Kind: Nobody, Reason: ReasonOwnerNobody}, true
+	case DecisionPot:
+		if sale.Decision.Pot != "" {
+			return Home{Kind: Pot, Pot: sale.Decision.Pot, Reason: ReasonOwnerPot}, true
+		}
+	case DecisionSplit:
+		res := sale.Resolution
+		switch {
+		case len(res) == 0 || found.Reason == ReasonOwnerSplit:
+			return Home{}, false
+		case found.Kind == Nobody && len(res) == 1 && res[0].Percent == 100:
+			return claimed(res[0].UserID, sale.NetMills), true
+		}
+		shares := ownerShares(sale.NetMills, res, func(user int64) string { return workRefFor(user, sale, found, ix) })
+		return sharesHome(shares, ReasonOwnerSplit, ix), true
+	}
+	return Home{}, false
+}
+
+// workRefFor is a person's work for a share of a decided sale: the one the rule's home already names for them, else
+// their work holding the sale (a shift before a look-in); "" — none, the share is dated by the sale.
+func workRefFor(user int64, sale Sale, found Home, ix index) string {
+	for _, s := range found.Shares {
+		if s.UserID == user && s.WorkRef != "" {
+			return s.WorkRef
+		}
+	}
+	visit := ""
+	for _, ref := range sale.Holders {
+		i, ok := ix.byRef[ref]
+		if !ok || ix.works[i].UserID != user {
+			continue
+		}
+		if ix.works[i].Kind != Visit {
+			return ref
+		}
+		if visit == "" {
+			visit = ref
+		}
+	}
+	return visit
 }
 
 // ruleHome is the home by the rule alone, the claims aside.

@@ -207,6 +207,7 @@ func TestTeamAnswerOutOfContractIsRefused(t *testing.T) {
 		"no net":       func(m map[string]any) { delete(sale(m, 0), "netMills") },
 		"a sale kind":  func(m map[string]any) { sale(m, 0)["kind"] = "refund" },
 		"work kind":    func(m map[string]any) { m["works"].([]any)[0].(map[string]any)["kind"] = "nap" },
+		"a decision":   func(m map[string]any) { sale(m, 0)["decision"] = map[string]any{"kind": "maybe", "pot": nil} },
 	} {
 		var m map[string]any
 		json.Unmarshal(raw, &m)
@@ -219,6 +220,33 @@ func TestTeamAnswerOutOfContractIsRefused(t *testing.T) {
 }
 
 func sale(m map[string]any, i int) map[string]any { return m["sales"].([]any)[i].(map[string]any) }
+
+// Hub's active decision of a sale (hub#1279) maps onto the split's: its kind and its pot; a sale without one has none.
+func TestTeamSalesCarryHubsDecision(t *testing.T) {
+	raw, err := os.ReadFile("testdata/team_sales.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	json.Unmarshal(raw, &m)
+	sale(m, 0)["decision"] = map[string]any{"kind": "pot", "pot": "spring"}
+	sale(m, 1)["decision"] = map[string]any{"kind": "nobody", "pot": nil}
+	sale(m, 2)["decision"] = nil
+	b, _ := json.Marshal(m)
+	a, err := decodeTeam(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := a.sales[0].Split().Decision; d == nil || *d != (split.Decision{Kind: split.DecisionPot, Pot: "spring"}) {
+		t.Errorf("a pot decision = %+v", d)
+	}
+	if d := a.sales[1].Split().Decision; d == nil || *d != (split.Decision{Kind: split.DecisionNobody}) {
+		t.Errorf("«никому» = %+v", d)
+	}
+	if d := a.sales[2].Split().Decision; d != nil {
+		t.Errorf("no decision = %+v", d)
+	}
+}
 
 func TestTeamSyncReadsTheWeeksAndKeepsEachWindowsSnapshot(t *testing.T) {
 	b, sy := newTeamBench(t, "2026-11-25T12:00:00+03:00")
