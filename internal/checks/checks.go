@@ -835,10 +835,86 @@ func PendingChanges(ctx context.Context, e Env) Result {
 	return fail(name, "warn", fmt.Sprintf("%d ждут решения (ledger payroll change apply|dismiss <id>): %s", len(list), strings.Join(parts, "; ")), list)
 }
 
+// TabColumn is a payout tab someone works on with no column for tomorrow.
+type TabColumn struct {
+	Model    string `json:"model"`
+	Tab      string `json:"tab"`
+	Person   string `json:"person"`
+	Tomorrow string `json:"tomorrow"`
+	// LastColumn is the tab's last date with a column; "" — the tab has none.
+	LastColumn string `json:"lastColumn"`
+}
+
+// tabActiveDays is how far back a day of work keeps a tab in WeekColumns.
+const tabActiveDays = 14
+
+// WeekColumns: every payout tab of an active person who worked on it in the last 14 days (a day of the sheet worked or
+// with money, or a day of the reports on the tab) has a column for tomorrow, MSK. The mirror writes the posted reports
+// into the day's column and never makes a week block, and a chatter has nowhere to put the day either. Information,
+// never a failure: Hub raises it from the details.
+func WeekColumns(ctx context.Context, e Env) Result {
+	const name = "у завтрашней даты есть колонка во вкладке"
+	today := e.Now.In(ts.MSK)
+	tomorrow := ts.Date(time.Date(today.Year(), today.Month(), today.Day()+1, 0, 0, 0, 0, ts.MSK))
+	since := ts.Date(time.Date(today.Year(), today.Month(), today.Day()-tabActiveDays, 0, 0, 0, 0, ts.MSK))
+	rows, err := e.Q.QueryContext(ctx, `SELECT t.model, t.name, t.person,
+		COALESCE((SELECT MAX(d.date) FROM payroll_days d WHERE d.model = t.model AND d.name = t.name), ''),
+		EXISTS (SELECT 1 FROM payroll_days d WHERE d.model = t.model AND d.name = t.name AND d.date = ?)
+		FROM payroll_tabs t JOIN people p ON p.slug = t.person
+		WHERE t.listed = 1 AND t.status = 'ok' AND p.status = 'active'
+		  AND (EXISTS (SELECT 1 FROM payroll_days d WHERE d.model = t.model AND d.name = t.name AND d.date BETWEEN ? AND ?
+		               AND (d.worked = 1 OR d.amount <> 0))
+		    OR EXISTS (SELECT 1 FROM report_accruals r WHERE r.tab_model = t.model AND r.tab_name = t.name AND r.day BETWEEN ? AND ?))
+		ORDER BY t.model, t.name`, tomorrow, since, ts.Date(today), since, ts.Date(today))
+	if err != nil {
+		return fail(name, "warn", err.Error(), nil)
+	}
+	defer rows.Close()
+	var missing []TabColumn
+	n, soonest, soonestTab := 0, "", ""
+	for rows.Next() {
+		var c TabColumn
+		var has bool
+		if err := rows.Scan(&c.Model, &c.Tab, &c.Person, &c.LastColumn, &has); err != nil {
+			return fail(name, "warn", err.Error(), nil)
+		}
+		n++
+		if has {
+			if soonest == "" || c.LastColumn < soonest {
+				soonest, soonestTab = c.LastColumn, c.Model+"/"+c.Tab
+			}
+			continue
+		}
+		c.Tomorrow = tomorrow
+		missing = append(missing, c)
+	}
+	if err := rows.Err(); err != nil {
+		return fail(name, "warn", err.Error(), nil)
+	}
+	if len(missing) > 0 {
+		parts := make([]string, len(missing))
+		for i, c := range missing {
+			last := "колонок нет"
+			if c.LastColumn != "" {
+				last = "последняя колонка " + c.LastColumn
+			}
+			parts[i] = fmt.Sprintf("%s/%s (%s, %s)", c.Model, c.Tab, c.Person, last)
+		}
+		return Result{Name: name, OK: true, Severity: "info", Details: missing,
+			Summary: fmt.Sprintf("у завтрашней даты %s нет колонки во вкладке: %s — блок недели добавляет человек, зеркало блоков не создаёт",
+				tomorrow, strings.Join(parts, "; "))}
+	}
+	if n == 0 {
+		return pass(name, fmt.Sprintf("вкладок, где работали за %d дней, нет", tabActiveDays))
+	}
+	return pass(name, fmt.Sprintf("у %d вкладок, где работали за %d дней, есть колонка %s; раньше всех кончается %s — %s", n, tabActiveDays,
+		tomorrow, soonestTab, soonest))
+}
+
 // Run executes every check. A coverage that cannot be built fails its own checks, not the rest.
 func Run(ctx context.Context, e Env) []Result {
 	out := []Result{Balanced(ctx, e), BybitBalance(ctx, e), Coins(ctx, e), CoinsAtCost(ctx, e), CardAnchors(ctx, e), CardCover(ctx, e), Unlinked(ctx, e), Payables(ctx, e), Copies(ctx, e), Sources(ctx, e), ReportPosts(ctx, e),
-		ShiftReports(ctx, e), PendingChanges(ctx, e)}
+		ShiftReports(ctx, e), PendingChanges(ctx, e), WeekColumns(ctx, e)}
 	cv, tabs, _, err := month.PrepareCover(ctx, e.Q, month.Inputs{})
 	if err != nil {
 		for _, n := range []string{"заявки равны покрытому net", "k переводов в норме", "переводы не просрочены", "депозиты сходятся с заявками", "дрейф закрытых месяцев"} {

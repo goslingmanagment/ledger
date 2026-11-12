@@ -29,7 +29,8 @@ const (
 	ScopeDecide  = "decide"  // the owner's decisions: openclaw-main from the brief, the owner's agent sessions one proposal at a time
 	ScopeCollect = "collect" // collectors on the Mac send events
 	ScopeImport  = "import"  // one-off imports
-	// ScopePayouts opens GET /v1/payouts, GET /v1/payouts/prepare, GET /v1/reports[/{id}], GET /v1/report-days,
+	// ScopePayouts opens GET /v1/payouts, GET /v1/payouts/prepare, GET /v1/payouts/person (only this scope: one person's
+	// own pay without terms), GET /v1/reports[/{id}], GET /v1/report-days,
 	// GET /v1/report-posts without the post texts, GET /v1/decisions, GET /v1/questions and GET /v1/pots… and nothing else: Hub's server
 	// reads the chatters' pay and shift reports with it and sees no owner draws, no other expenses, no cash, no post
 	// texts and no SQL.

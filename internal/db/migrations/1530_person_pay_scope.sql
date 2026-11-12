@@ -1,0 +1,7 @@
+-- «Мои деньги» чаттера (хаб, «Мои смены»): ключ payouts открывает ещё GET /v1/payouts/person — начисления, выплаты и
+-- поправки одного человека без ставок; ключ read этот маршрут не открывает. Права хранятся текстом, проверка — в коде;
+-- здесь только описание для агентов.
+
+UPDATE schema_docs
+   SET description = 'Права через запятую: read — SQL и схема, propose — предложения и споры, decide — решения владельца: бриф, правила, споры, заявки на ничьи продажи, изменения за выплаченные дни, общаки (только openclaw-main), collect — сборщики, import — разовые импорты, payouts — только GET /v1/payouts, GET /v1/payouts/prepare (выплаты чаттерам для хаба), GET /v1/payouts/person (деньги одного человека для него самого: дни, выплаты, поправки, долг; без ставок; только этим правом), GET /v1/reports (отчёты смен), GET /v1/report-days (база оплаты по отчётам), GET /v1/report-posts без текста постов, GET /v1/decisions, GET /v1/questions и GET /v1/pots, больше ничего, reports — POST /v1/reports (агент команды сохраняет отчёты смен), договорённости и вопросы «чья продажа» (POST /v1/decisions…, POST /v1/questions…), покупки общаков (POST /v1/pots/{slug}/sales, POST /v1/pot-sales/{id}/remove) и их чтение'
+ WHERE tbl = 'keys' AND col = 'scopes';
