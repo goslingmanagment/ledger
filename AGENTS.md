@@ -22,6 +22,14 @@
   Ничья продажа, которую человек заявил, по слову владельца: `ledger accruals claim <transactionRef> --person <код> --note "…"`,
   снять — `ledger accruals unclaim <transactionRef> --note "…"` (ключ с правом decide или рядом с базой); не ничью продажу отказывает,
   действующие заявки и учтены ли — `v_sale_claims`.
+- Ключ хаба агента (M2): агент может прийти с `Authorization: Bearer agency_hub_agent_…` вместо ключа ledger. ledger
+  шлёт хабу только sha256 ключа (`POST /api/v1/agent/keys/introspect`) своим ключом хаба с правом `introspect:agent_keys`
+  (`LEDGER_HUB_INTROSPECT_KEY`; пусто — ключи хаба не принимаются, остальное как было) и даёт коду агента права строки
+  `hub_agents`: `ledger keys hub-agent <код> --scope read[,payouts] [--note …]`, выключить — `--off`, список — `ledger keys hub-agents`.
+  Только чтение: `decide`, `propose`, `reports`, `collect`, `import` ключу хаба не даются (CHECK таблицы и код); кода нет в таблице — 403.
+  Ответ хаба живёт 60 с (отзыв виден за минуту); хаб молчит — держится последний «действует» до часа с его получения, «не действует»
+  не продлевается, 4xx хаба — ответ (503, ничего не держится). Каждый вызов — строка `hub_key_calls` под кодом, в `query_log` и `key_name` — `hub:<код>`.
+  Локальные ключи работают как прежде. Проверка — `go test ./internal/auth` (фальшивый хаб).
 - Bybit локально: `LEDGER_BYBIT_API_KEY=… LEDGER_BYBIT_API_SECRET=… ledger bybit fetch --since ГГГГ-ММ-ДД`; статус прогона и
   Funding — `ledger bybit status`, без строки журнала — `ledger bybit unlinked`. Перенос из `ledger-sync`: `ledger rules import <config>`,
   затем `ledger import bybit-state <bybit.sqlite>`; после первого прогона сбора, тогда у событий истории есть сырая запись Bybit.
