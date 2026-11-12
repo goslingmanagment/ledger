@@ -600,10 +600,14 @@ func DriftOf(ctx context.Context, q ledger.Querier, cv *month.Cover, tabs []mont
 			bad = append(bad, fmt.Sprintf("%s: сообщено %.2f, сейчас %.2f (Δ %+.2f): %s", r.Month, r.Reported, r.Now, r.Delta, r.Reason))
 		}
 	}
-	if len(bad) > 0 {
-		return fail(name, "warn", strings.Join(bad, "; "), nil)
+	skipped := ""
+	if pages, err := hub.NoSalePages(ctx, q); err == nil && len(pages) > 0 {
+		skipped = "; страницы площадок без продаж в карточку не входят: " + strings.Join(pages, ", ")
 	}
-	return pass(name, fmt.Sprintf("%d закрытых месяцев без дрейфа ≥ $100", len(rows)))
+	if len(bad) > 0 {
+		return fail(name, "warn", strings.Join(bad, "; ")+skipped, nil)
+	}
+	return pass(name, fmt.Sprintf("%d закрытых месяцев без дрейфа ≥ $100%s", len(rows), skipped))
 }
 
 // Copies: the age of the Litestream replica and of the last copy on the Mac.

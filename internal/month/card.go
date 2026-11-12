@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/goslingmanagment/ledger/internal/hub"
 	"github.com/goslingmanagment/ledger/internal/journal"
 	"github.com/goslingmanagment/ledger/internal/money"
 	"github.com/goslingmanagment/ledger/internal/ts"
@@ -219,6 +220,10 @@ func BuildCard(cv *Cover, month string, tabs []Tab) (*Card, error) {
 	}
 	for _, g := range grant {
 		if _, ok := c.Routes[g.Label]; ok {
+			continue
+		}
+		if !hub.HasSales(g.Platform) {
+			card.Notes = append(card.Notes, g.Label+" ("+g.Platform+"): площадка без продаж — в карточку не входит")
 			continue
 		}
 		s := m0
