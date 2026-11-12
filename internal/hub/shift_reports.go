@@ -61,13 +61,24 @@ type ShiftReportLine struct {
 	Disputed        bool    `json:"disputed"`
 }
 
-// ShiftReportOffSale is money «мимо площадки»: never in the version's total until the owner confirms it.
+// ShiftReportOffSale is money «мимо площадки»: never in the version's total until the owner confirms it; a confirmed one
+// counts in the sum of its page (hub#1252) — a version made on the owner's word includes it there.
 type ShiftReportOffSale struct {
 	ID          int64  `json:"id"`
 	AmountMills *int64 `json:"amountMills"`
 	FromWhom    string `json:"fromWhom"`
 	WhatFor     string `json:"whatFor"`
 	State       string `json:"state"` // pending, confirmed, rejected
+	// PageLabel is a confirmed amount's page; nil — none (an older Hub, or not confirmed).
+	PageLabel *string `json:"pageLabel"`
+}
+
+// CountsOnPage is the page a confirmed amount counts on; "" — it counts nowhere (not confirmed, or no page).
+func (o ShiftReportOffSale) CountsOnPage() string {
+	if o.State != "confirmed" || o.PageLabel == nil {
+		return ""
+	}
+	return *o.PageLabel
 }
 
 // ShiftReportsAnswer is one page of the feed, each version with its raw JSON.
