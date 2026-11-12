@@ -30,10 +30,11 @@ const (
 	ScopeCollect = "collect" // collectors on the Mac send events
 	ScopeImport  = "import"  // one-off imports
 	// ScopePayouts opens GET /v1/payouts, GET /v1/payouts/prepare, GET /v1/payouts/person (only this scope: one person's
-	// own pay without terms), GET /v1/reports[/{id}], GET /v1/report-days,
+	// own pay without terms), GET /v1/payouts/checks (only this scope: the last run of the health checks — key, sentence,
+	// severity, failing since — and the tabs of the week-columns notice), GET /v1/reports[/{id}], GET /v1/report-days,
 	// GET /v1/report-posts without the post texts, GET /v1/decisions, GET /v1/questions and GET /v1/pots… and nothing else: Hub's server
-	// reads the chatters' pay and shift reports with it and sees no owner draws, no other expenses, no cash, no post
-	// texts and no SQL.
+	// reads the chatters' pay and shift reports with it and sees no owner draws, no other expenses, no post texts and no
+	// SQL; of cash and cards it sees only what the sentences of the health checks say.
 	ScopePayouts = "payouts"
 	// ScopeReports opens POST /v1/reports, the decisions and the open questions about whose a sale is (POST and GET /v1/decisions…,
 	// /v1/questions…), the pot

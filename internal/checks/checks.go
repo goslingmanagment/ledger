@@ -845,6 +845,12 @@ type TabColumn struct {
 	LastColumn string `json:"lastColumn"`
 }
 
+// weekColumnsCheck is the name of WeekColumns; checksRunning that of the stopped-job result of WithStale.
+const (
+	weekColumnsCheck = "у завтрашней даты есть колонка во вкладке"
+	checksRunning    = "проверки идут"
+)
+
 // tabActiveDays is how far back a day of work keeps a tab in WeekColumns.
 const tabActiveDays = 14
 
@@ -853,7 +859,7 @@ const tabActiveDays = 14
 // into the day's column and never makes a week block, and a chatter has nowhere to put the day either. Information,
 // never a failure: Hub raises it from the details.
 func WeekColumns(ctx context.Context, e Env) Result {
-	const name = "у завтрашней даты есть колонка во вкладке"
+	const name = weekColumnsCheck
 	today := e.Now.In(ts.MSK)
 	tomorrow := ts.Date(time.Date(today.Year(), today.Month(), today.Day()+1, 0, 0, 0, 0, ts.MSK))
 	since := ts.Date(time.Date(today.Year(), today.Month(), today.Day()-tabActiveDays, 0, 0, 0, 0, ts.MSK))
@@ -1019,10 +1025,10 @@ func Latest(ctx context.Context, q ledger.Querier) ([]Result, string, error) {
 func WithStale(rs []Result, at string, now time.Time) []Result {
 	const staleRun = 2 * time.Hour
 	if at == "" {
-		return append(rs, Result{Name: "проверки идут", Severity: "warn", Summary: "проверки ещё не запускались"})
+		return append(rs, Result{Name: checksRunning, Severity: "warn", Summary: "проверки ещё не запускались"})
 	}
 	if t, err := ts.Parse(at); err == nil && now.Sub(t) > staleRun {
-		return append(rs, Result{Name: "проверки идут", Severity: "warn", Summary: "последний прогон проверок " + at + ": задание на сервере стоит, зелёному верить нельзя"})
+		return append(rs, Result{Name: checksRunning, Severity: "warn", Summary: "последний прогон проверок " + at + ": задание на сервере стоит, зелёному верить нельзя"})
 	}
 	return rs
 }
