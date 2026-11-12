@@ -195,7 +195,7 @@ func TestAnErasedFansWordsGoAndTheMoneyStays(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback()
-	again, err := Apply(ctx, tx, hub.Erasure{ID: 41, Platform: "fansly", FanRef: "777", ErasedAt: "2026-11-13T08:00:00.000Z"}, now)
+	again, _, err := Apply(ctx, tx, hub.Erasure{ID: 41, Platform: "fansly", FanRef: "777", ErasedAt: "2026-11-13T08:00:00.000Z"}, now)
 	if err != nil {
 		t.Fatal(err)
 	}

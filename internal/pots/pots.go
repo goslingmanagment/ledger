@@ -19,6 +19,7 @@ import (
 
 	"github.com/goslingmanagment/ledger/internal/db"
 	"github.com/goslingmanagment/ledger/internal/decisions"
+	"github.com/goslingmanagment/ledger/internal/hub"
 	"github.com/goslingmanagment/ledger/internal/ledger"
 	"github.com/goslingmanagment/ledger/internal/money"
 	"github.com/goslingmanagment/ledger/internal/payroll"
@@ -511,9 +512,10 @@ type LineRef struct {
 	N        int64 `json:"n"`
 }
 
-// SaleInput is the body of POST /v1/pots/{slug}/sales. By transaction_ref the page, fan, net and time come from
-// ledger's mirror of Hub's sales when the transaction is there and must be given when it is not; by from_line they come
-// from a line of a saved report. Amounts are mills.
+// SaleInput is the body of POST /v1/pots/{slug}/sales. By transaction_ref — Hub's id of the sale or the platform's
+// reference of it (hub.SaleRefsOf) — the page, fan, net and time come from ledger's mirror of Hub's sales when the
+// transaction is there and must be given when it is not; by from_line they come from a line of a saved report.
+// Amounts are mills.
 type SaleInput struct {
 	TransactionRef string   `json:"transaction_ref,omitempty"`
 	FromLine       *LineRef `json:"from_line,omitempty"`
@@ -538,6 +540,12 @@ type found struct {
 	page, fanRef, fanName, at string
 	net                       int64
 	ok                        bool
+}
+
+// purchase is a purchase that is in a pot now, and the reference of the sale it was written with.
+type purchase struct {
+	id       int64
+	pot, ref string
 }
 
 // fill takes a value from the source unless the request gave another: a contradiction is refused.
@@ -587,8 +595,7 @@ func AddSale(ctx context.Context, store *db.Store, slug string, in SaleInput, de
 	var src found
 	var reportID, reportN any
 	source := in.Source
-	switch {
-	case in.FromLine != nil:
+	if in.FromLine != nil {
 		src, err = fromLine(ctx, tx, *in.FromLine)
 		if err != nil {
 			return res, err
@@ -602,15 +609,29 @@ func AddSale(ctx context.Context, store *db.Store, slug string, in SaleInput, de
 			return res, err
 		}
 		if in.TransactionRef != "" && ref.String != in.TransactionRef {
-			return res, refuse("transaction_ref: в запросе %q, а у строки %d:%d %q", in.TransactionRef, in.FromLine.ReportID, in.FromLine.N, ref.String)
+			// The request may name the line's sale by its other reference: that is no contradiction.
+			asked, err := hub.SaleRefsOf(ctx, tx, in.TransactionRef)
+			if err != nil {
+				return res, err
+			}
+			if a, b := asked.Either(); !ref.Valid || (ref.String != a && ref.String != b) {
+				return res, refuse("transaction_ref: в запросе %q, а у строки %d:%d %q", in.TransactionRef, in.FromLine.ReportID, in.FromLine.N, ref.String)
+			}
 		}
 		in.TransactionRef = ref.String
 		reportID, reportN = in.FromLine.ReportID, in.FromLine.N
 		if source == "" {
 			source = SourceReportLine
 		}
-	case in.TransactionRef != "":
-		if src, err = fromHub(ctx, tx, in.TransactionRef); err != nil {
+	}
+	// One sale has two references — Hub's id and the platform's (hub.SaleRefsOf) — and the request, or its line, names
+	// either: what follows knows the sale by both. The purchase keeps the reference it came with.
+	refs, err := hub.SaleRefsOf(ctx, tx, in.TransactionRef)
+	if err != nil {
+		return res, err
+	}
+	if in.FromLine == nil && in.TransactionRef != "" {
+		if src, err = fromHub(ctx, tx, refs.Hub()); err != nil {
 			return res, err
 		}
 	}
@@ -623,9 +644,10 @@ func AddSale(ctx context.Context, store *db.Store, slug string, in SaleInput, de
 		return res, refuse("source бывает agent, report_line или owner, а не %q", source)
 	}
 	// From the switch day's sales on (settings.sale_decisions_hub_from) a sale Hub sees goes to a pot by Hub's decision
-	// alone: the job writes the purchase. By hand — money Hub does not see, and the sales before that day.
+	// alone: the job writes the purchase. By hand — money Hub does not see, and the sales before that day. A line of a
+	// report is no other door: its sale is the same sale.
 	if in.TransactionRef != "" {
-		if why, err := hubOnly(ctx, tx, in.TransactionRef, slug); err != nil || why != "" {
+		if why, err := hubOnly(ctx, tx, refs, slug); err != nil || why != "" {
 			if err != nil {
 				return res, err
 			}
@@ -682,17 +704,19 @@ func AddSale(ctx context.Context, store *db.Store, slug string, in SaleInput, de
 		return res, err
 	}
 	if in.TransactionRef != "" {
-		var other int64
-		var otherPot string
-		err := tx.QueryRowContext(ctx, `SELECT id, pot FROM pot_sales WHERE transaction_ref = ? AND removed_at IS NULL`, in.TransactionRef).Scan(&other, &otherPot)
-		switch {
-		case errors.Is(err, sql.ErrNoRows):
-		case err != nil:
+		// The sale may be in a pot already — under this reference or under its other one.
+		have, err := purchasesOf(ctx, tx, refs)
+		if err != nil {
 			return res, err
-		default:
-			return res, refuse("продажа %s уже в общаке %s (покупка %d)", in.TransactionRef, otherPot, other)
 		}
-		counted, err := countedIn(ctx, tx, in.TransactionRef)
+		if len(have) > 0 {
+			under := ""
+			if have[0].ref != refs.Given {
+				under = ", записана под другой ссылкой той же продажи — " + have[0].ref
+			}
+			return res, refuse("продажа %s уже в общаке %s (покупка %d%s)", refs.Given, have[0].pot, have[0].id, under)
+		}
+		counted, err := countedIn(ctx, tx, refs)
 		if err != nil {
 			return res, err
 		}
@@ -720,7 +744,29 @@ func AddSale(ctx context.Context, store *db.Store, slug string, in SaleInput, de
 	return res, tx.Commit()
 }
 
-// fromHub reads a sale of ledger's mirror of Hub's sales.
+// purchasesOf are the purchases of a sale that are in a pot now, whichever of the sale's two references each was
+// written with (hub.SaleRefsOf), the oldest first.
+func purchasesOf(ctx context.Context, q ledger.Querier, refs hub.SaleRefs) ([]purchase, error) {
+	a, b := refs.Either()
+	rows, err := q.QueryContext(ctx, `SELECT id, pot, transaction_ref FROM pot_sales WHERE transaction_ref IN (?, ?) AND removed_at IS NULL
+		ORDER BY id`, a, b)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []purchase
+	for rows.Next() {
+		var p purchase
+		if err := rows.Scan(&p.id, &p.pot, &p.ref); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// fromHub reads a sale of ledger's mirror of Hub's sales by Hub's id of it — what a reference of either kind names is
+// hub.SaleRefsOf(…).Hub().
 func fromHub(ctx context.Context, q ledger.Querier, ref string) (found, error) {
 	var f found
 	var mills int64
@@ -765,19 +811,22 @@ func fromLine(ctx context.Context, q ledger.Querier, l LineRef) (found, error) {
 }
 
 // countedIn says which report counts the sale in a person's own page amount — a counted line of a current version of
-// an agent's draft or of a report handed in in Hub (v_report_lines); "" — none.
-func countedIn(ctx context.Context, q ledger.Querier, ref string) (string, error) {
+// an agent's draft or of a report handed in in Hub (v_report_lines); "" — none. The agent's line names the sale by the
+// platform's reference and Hub's line by Hub's id, so the sale is looked for by both of its references.
+func countedIn(ctx context.Context, q ledger.Querier, refs hub.SaleRefs) (string, error) {
 	var source, date, who string
 	var id int64
 	var n sql.NullInt64
+	a, b := refs.Either()
 	err := q.QueryRowContext(ctx, `SELECT source, report_id, report_date, who, line FROM v_report_lines
-		WHERE transaction_ref = ? AND counted = 1 ORDER BY source = 'hub' DESC, report_id DESC LIMIT 1`, ref).Scan(&source, &id, &date, &who, &n)
+		WHERE transaction_ref IN (?, ?) AND counted = 1 ORDER BY source = 'hub' DESC, report_id DESC LIMIT 1`, a, b).Scan(&source, &id, &date, &who, &n)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	if err != nil {
 		return "", err
 	}
+	ref := refs.Given
 	if source == "hub" {
 		return fmt.Sprintf("продажа %s учтена в отчёте, сданном в хабе: версия %d (%s, %s)", ref, id, who, date), nil
 	}
@@ -845,10 +894,18 @@ type Candidate struct {
 	OccurredAt     *string  `json:"occurred_at"`
 	Flags          []string `json:"flags"`
 	Pots           []string `json:"pots"` // the open pots the line fits by page and date
+	// HubSale is Hub's id of the line's sale — the line itself names the sale by the platform's reference
+	// (hub.SaleRefsOf); nil — ledger's mirrors of Hub do not know the sale.
+	HubSale *string `json:"hub_sale"`
+	// HubDecides says which way the line goes to a pot. true — the sale is one Hub sees of
+	// settings.sale_decisions_hub_from or later: only Hub's decision gives it (hub sale decide --sale <hub_sale> --kind
+	// pot --pot <код>), add-sale refuses it. false — by hand: ledger pot add-sale <код> --from-line <отчёт>:<n>.
+	HubDecides bool `json:"hub_decides"`
 }
 
 // Candidates lists the lines of the current versions of saved reports that were held out of the total with a flag
-// mentioning «общак» and are not in pot_sales yet; slug — only those that fit that pot.
+// mentioning «общак» and are not in pot_sales yet — under either of the sale's two references; slug — only those that
+// fit that pot. Each says how it goes to a pot: by Hub's decision or by hand (HubDecides).
 func Candidates(ctx context.Context, q ledger.Querier, slug string) ([]Candidate, error) {
 	all, err := List(ctx, q)
 	if err != nil {
@@ -870,7 +927,7 @@ func Candidates(ctx context.Context, q ledger.Querier, slug string) ([]Candidate
 		l.fan_ref, l.fan_name, l.net_micros, l.occurred_at, l.flags
 		FROM shift_report_lines l JOIN shift_reports r ON r.id = l.report_id
 		WHERE l.counted = 0 AND l.added = 0 AND r.status <> 'superseded'
-		  AND NOT EXISTS (SELECT 1 FROM pot_sales s WHERE s.removed_at IS NULL AND s.transaction_ref = l.transaction_ref)
+		  AND NOT EXISTS (SELECT 1 FROM pot_sales s WHERE s.removed_at IS NULL AND `+hub.SameSaleSQL("s.transaction_ref", "l.transaction_ref")+`)
 		ORDER BY r.report_date, r.id, l.seq`)
 	if err != nil {
 		return nil, err
@@ -920,7 +977,35 @@ func Candidates(ctx context.Context, q ledger.Querier, slug string) ([]Candidate
 		}
 		out = append(out, c)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	// Which way each line goes to a pot: the same question add-sale asks of it (hubOnly).
+	from, err := decisions.HubFrom(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		c := &out[i]
+		if c.TransactionRef == nil {
+			continue
+		}
+		refs, err := hub.SaleRefsOf(ctx, q, *c.TransactionRef)
+		if err != nil {
+			return nil, err
+		}
+		sale, err := fromHub(ctx, q, refs.Hub())
+		if err != nil {
+			return nil, err
+		}
+		if refs.Known() || sale.ok {
+			id := refs.Hub()
+			c.HubSale = &id
+		}
+		c.HubDecides = hubDecides(from, sale)
+	}
+	return out, nil
 }
 
 func nullStr(s string) any {

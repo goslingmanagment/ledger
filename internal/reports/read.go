@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/goslingmanagment/ledger/internal/decisions"
+	"github.com/goslingmanagment/ledger/internal/hub"
 	"github.com/goslingmanagment/ledger/internal/ledger"
 	"github.com/goslingmanagment/ledger/internal/payroll"
 )
@@ -308,7 +309,9 @@ func fill(ctx context.Context, q ledger.Querier, reports []Report) error {
 	return nil
 }
 
-// agreements are the decisions about the sales of some reports' lines: ledger's own, and Hub's for the sales its word rules.
+// agreements are the decisions about the sales of some reports' lines: ledger's own, and Hub's for the sales its word
+// rules. Both maps are keyed by the reference the line carries — the platform's —, whichever of the sale's two
+// references the decision was written with (hub.SameSaleSQL).
 type agreements struct {
 	own map[string]*Agreement
 	// hub are Hub's active decisions by sale; hubFrom is settings.sale_decisions_hub_from ("" — Hub's are not read).
@@ -329,6 +332,8 @@ func (a agreements) of(ref, day string) *Agreement {
 
 // agreementsOf reads the open or applied decisions about the sales of the reports' lines, the latest of each sale: from
 // ledger's sale_decisions and, once settings.sale_decisions_hub_from is set, the active ones of the mirror of Hub's.
+// A line names its sale by the platform's reference and Hub's decision by Hub's id (ledger's own by whichever its
+// writer had), so a decision is the line's when the two references name one sale.
 func agreementsOf(ctx context.Context, q ledger.Querier, reports []Report) (agreements, error) {
 	out := agreements{own: map[string]*Agreement{}, hub: map[string]*Agreement{}}
 	ids := make([]string, len(reports))
@@ -336,10 +341,12 @@ func agreementsOf(ctx context.Context, q ledger.Querier, reports []Report) (agre
 	for i, r := range reports {
 		ids[i], args[i] = "?", r.ID
 	}
-	refs := `(SELECT transaction_ref FROM shift_report_lines WHERE transaction_ref IS NOT NULL AND report_id IN (` + strings.Join(ids, ", ") + `))`
-	rows, err := q.QueryContext(ctx, `SELECT d.transaction_ref, d.id, d.kind, d.shares, d.pot, d.status, d.said_by, d.note
-		FROM sale_decisions d WHERE d.status IN ('open', 'applied') AND d.transaction_ref IN `+refs+`
-		ORDER BY d.id`, args...)
+	// The references the lines carry, each once.
+	lines := `(SELECT DISTINCT transaction_ref AS ref FROM shift_report_lines WHERE transaction_ref IS NOT NULL AND report_id IN (` +
+		strings.Join(ids, ", ") + `)) l`
+	rows, err := q.QueryContext(ctx, `SELECT l.ref, d.id, d.kind, d.shares, d.pot, d.status, d.said_by, d.note
+		FROM `+lines+` JOIN sale_decisions d ON `+hub.SameSaleSQL("d.transaction_ref", "l.ref")+`
+		WHERE d.status IN ('open', 'applied') ORDER BY d.id`, args...)
 	if err != nil {
 		return out, err
 	}
@@ -361,9 +368,10 @@ func agreementsOf(ctx context.Context, q ledger.Querier, reports []Report) (agre
 	if out.hubFrom, err = decisions.HubFrom(ctx, q); err != nil || out.hubFrom == "" {
 		return out, err
 	}
-	rows, err = q.QueryContext(ctx, `SELECT d.transaction_ref, d.id, d.kind, d.shares, d.pot, d.applied_report_date IS NOT NULL,
-		COALESCE(d.said_by, ''), COALESCE(d.note, '') FROM hub_sale_decisions d
-		WHERE d.state = 'active' AND d.transaction_ref IN `+refs+` ORDER BY d.id`, args...)
+	rows, err = q.QueryContext(ctx, `SELECT l.ref, d.id, d.kind, d.shares, d.pot, d.applied_report_date IS NOT NULL,
+		COALESCE(d.said_by, ''), COALESCE(d.note, '') FROM `+lines+` JOIN hub_sale_decisions d ON `+
+		hub.SameSaleSQL("d.transaction_ref", "l.ref")+`
+		WHERE d.state = 'active' ORDER BY d.id`, args...)
 	if err != nil {
 		return out, err
 	}

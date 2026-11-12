@@ -28,12 +28,18 @@ import (
 // the pot, a sale a report still counts in a person's own page (the guard against paying it twice), a sale already in
 // another pot by hand, a sale that never reached hub_sales. They are the problems of the check «решения хаба о продажах
 // доходят». With the setting empty nothing here does anything.
+//
+// One sale has two references (hub.SaleRefsOf): Hub's decision names it by Hub's id, a report made from a post by the
+// platform's reference, a purchase written by hand by either. The guards look for the sale by both, so a decision is
+// acted on only once the mirror of Hub's transactions holds the sale and both are known; until then it waits, like a
+// decision whose sale has not reached hub_sales, and after the same wait it is a problem — never a purchase written
+// without the guard.
 
 // HubKey is the key name of the purchases the job writes and removes.
 const HubKey = decisions.HubJob
 
-// hubWaits is how long a decision may wait for its sale to reach ledger's mirror of Hub's sales (the team's facts are
-// read every hour) before it is a problem.
+// hubWaits is how long a decision may wait for its sale to reach ledger's mirrors of Hub's sales and of Hub's
+// transactions (both are read every hour) before it is a problem.
 const hubWaits = 3 * time.Hour
 
 func init() {
@@ -81,7 +87,8 @@ type HubPlan struct {
 	Kept   int           `json:"kept"` // decisions whose purchase is in place
 	Add    []HubPurchase `json:"add"`
 	Remove []HubRemoval  `json:"remove"`
-	// Waiting are decisions whose sale has not reached hub_sales yet: the next read of the team's facts brings it.
+	// Waiting are decisions whose sale has not reached hub_sales yet, or whose sale the mirror of Hub's transactions
+	// does not hold yet (its other reference is not known): the next hourly read brings it.
 	Waiting  []HubProblem `json:"waiting"`
 	Problems []HubProblem `json:"problems"`
 }
@@ -196,6 +203,11 @@ func PlanHub(ctx context.Context, q ledger.Querier, now time.Time) (HubPlan, err
 				"позднему, раннее отмените в хабе", d.ref, d.id, latest.id))
 			continue
 		}
+		// waited says whether the decision has waited for the hourly reads long enough to be a problem.
+		waited := func() bool {
+			read, err := ts.Parse(d.readAt)
+			return err == nil && now.Sub(read) > hubWaits
+		}
 		sale, err := fromHub(ctx, q, d.ref)
 		if err != nil {
 			return plan, err
@@ -207,7 +219,7 @@ func PlanHub(ctx context.Context, q ledger.Querier, now time.Time) (HubPlan, err
 				continue
 			}
 			p := problem("продажи %s нет в фактах хаба (hub_sales): её приносит часовое чтение фактов — ledger hub team-sync", d.ref)
-			if read, err := ts.Parse(d.readAt); err == nil && now.Sub(read) > hubWaits {
+			if waited() {
 				p.Why = fmt.Sprintf("продажи %s нет в фактах хаба (hub_sales) больше %d часов после решения: страница продажи вне ключа ledger, "+
 					"продажа ушла из хаба, или факты не читаются — ledger hub status", d.ref, int(hubWaits.Hours()))
 				plan.Problems = append(plan.Problems, p)
@@ -220,28 +232,60 @@ func PlanHub(ctx context.Context, q ledger.Querier, now time.Time) (HubPlan, err
 		if !decisions.HubRules(from, day) {
 			continue // a sale of a day before the switch: by hand, as it was
 		}
+		// The sale's other reference. A report made from a post names the sale by the platform's reference and a
+		// purchase written by hand by either, so without it the guards below would not see them. While the mirror of
+		// Hub's transactions does not hold the sale the decision is not acted on: it waits, and not for long.
+		refs, err := hub.SaleRefsOf(ctx, q, d.ref)
+		if err != nil {
+			return plan, err
+		}
+		if refs.HubID != d.ref || refs.PlatformRef == "" {
+			p := problem("у продажи %s ещё нет ссылки площадки в зеркале транзакций хаба (hub_transactions): по ней продажу называют "+
+				"отчёты по постам и покупки, записанные вручную, — без неё не видно, считает ли продажу отчёт человека и нет ли её уже "+
+				"в общаке; её приносит часовое чтение хаба — ledger hub sync", d.ref)
+			if waited() {
+				p.Why = fmt.Sprintf("у продажи %s больше %d часов после решения нет ссылки площадки в зеркале транзакций хаба "+
+					"(hub_transactions): без неё не видно, считает ли продажу отчёт человека и нет ли её уже в общаке, — покупка не "+
+					"пишется; транзакции страницы %s не читаются или у транзакции нет ссылки площадки — ledger hub status",
+					d.ref, int(hubWaits.Hours()), sale.page)
+				plan.Problems = append(plan.Problems, p)
+			} else {
+				plan.Waiting = append(plan.Waiting, p)
+			}
+			continue
+		}
 		if d.pot == "" {
 			plan.Problems = append(plan.Problems, problem("решение хаба %d отдаёт продажу %s в общак, но не называет общак: запишите его "+
 				"заново с --pot <код общака ledger>", d.id, d.ref))
 			continue
 		}
-		// The sale may be in a pot already. A purchase the job wrote for another decision is settled above (it stays and
-		// changes its decision, or goes in this pass); what is left here was written by hand.
-		var other int64
-		var otherPot string
-		err = q.QueryRowContext(ctx, `SELECT id, pot FROM pot_sales WHERE transaction_ref = ? AND removed_at IS NULL`, d.ref).Scan(&other, &otherPot)
-		switch {
-		case errors.Is(err, sql.ErrNoRows):
-		case err != nil:
+		// The sale may be in a pot already — under Hub's id or under the platform's reference. A purchase the job wrote
+		// for another decision is settled above (it stays and changes its decision, or goes in this pass); what is left
+		// here was written by hand.
+		have, err := purchasesOf(ctx, q, refs)
+		if err != nil {
 			return plan, err
-		case removing[other]:
-			// The purchase another decision made goes in this pass: this decision's purchase takes its place.
-		case otherPot == d.pot:
-			plan.Kept++ // in the pot already, by hand
-			continue
-		default:
+		}
+		var inThis, inOther *purchase
+		for i := range have {
+			switch o := &have[i]; {
+			case removing[o.id]:
+				// The purchase another decision made goes in this pass: this decision's purchase takes its place.
+			case o.pot == d.pot:
+				if inThis == nil {
+					inThis = o
+				}
+			case inOther == nil:
+				inOther = o
+			}
+		}
+		if inOther != nil {
 			plan.Problems = append(plan.Problems, problem("продажа %s уже в общаке %s (покупка %d, записана вручную), а решение хаба %d "+
-				"отдаёт её общаку %s: снимите покупку — ledger pot remove-sale %d", d.ref, otherPot, other, d.id, d.pot, other))
+				"отдаёт её общаку %s: снимите покупку — ledger pot remove-sale %d", d.ref, inOther.pot, inOther.id, d.id, d.pot, inOther.id))
+			continue
+		}
+		if inThis != nil {
+			plan.Kept++ // in the pot already, by hand
 			continue
 		}
 		p, err := get(ctx, q, d.pot)
@@ -270,7 +314,7 @@ func PlanHub(ctx context.Context, q ledger.Querier, now time.Time) (HubPlan, err
 			plan.Problems = append(plan.Problems, problem("решение хаба %d, продажа %s: %s", d.id, d.ref, r.Msg))
 			continue
 		}
-		counted, err := countedIn(ctx, q, d.ref)
+		counted, err := countedIn(ctx, q, refs)
 		if err != nil {
 			return plan, err
 		}
@@ -368,20 +412,32 @@ func FollowHub(ctx context.Context, store *db.Store, now time.Time) (FollowRepor
 
 func hubNote(decision int64) string { return fmt.Sprintf("решение хаба %d", decision) }
 
+// hubDecides says whether only Hub's decision gives a sale to a pot: the switch day (from) is set and the sale is one
+// Hub sees — ledger's mirror of its sales has it — of that Moscow day or later.
+func hubDecides(from string, sale found) bool {
+	return from != "" && sale.ok && decisions.HubRules(from, sale.at[:10])
+}
+
 // hubOnly says why a sale Hub sees is not put in a pot by hand; "" — it may be. From the switch day's sales on only
-// Hub's decision gives a sale to a pot.
-func hubOnly(ctx context.Context, q ledger.Querier, ref, slug string) (string, error) {
+// Hub's decision gives a sale to a pot, whichever of its two references the request — or the report line it names —
+// carries: the refusal names Hub's id of the sale, which is what Hub's command takes.
+func hubOnly(ctx context.Context, q ledger.Querier, refs hub.SaleRefs, slug string) (string, error) {
 	from, err := decisions.HubFrom(ctx, q)
 	if err != nil || from == "" {
 		return "", err
 	}
-	sale, err := fromHub(ctx, q, ref)
-	if err != nil || !sale.ok || !decisions.HubRules(from, sale.at[:10]) {
+	id := refs.Hub()
+	sale, err := fromHub(ctx, q, id)
+	if err != nil || !hubDecides(from, sale) {
 		return "", err
+	}
+	when := sale.at[:10]
+	if refs.Given != id {
+		when += ", ссылка площадки " + refs.Given
 	}
 	return fmt.Sprintf("продажу хаба %s (%s) с %s в общак отдаёт только решение в хабе: hub sale decide --sale %s --kind pot --pot %s … — "+
 		"покупку запишет джоб %s; ledger pot add-sale — для денег, которых хаб не видит, и продаж раньше этого дня",
-		ref, sale.at[:10], from, ref, slug, HubKey), nil
+		id, when, from, id, slug, HubKey), nil
 }
 
 // hubKeeps says why a purchase is not taken off by hand; "" — it may be. A purchase the job wrote goes when its

@@ -27,7 +27,8 @@ func init() {
 	Command(Cmd{Name: "pot remove-sale", Run: potRemoveSale,
 		Summary: `снять покупку из общака (строка остаётся): <id> --note "…"; покупку по решению хаба снимает отмена решения в хабе`})
 	Command(Cmd{Name: "pot candidates", Run: potCandidates,
-		Summary: "строки отчётов, не вошедшие в итог с пометкой про общак и ещё не в общаке: [<код>] [--json]"})
+		Summary: "строки отчётов, не вошедшие в итог с пометкой про общак и ещё не в общаке, и как каждой попасть в общак " +
+			"(решение в хабе или --from-line): [<код>] [--json]"})
 }
 
 // potWrite runs a write of the pots next to the database, then what follows it (the accruals).
@@ -213,7 +214,7 @@ func deref(s *string) string {
 func potAddSale(ctx context.Context, args []string) error {
 	fs := Flags("pot add-sale")
 	var in pots.SaleInput
-	fs.StringVar(&in.TransactionRef, "tx", "", "продажа хаба (transactionRef)")
+	fs.StringVar(&in.TransactionRef, "tx", "", "продажа: id хаба или ссылка площадки на транзакцию")
 	line := fs.String("from-line", "", "строка сохранённого отчёта: <id отчёта>:<n>")
 	fs.StringVar(&in.PageLabel, "page", "", "страница хаба, если продажи нет в зеркале хаба")
 	net := fs.String("net", "", "нетто, доллары, если продажи нет в зеркале хаба")
@@ -336,7 +337,7 @@ func potCandidates(ctx context.Context, args []string) error {
 		if c.N != nil {
 			line += ":" + strconv.FormatInt(*c.N, 10)
 		}
-		who, at, ref := c.HubUsername, c.ReportDate, "—"
+		who, at, ref, hubSale, how := c.HubUsername, c.ReportDate, "—", "—", "--from-line"
 		if c.Person != nil {
 			who = *c.Person
 		}
@@ -346,11 +347,18 @@ func potCandidates(ctx context.Context, args []string) error {
 		if c.TransactionRef != nil {
 			ref = *c.TransactionRef
 		}
-		rows = append(rows, []string{line, who, at, c.PageLabel, strings.TrimSpace(c.FanName + " " + c.FanRef), ref, usd(c.NetMicros),
-			strings.Join(c.Flags, "; "), strings.Join(c.Pots, ", ")})
+		if c.HubSale != nil {
+			hubSale = *c.HubSale
+		}
+		if c.HubDecides {
+			how = "решение в хабе"
+		}
+		rows = append(rows, []string{line, who, at, c.PageLabel, strings.TrimSpace(c.FanName + " " + c.FanRef), ref, hubSale, usd(c.NetMicros),
+			strings.Join(c.Flags, "; "), strings.Join(c.Pots, ", "), how})
 	}
-	writeTable(out, []string{"строка", "чей отчёт", "когда", "страница", "фан", "продажа", "нетто", "пометки", "подходит в"}, rows,
-		[]bool{false, false, false, false, false, false, true, false, false})
-	fmt.Fprintln(out, "\nкаждую — по подтверждению: ledger pot add-sale <код> --from-line <строка>")
+	writeTable(out, []string{"строка", "чей отчёт", "когда", "страница", "фан", "продажа", "id хаба", "нетто", "пометки", "подходит в", "как в общак"},
+		rows, []bool{false, false, false, false, false, false, false, true, false, false, false})
+	fmt.Fprintln(out, "\nкаждую — по подтверждению. «--from-line»: ledger pot add-sale <код> --from-line <строка>. «решение в хабе» — продажа хаба дня "+
+		"decision hub-from и позже: hub sale decide --sale <id хаба> --kind pot --pot <код>, покупку запишет джоб hub-decisions")
 	return out.Flush()
 }

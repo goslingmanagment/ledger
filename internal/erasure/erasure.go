@@ -11,9 +11,14 @@
 //   - the mirror of Hub's decisions (hub_sale_decisions): the note of a decision on those sales;
 //   - hub_sales: the fan reference in the payload, which also makes a second pass find nothing (idempotent).
 //
+// A sale has two references (hub.SaleRefsOf): hub_sales and Hub's own rows name it by Hub's id, the agent's drafts by
+// the platform's reference, a decision, a question or a pot purchase by whichever its writer had. «His sales» are his
+// by either.
+//
 // What no fan reference ties to the fan stays: «мимо площадки» (who paid, what for), the shift's comment, the posts of
 // «Отчётность» (their texts are in the immutable events), a decision or question that names the fan only by a login no
-// other row of ledger ties to his id (Hub's feed names the id alone), and the owner's word on a nobody's sale
+// other row of ledger ties to his id (Hub's feed names the id alone) or by a name ledger's rows tie to another fan too
+// (it is not known whose such a row is; hub_erasures.rows counts those names), and the owner's word on a nobody's sale
 // (sale_claims, immutable).
 package erasure
 
@@ -73,6 +78,9 @@ type Status struct {
 	Applied  int            `json:"applied"` // erasures that changed a row
 	Rows     map[string]int `json:"rows"`    // rows changed, by table
 	LastOKAt string         `json:"lastOkAt,omitempty"`
+	// AmbiguousNames is how many names of the erased fans were not used to find their rows: ledger's rows tie each to
+	// another fan too (namesOf).
+	AmbiguousNames int `json:"ambiguousNames,omitempty"`
 }
 
 // ReadStatus reads the last pass; nil — never.
@@ -123,10 +131,11 @@ func Sync(ctx context.Context, store *db.Store, c *hub.Client, now time.Time) (S
 		st.Read += len(ans.Erasures)
 		err = inTx(ctx, store, func(tx *sql.Tx) error {
 			for _, e := range ans.Erasures {
-				rows, err := Apply(ctx, tx, e, now)
+				rows, ambiguous, err := Apply(ctx, tx, e, now)
 				if err != nil {
 					return fmt.Errorf("стирание %d: %w", e.ID, err)
 				}
+				st.AmbiguousNames += ambiguous
 				changed := 0
 				for k, n := range rows {
 					st.Rows[k] += n
@@ -188,22 +197,33 @@ func inTx(ctx context.Context, store *db.Store, fn func(*sql.Tx) error) error {
 	return tx.Commit()
 }
 
+// ambiguousKey is the key of hub_erasures.rows that counts, beside the tables' rows, the names not used (namesOf).
+const ambiguousKey = "ambiguous_names"
+
 // Apply clears the words about one erased fan and records the erasure (hub_erasures: no fan reference). It returns the
-// rows changed by table; a second run changes nothing.
-func Apply(ctx context.Context, tx *sql.Tx, e hub.Erasure, now time.Time) (map[string]int, error) {
+// rows changed by table and how many names ledger holds for the fan were not used to find his rows because its rows
+// tie them to another fan too (namesOf); a second run changes nothing.
+func Apply(ctx context.Context, tx *sql.Tx, e hub.Erasure, now time.Time) (map[string]int, int, error) {
 	out := map[string]int{}
-	refs, err := salesOf(ctx, tx, e.Platform, e.FanRef)
+	// The fan's sales: by Hub's id, as hub_sales and Hub's own rows name them, and — for the rows ledger's own writers
+	// made, which carry either reference of a sale — by the platform's reference too.
+	sales, err := salesOf(ctx, tx, e.Platform, e.FanRef)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	platformRefs, err := hub.PlatformRefs(ctx, tx, sales)
+	if err != nil {
+		return nil, 0, err
+	}
+	refs := append(append([]string{}, sales...), platformRefs...)
 	pages, err := pagesOf(ctx, tx, e.Platform)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	// How a row may name the fan (namesOf), read before anything is cleared.
-	names, err := namesOf(ctx, tx, e.FanRef, refs, pages)
+	names, ambiguous, err := namesOf(ctx, tx, e.FanRef, sales, refs, pages)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	exec := func(table, query string, args ...any) error {
 		res, err := tx.ExecContext(ctx, query, args...)
@@ -214,6 +234,7 @@ func Apply(ctx context.Context, tx *sql.Tx, e hub.Erasure, now time.Time) (map[s
 		out[table] += int(n)
 		return nil
 	}
+	saleList, saleArgs := inList(sales)
 	refList, refArgs := inList(refs)
 	pageList, pageArgs := inList(pages)
 	nameList, nameArgs := inList(names)
@@ -224,7 +245,10 @@ func Apply(ctx context.Context, tx *sql.Tx, e hub.Erasure, now time.Time) (map[s
 		return where, args
 	}
 
-	inRefs := map[string]bool{}
+	inSales, inRefs := map[string]bool{}, map[string]bool{}
+	for _, r := range sales {
+		inSales[r] = true
+	}
 	for _, r := range refs {
 		inRefs[r] = true
 	}
@@ -237,17 +261,17 @@ func Apply(ctx context.Context, tx *sql.Tx, e hub.Erasure, now time.Time) (map[s
 		onPlatform[p] = true
 	}
 	// Hub's handed-in versions: the line's note, in the stored payload and in the table.
-	if len(refs) > 0 {
+	if len(sales) > 0 {
 		n, err := rewritePayloads(ctx, tx, `SELECT DISTINCT r.id, r.payload FROM hub_shift_reports r JOIN hub_shift_report_lines l ON l.report_id = r.id
-			WHERE l.transaction_ref IN `+refList, refArgs, `UPDATE hub_shift_reports SET payload = ? WHERE id = ?`,
-			func(m map[string]any) bool { return inRefs[refString(m["transactionId"])] }, map[string]any{"note": nil})
+			WHERE l.transaction_ref IN `+saleList, saleArgs, `UPDATE hub_shift_reports SET payload = ? WHERE id = ?`,
+			func(m map[string]any) bool { return inSales[refString(m["transactionId"])] }, map[string]any{"note": nil})
 		if err != nil {
-			return nil, fmt.Errorf("hub_shift_reports: %w", err)
+			return nil, 0, fmt.Errorf("hub_shift_reports: %w", err)
 		}
 		out["hub_shift_reports"] += n
-		if err := exec("hub_shift_report_lines", `UPDATE hub_shift_report_lines SET note = NULL WHERE note IS NOT NULL AND transaction_ref IN `+refList,
-			refArgs...); err != nil {
-			return nil, err
+		if err := exec("hub_shift_report_lines", `UPDATE hub_shift_report_lines SET note = NULL WHERE note IS NOT NULL AND transaction_ref IN `+saleList,
+			saleArgs...); err != nil {
+			return nil, 0, err
 		}
 	}
 	// The agent's drafts: the line's fan and notes, in the stored payload (its content hash stays, so the same draft sent
@@ -260,50 +284,54 @@ func Apply(ctx context.Context, tx *sql.Tx, e hub.Erasure, now time.Time) (map[s
 			return inRefs[ref] || (fan != "" && isFan[strings.ToLower(fan)] && onPlatform[page])
 		}, map[string]any{"fan_ref": "", "fan_name": "", "notes": []any{}})
 	if err != nil {
-		return nil, fmt.Errorf("shift_reports: %w", err)
+		return nil, 0, fmt.Errorf("shift_reports: %w", err)
 	}
 	out["shift_reports"] += n
 	where, args = whose("transaction_ref", "fan_ref", "page_label")
 	if err := exec("shift_report_lines", `UPDATE shift_report_lines SET fan_ref = '', fan_name = '', notes = '[]'
 		WHERE (fan_ref <> '' OR fan_name <> '' OR notes <> '[]') AND `+where, args...); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	// Decisions, questions, pot purchases.
 	if err := exec("sale_decisions", `UPDATE sale_decisions SET fan_ref = '', fan_name = '', note = ''
 		WHERE (fan_ref <> '' OR fan_name <> '' OR note <> '') AND `+where, args...); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if err := exec("sale_questions", `UPDATE sale_questions SET fan_ref = '', fan_name = '', question = ?, note = '',
 		answer = CASE WHEN answer IS NULL THEN NULL ELSE ? END
 		WHERE (fan_ref <> '' OR fan_name <> '' OR question <> ? OR note <> '') AND `+where,
 		append([]any{Erased, Erased, Erased}, args...)...); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if err := exec("pot_sales", `UPDATE pot_sales SET fan_ref = '', fan_name = '', note = ''
 		WHERE (fan_ref <> '' OR fan_name <> '' OR note <> '') AND `+where, args...); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	// Hub's decisions as ledger mirrors them (hub_sale_decisions): the note of a decision on the fan's sale. Hub clears
 	// its own and its feed brings that; the copy here does not wait for the feed.
-	if len(refs) > 0 {
-		if err := exec("hub_sale_decisions", `UPDATE hub_sale_decisions SET note = NULL WHERE note IS NOT NULL AND transaction_ref IN `+refList,
-			refArgs...); err != nil {
-			return nil, err
+	if len(sales) > 0 {
+		if err := exec("hub_sale_decisions", `UPDATE hub_sale_decisions SET note = NULL WHERE note IS NOT NULL AND transaction_ref IN `+saleList,
+			saleArgs...); err != nil {
+			return nil, 0, err
 		}
 	}
 	// Last, the link itself: a second pass finds no sale of the fan.
-	if len(refs) > 0 {
+	if len(sales) > 0 {
 		if err := exec("hub_sales", `UPDATE hub_sales SET payload = json_set(payload, '$.fanRef', json('null'))
-			WHERE transaction_ref IN `+refList, refArgs...); err != nil {
-			return nil, err
+			WHERE transaction_ref IN `+saleList, saleArgs...); err != nil {
+			return nil, 0, err
 		}
 	}
-	counts, _ := json.Marshal(out)
+	stored := map[string]int{ambiguousKey: ambiguous}
+	for table, n := range out {
+		stored[table] = n
+	}
+	counts, _ := json.Marshal(stored)
 	if _, err := tx.ExecContext(ctx, `INSERT INTO hub_erasures(id, platform, erased_at, applied_at, rows) VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO NOTHING`, e.ID, e.Platform, e.ErasedAt, ts.Format(now), string(counts)); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return out, nil
+	return out, ambiguous, nil
 }
 
 // salesOf are the fan's sales on the platform, by the fan reference ledger's mirror of Hub's sales carries.
@@ -315,31 +343,95 @@ func salesOf(ctx context.Context, q ledger.Querier, platform, fanRef string) ([]
 // loginRe is the shape of a login: what a fan name must look like to stand for the fan's login.
 var loginRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{1,63}$`)
 
+// idRe is the shape of a fan's platform id as a row's fan reference carries it: bare, or as "u" + the id.
+var idRe = regexp.MustCompile(`^u?[0-9]+$`)
+
+// nameTables are the tables whose rows name a fan — by a reference (fan_ref) and a name (fan_name) — on a page, some
+// of them about a sale.
+var nameTables = []string{"shift_report_lines", "sale_decisions", "sale_questions", "pot_sales"}
+
 // namesOf are the ways ledger's rows may name the fan, lower-cased — the three Hub's carry-over of ledger's decisions
 // matched a fan by: his platform id, "u" + the id (the login of an account that never chose one), and his login. Hub's
 // feed carries no login, so the logins are the ones ledger itself holds for him: the fan name of a row with his id or on
-// one of his sales, when it has the shape of a login. A login no row of ledger ties to his id is not known to be his.
-func namesOf(ctx context.Context, q ledger.Querier, fanRef string, refs, pages []string) ([]string, error) {
+// one of his sales (sales: by Hub's id; refs: by either reference of a sale), when it has the shape of a login. A login
+// no row of ledger ties to his id is not known to be his.
+//
+// A fan name is not a login, though: it may be a display name, and another fan's login may read the same. So a name
+// learned this way stands for the fan only while nothing in ledger ties it to another fan (tiedToAnother) — the rule
+// Hub applies to the same case: a name counts when exactly one fan carries it. A name that fails is not used, and the
+// second answer counts those; the rows his id or his own sales tie to the fan are cleared whatever their names.
+func namesOf(ctx context.Context, q ledger.Querier, fanRef string, sales, refs, pages []string) ([]string, int, error) {
 	id := strings.ToLower(fanRef)
 	out := []string{id, "u" + id}
 	seen := map[string]bool{id: true, "u" + id: true}
 	refList, refArgs := inList(refs)
 	pageList, pageArgs := inList(pages)
 	args := append(append(append([]any{}, refArgs...), id, "u"+id), pageArgs...)
-	for _, table := range []string{"shift_report_lines", "sale_decisions", "sale_questions", "pot_sales"} {
+	var learned []string
+	for _, table := range nameTables {
 		found, err := strings1(ctx, q, `SELECT DISTINCT lower(fan_name) FROM `+table+` WHERE fan_name <> '' AND (transaction_ref IN `+refList+`
 			OR (lower(fan_ref) IN (?, ?) AND page_label IN `+pageList+`)) ORDER BY 1`, args...)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", table, err)
+			return nil, 0, fmt.Errorf("%s: %w", table, err)
 		}
 		for _, n := range found {
 			if loginRe.MatchString(n) && !seen[n] {
 				seen[n] = true
-				out = append(out, n)
+				learned = append(learned, n)
 			}
 		}
 	}
-	return out, nil
+	ambiguous := 0
+	for _, n := range learned {
+		other, err := tiedToAnother(ctx, q, fanRef, n, sales, pages)
+		if err != nil {
+			return nil, 0, err
+		}
+		if other {
+			ambiguous++
+			continue
+		}
+		out = append(out, n)
+	}
+	return out, ambiguous, nil
+}
+
+// tiedToAnother says whether a row of ledger ties a name to a fan other than this one. Of the rows on the platform's
+// pages that carry the name — as the fan reference or as the fan name — one does when:
+//
+//   - it carries another fan's id as its fan reference: a platform id, bare or as "u" + the id (idRe), that is not
+//     this fan's — beside the name, or as the name itself when the name reads as an id;
+//   - or it is about a sale of another fan — a sale hub_sales gives a fan and that is not one of this fan's (sales),
+//     found by either of the sale's references.
+func tiedToAnother(ctx context.Context, q ledger.Querier, fanRef, name string, sales, pages []string) (bool, error) {
+	id := strings.ToLower(fanRef)
+	saleList, saleArgs := inList(sales)
+	pageList, pageArgs := inList(pages)
+	for _, table := range nameTables {
+		carried, err := strings1(ctx, q, `SELECT DISTINCT lower(fan_ref) FROM `+table+` WHERE page_label IN `+pageList+`
+			AND (lower(fan_ref) = ? OR lower(fan_name) = ?) AND fan_ref <> '' ORDER BY 1`, append(append([]any{}, pageArgs...), name, name)...)
+		if err != nil {
+			return false, fmt.Errorf("%s: %w", table, err)
+		}
+		for _, ref := range carried {
+			if idRe.MatchString(ref) && ref != id && ref != "u"+id {
+				return true, nil
+			}
+		}
+		var one int
+		err = q.QueryRowContext(ctx, `SELECT 1 FROM `+table+` t WHERE t.page_label IN `+pageList+`
+			AND (lower(t.fan_ref) = ? OR lower(t.fan_name) = ?)
+			AND EXISTS (SELECT 1 FROM hub_sales s WHERE `+hub.SameSaleSQL("s.transaction_ref", "t.transaction_ref")+`
+			    AND json_extract(s.payload, '$.fanRef') IS NOT NULL AND s.transaction_ref NOT IN `+saleList+`)
+			LIMIT 1`, append(append(append([]any{}, pageArgs...), name, name), saleArgs...)...).Scan(&one)
+		if err == nil {
+			return true, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return false, fmt.Errorf("%s: %w", table, err)
+		}
+	}
+	return false, nil
 }
 
 // pagesOf are the platform's pages ledger knows.
