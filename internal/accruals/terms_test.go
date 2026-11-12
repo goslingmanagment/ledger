@@ -462,3 +462,17 @@ func TestFromTheTermsDayARegistryNewcomerIsAccruedWithoutATab(t *testing.T) {
 		t.Fatalf("the card: %s", got)
 	}
 }
+
+// A 404 from the people feed once it has been read is a failure, not «nothing yet».
+func TestA404AfterThePeopleFeedWasReadIsAFailure(t *testing.T) {
+	s, _ := termsWeek(t)
+	reg := loadRegistry(t)
+	reg.read(t, s)
+	reg.absent = true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) { http.NotFound(w, req) }))
+	defer srv.Close()
+	st, err := payroll.SyncHubTerms(context.Background(), s, hub.NewClient(hub.Config{BaseURL: srv.URL, Key: "k"}, nil), reportNow.Add(time.Hour))
+	if err == nil || st.OK || st.Absent || !strings.Contains(st.Error, "404") {
+		t.Fatalf("404 after reading: %+v %v", st, err)
+	}
+}

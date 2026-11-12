@@ -223,16 +223,24 @@ func SyncHubTerms(ctx context.Context, store *db.Store, c *hub.Client, now time.
 		return err
 	}
 	ans, readErr := c.People(ctx, since)
+	// The feed was read before when a cursor or a stored person is here: a 404 then is not «nothing yet».
+	var known int
+	if err := store.RW.QueryRowContext(ctx, `SELECT count(*) FROM hub_people`).Scan(&known); err != nil {
+		return st, err
+	}
+	readBefore := cursor != "" || known > 0
 	switch {
 	case readErr == nil && !ans.PayTermsIncluded:
 		st.OK, st.NoTerms = true, true
 		st.Error = "ключу ledger в хабе не дано read:pay_terms — условия реестра не читаются"
 		return st, save()
 	case readErr == nil:
-	case hub.IsAbsent(readErr):
+	case hub.IsAbsent(readErr) && !readBefore:
 		st.OK, st.Absent, st.LastOKAt = true, true, st.At
 		st.Error = "хаб ещё не отдаёт реестр людей (" + hub.PeoplePath + " — 404)"
 		return st, save()
+	case hub.IsAbsent(readErr):
+		st.Error = "лента реестра людей ответила 404 (" + hub.PeoplePath + "), хотя уже читалась — адрес хаба или его выкатка; ничего не прочитано"
 	case hub.IsKeyRefused(readErr):
 		st.Error = hub.KeyRefusalText(readErr)
 	case hub.IsRefusal(readErr):

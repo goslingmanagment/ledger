@@ -195,10 +195,14 @@ func SyncHub(ctx context.Context, store *db.Store, c *hub.Client, now time.Time)
 	switch {
 	case readErr == nil:
 		st.OK, st.LastOKAt = true, st.At
-	case hub.IsAbsent(readErr):
+	case hub.IsAbsent(readErr) && (since == "" || since == "0"):
 		st.OK, st.Absent, st.LastOKAt = true, true, st.At
 		st.Error = "хаб ещё не отдаёт сданные отчёты (" + hub.ShiftReportsPath + " — 404)"
 		readErr = nil
+	case hub.IsAbsent(readErr):
+		// The feed was read before (the cursor is past zero): a 404 now is a route gone or a wrong address, not «nothing yet».
+		st.Error = "лента сданных отчётов ответила 404 (" + hub.ShiftReportsPath + "), хотя уже читалась: курсор " + since +
+			" — адрес хаба или его выкатка; ничего не прочитано"
 	case hub.IsKeyRefused(readErr):
 		st.Error = hub.KeyRefusalText(readErr)
 	case hub.IsRefusal(readErr):
