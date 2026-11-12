@@ -262,3 +262,57 @@ func TestAHubWithoutTheFeedIsNothingYet(t *testing.T) {
 		t.Fatalf("%d versions from a refusing hub", n)
 	}
 }
+
+// «Мимо площадки» the owner confirmed (hub#1252): Hub makes a new version whose page sum includes the confirmed amount on
+// the item's page. It counts as a line of that page, the day's Hub sum includes it, and it is kept as counted there. A
+// pending one adds nothing, as before; a confirmed one on a page ledger does not know is a problem that names it.
+func TestAConfirmedOffPlatformAmountCountsOnItsPage(t *testing.T) {
+	s := book(t)
+	ctx := context.Background()
+	// version: anna's shift on the day with one sale of 100 on page-a, the pages and the total as given, and its «мимо площадки».
+	version := func(id, shift int64, v int, day string, pageMills int64, madeFor any, off ...map[string]any) json.RawMessage {
+		offs := []any{}
+		for _, o := range off {
+			offs = append(offs, o)
+		}
+		return raw(t, map[string]any{"id": id, "person": "anna", "hubUserId": 41, "shiftId": shift, "reportDate": day, "version": v,
+			"submittedAt": day + "T20:00:00Z", "door": "workboard", "telegramMessageRef": nil, "totalMills": pageMills,
+			"pages": []any{map[string]any{"pageLabel": "page-a", "amountMills": pageMills}},
+			"lines": []any{map[string]any{"transactionId": 5000 + id, "pageLabel": "page-a", "group": "mine", "netMills": 100_000,
+				"ruleShareMills": 100_000, "ruleHome": "shift", "ruleReason": "holder", "statement": nil, "shareWithUserId": nil, "note": nil,
+				"amountMills": 100_000, "added": false, "disputed": false, "settled": nil}},
+			"offPlatform": offs, "comment": "", "dayPaid": nil, "ruleVersion": "c2", "madeFor": madeFor})
+	}
+	off := func(id int64, state string, page any) map[string]any {
+		return map[string]any{"id": id, "amountMills": 15_000, "fromWhom": "фан", "whatFor": "кастом", "state": state, "pageLabel": page}
+	}
+	byOwner := map[string]any{"kind": "off_platform", "claimId": nil, "offPlatformId": 71, "transactionId": nil, "outcome": "confirmed",
+		"byUserId": 1}
+	_, c := newStubHub(t, []json.RawMessage{
+		version(1, 1, 1, "2026-11-10", 100_000, nil, off(71, "pending", nil)),
+		version(2, 1, 2, "2026-11-10", 115_000, byOwner, off(71, "confirmed", "page-a")), // the owner's word: 100 + 15
+		version(3, 2, 1, "2026-11-11", 100_000, nil, off(72, "pending", "page-a")),       // pending: as before
+		version(4, 3, 1, "2026-11-12", 115_000, byOwner, off(73, "confirmed", "page-q")), // a page ledger does not know
+	})
+	st, err := SyncHub(ctx, s, c, hubNow)
+	if err != nil || st.Stored != 3 || st.Problems != 1 {
+		t.Fatalf("status %+v %v", st, err)
+	}
+	if got, want := lines(t, s, `SELECT report_id, hub_id, amount_micros, state, counted, COALESCE(page_label, '∅') FROM hub_shift_report_adds
+		ORDER BY report_id`), strings.Join([]string{
+		"1 71 15000000 pending 0 ∅",
+		"2 71 15000000 confirmed 1 page-a",
+		"3 72 15000000 pending 0 ∅",
+	}, "\n"); got != want {
+		t.Fatalf("off platform:\n%s\nwant\n%s", got, want)
+	}
+	if got, want := lines(t, s, `SELECT report_date, page, hub_micros FROM v_report_pages WHERE person = 'anna' ORDER BY report_date`),
+		"2026-11-10 page-a 115000000\n2026-11-11 page-a 100000000"; got != want {
+		t.Fatalf("the day's Hub sum:\n%s\nwant\n%s", got, want)
+	}
+	problems, err := HubProblems(ctx, s.RO)
+	if err != nil || len(problems) != 1 || problems[0].ID != 4 ||
+		!strings.Contains(problems[0].Problem, "«мимо площадки» 1 (запись 73): страницы «page-q» нет в hub_pages") {
+		t.Fatalf("problems %+v %v", problems, err)
+	}
+}

@@ -332,16 +332,29 @@ func (v *validator) check(it hub.ShiftReport) (person string, problem string) {
 			lines[l.PageLabel] += *l.AmountMills
 		}
 	}
+	// «Мимо площадки» the owner confirmed counts in its page's sum (hub#1252): it is a line of that page here. One with
+	// no page or not confirmed adds nothing.
+	for i, o := range it.OffPlatform {
+		label := o.CountsOnPage()
+		_, inVersion := page[label]
+		switch {
+		case !millsOK(o.AmountMills) || !hubOffStates[o.State]:
+			add("«мимо площадки» %d: нет суммы или state %q", i+1, o.State)
+		case label == "":
+		case !v.pages[label]:
+			add("«мимо площадки» %d (запись %d): страницы «%s» нет в hub_pages", i+1, o.ID, label)
+		case !inVersion:
+			add("«мимо площадки» %d (запись %d): страницы %s нет в pages версии", i+1, o.ID, label)
+			sums = false
+		default:
+			lines[label] += *o.AmountMills
+		}
+	}
 	if sums {
 		for _, p := range it.Pages {
 			if d := page[p.PageLabel] - lines[p.PageLabel]; d > hubPageSlack || d < -hubPageSlack {
 				add("страница %s: строки дают %d mills, у страницы %d mills", p.PageLabel, lines[p.PageLabel], page[p.PageLabel])
 			}
-		}
-	}
-	for i, o := range it.OffPlatform {
-		if !millsOK(o.AmountMills) || !hubOffStates[o.State] {
-			add("«мимо площадки» %d: нет суммы или state %q", i+1, o.State)
 		}
 	}
 	if len(why) > 6 {
@@ -426,9 +439,12 @@ func storeHub(ctx context.Context, tx *sql.Tx, v *validator, it hub.ShiftReport,
 			return "", err
 		}
 	}
+	// A confirmed amount with a page is in that page's sum (check): kept as counted on it, not as an uncounted add.
 	for i, o := range it.OffPlatform {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO hub_shift_report_adds(report_id, seq, hub_id, amount_micros, from_whom, what_for, state, counted)
-			VALUES (?, ?, ?, ?, ?, ?, ?, 0)`, rowID, i+1, o.ID, int64(money.FromMills(*o.AmountMills)), o.FromWhom, o.WhatFor, o.State); err != nil {
+		label := o.CountsOnPage()
+		if _, err := tx.ExecContext(ctx, `INSERT INTO hub_shift_report_adds(report_id, seq, hub_id, amount_micros, from_whom, what_for, state,
+			counted, page_label) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, rowID, i+1, o.ID, int64(money.FromMills(*o.AmountMills)), o.FromWhom,
+			o.WhatFor, o.State, boolInt(label != ""), nullStr(label)); err != nil {
 			return "", err
 		}
 	}

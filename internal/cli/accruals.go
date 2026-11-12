@@ -286,6 +286,20 @@ func printDiff(out *bufio.Writer, d accruals.Diff) {
 		writeTable(indent{out}, []string{"день", "человек", "пост", "хаб", "основа", "страницы"}, rows,
 			[]bool{false, false, true, true, false, false})
 	}
+	if len(d.TermsDays) > 0 {
+		fmt.Fprintln(out, "\nУсловия реестра хаба против шапки вкладки — дни отчётов, где они расходятся (реестр ≠ вкладка):")
+		rows := [][]string{}
+		for _, x := range d.TermsDays {
+			basis := "вкладка"
+			if x.Basis == "hub" {
+				basis = "реестр"
+			}
+			rows = append(rows, []string{x.Day, x.Name + " (" + x.Person + ")", x.Model, usd(x.NetMicros), orDash(x.TabAmountMicros),
+				orDash(x.HubAmountMicros), basis, strings.Join(x.Differences, ", ")})
+		}
+		writeTable(indent{out}, []string{"день", "человек", "модель", "выручка", "по вкладке", "по реестру", "основа", "что"}, rows,
+			[]bool{false, false, false, true, true, true, false, false})
+	}
 	group(out, "Общак за неделю (ничей смены, делит владелец)", d.Pot)
 	group(out, "Ждёт решения (владелец или согласные метки чаттеров)", d.Decide)
 	group(out, "PPV ждёт смены отправителя", d.Waiting)

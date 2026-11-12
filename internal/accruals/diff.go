@@ -57,6 +57,11 @@ type Diff struct {
 	// — the posts only. HubDays are the week's days where Hub's handed-in report and the post differ.
 	HubFrom string   `json:"hubFrom,omitempty"`
 	HubDays []HubDay `json:"hubDays"`
+	// TermsFrom is the day from which a day's accrual takes the person's terms from Hub's people registry
+	// (payroll_terms_hub_from); "" — the tabs' headers. TermsDays are the week's reports days whose terms differ: the
+	// registry's term holding on the day against the tab's header, or no registry term.
+	TermsFrom string     `json:"termsFrom,omitempty"`
+	TermsDays []TermsDay `json:"termsDays"`
 }
 
 // HubDay is a person's day where the report handed in in Hub and the post differ — a page by another amount, or on one
@@ -298,6 +303,9 @@ func WeekDiff(ctx context.Context, q ledger.Querier, week string) (Diff, error) 
 		return d, err
 	}
 	if err := addHub(ctx, q, &d); err != nil {
+		return d, err
+	}
+	if err := addTerms(ctx, q, &d); err != nil {
 		return d, err
 	}
 

@@ -44,6 +44,7 @@ var Keys = map[string]string{
 	"изменения за выплаченные дни ждут решения": "pending_changes",
 	weekColumnsCheck:                            "week_columns",
 	"ставки вкладок как в карточках":            "tab_rates",
+	payTermsCheck: "pay_terms",
 	checksRunning: "checks_running",
 }
 
