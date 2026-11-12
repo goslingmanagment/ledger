@@ -42,7 +42,8 @@
   очередь `~/.config/ledger/spool`, только `gog --readonly`); `ledger payroll open --dry-run` — стартовые долги таблицей, без `--dry-run` они замораживаются
   навсегда; `ledger payroll rebuild` — свести сейчас, `ledger payables` — что вышло. Строки вкладок, которые не пишутся как страница хаба, — в `settings.sheet_pages`.
   Хабу («Выплаты» Workboard) — `GET /v1/payouts?from&to` (до 62 дней) ключом с правом `payouts`: он открывает только его и
-  `GET /v1/payouts/prepare?person=код`; то же глазами — `ledger payouts --from ГГГГ-ММ-ДД --to … [--person код]`.
+  `GET /v1/payouts/prepare?person=код`; то же глазами — `ledger payouts --from ГГГГ-ММ-ДД --to … [--person код]`. В ответе и выключатели:
+  `termsHubFrom` (`payroll_terms_hub_from`) и `basisHubFrom` (`payroll_basis_hub_from`), `null` — выключен (экран «График и условия» хаба).
   Деньги одного человека для него самого («Мои смены» хаба) — `GET /v1/payouts/person?person=код&from&to`, только право `payouts`
   (ключ `read` — 403): дни книг с постами отчёта, что оплачено какой строкой журнала, ручные поправки, выплаты, долг по `v_payables`;
   ни ставок, ни выручки, ни «К выплате» вкладки, ни чужих строк. Дела владельцу из проверок — `GET /v1/payouts/checks`, тоже только `payouts`:

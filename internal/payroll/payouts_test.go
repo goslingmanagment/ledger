@@ -1,9 +1,11 @@
 package payroll
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -230,5 +232,34 @@ func TestPayoutsKeySeesOnlyPayouts(t *testing.T) {
 	nobody := client.New(config.Client{URL: srv.URL, Key: "ldg_nobody_x"})
 	if code := status(nobody.Do(ctx, http.MethodGet, window, nil, nil)); code != http.StatusUnauthorized {
 		t.Fatalf("no key: %d", code)
+	}
+}
+
+// The payouts read tells Hub's owner screens which source prices a day: from payroll_terms_hub_from the people
+// registry's terms, from payroll_basis_hub_from Hub's handed-in reports; null while a switch is empty.
+func TestPayoutsSayWhetherHubsTermsAndReportsPriceTheDays(t *testing.T) {
+	s, _ := payoutsBook(t)
+	ctx := t.Context()
+	now := t0("2026-09-15T10:30:00+03:00")
+	ans, err := ReadPayouts(ctx, s.RO, "2026-09-07", "2026-09-15", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(ans)
+	if ans.TermsHubFrom != nil || ans.BasisHubFrom != nil || !strings.Contains(string(raw), `"termsHubFrom":null,"basisHubFrom":null`) {
+		t.Fatalf("switches while empty: %s", raw)
+	}
+	if err := SetTermsHubFrom(ctx, s.RW, "2026-09-14", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetReportsFrom(ctx, s.RW, "2026-09-15", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetHubFrom(ctx, s.RW, "2026-09-15", now); err != nil {
+		t.Fatal(err)
+	}
+	if ans, err = ReadPayouts(ctx, s.RO, "2026-09-07", "2026-09-15", now); err != nil || ans.TermsHubFrom == nil || *ans.TermsHubFrom != "2026-09-14" ||
+		ans.BasisHubFrom == nil || *ans.BasisHubFrom != "2026-09-15" {
+		t.Fatalf("switches set: %+v %v", ans, err)
 	}
 }
