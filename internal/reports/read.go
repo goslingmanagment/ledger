@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/goslingmanagment/ledger/internal/decisions"
 	"github.com/goslingmanagment/ledger/internal/ledger"
 	"github.com/goslingmanagment/ledger/internal/payroll"
 )
@@ -41,7 +42,8 @@ type Line struct {
 	Notes          []string `json:"notes"`
 	PPVAuthor      string   `json:"ppv_author"`
 	PPVSentAt      string   `json:"ppv_sent_at"`
-	// Agreement is the open or applied decision about whose the sale is (sale_decisions, R3); nil — none.
+	// Agreement is the open or applied decision about whose the sale is; nil — none. Ledger's own (sale_decisions, R3),
+	// or — for a sale of settings.sale_decisions_hub_from and later — Hub's active decision of the sale, when it has one.
 	Agreement *Agreement `json:"agreement"`
 }
 
@@ -54,7 +56,12 @@ type Agreement struct {
 	Status string          `json:"status"`
 	SaidBy string          `json:"said_by"`
 	Note   string          `json:"note"`
+	// Source is "hub" when the decision is Hub's (hub_sale_decisions: ID is Hub's id); absent — ledger's own.
+	Source string `json:"source,omitempty"`
 }
+
+// SourceHubDecision marks an agreement that is Hub's decision.
+const SourceHubDecision = "hub"
 
 // Report is one version of a report.
 type Report struct {
@@ -281,7 +288,12 @@ func fill(ctx context.Context, q ledger.Querier, reports []Report) error {
 			}
 			l.TransactionRef, l.OccurredAt = nullable(ref), nullable(at)
 			if ref.Valid {
-				l.Agreement = agreements[ref.String]
+				// The sale's Moscow day; a line without the sale's time is taken as of the report's date.
+				day := r.ReportDate
+				if at.Valid && len(at.String) >= 10 {
+					day = at.String[:10]
+				}
+				l.Agreement = agreements.of(ref.String, day)
 			}
 			l.Flags, l.Notes = []string{}, []string{}
 			_ = json.Unmarshal([]byte(flags), &l.Flags)
@@ -296,31 +308,109 @@ func fill(ctx context.Context, q ledger.Querier, reports []Report) error {
 	return nil
 }
 
-// agreementsOf reads the open or applied decisions about the sales of the reports' lines, the latest of each sale.
-func agreementsOf(ctx context.Context, q ledger.Querier, reports []Report) (map[string]*Agreement, error) {
+// agreements are the decisions about the sales of some reports' lines: ledger's own, and Hub's for the sales its word rules.
+type agreements struct {
+	own map[string]*Agreement
+	// hub are Hub's active decisions by sale; hubFrom is settings.sale_decisions_hub_from ("" — Hub's are not read).
+	hub     map[string]*Agreement
+	hubFrom string
+}
+
+// of is the agreement of a sale of a Moscow day: for a sale of the switch day or later Hub's active decision when Hub has
+// one — ledger's own decisions are frozen from that day, the word is recorded in Hub —, else ledger's own.
+func (a agreements) of(ref, day string) *Agreement {
+	if decisions.HubRules(a.hubFrom, day) {
+		if h := a.hub[ref]; h != nil {
+			return h
+		}
+	}
+	return a.own[ref]
+}
+
+// agreementsOf reads the open or applied decisions about the sales of the reports' lines, the latest of each sale: from
+// ledger's sale_decisions and, once settings.sale_decisions_hub_from is set, the active ones of the mirror of Hub's.
+func agreementsOf(ctx context.Context, q ledger.Querier, reports []Report) (agreements, error) {
+	out := agreements{own: map[string]*Agreement{}, hub: map[string]*Agreement{}}
 	ids := make([]string, len(reports))
 	args := make([]any, len(reports))
 	for i, r := range reports {
 		ids[i], args[i] = "?", r.ID
 	}
+	refs := `(SELECT transaction_ref FROM shift_report_lines WHERE transaction_ref IS NOT NULL AND report_id IN (` + strings.Join(ids, ", ") + `))`
 	rows, err := q.QueryContext(ctx, `SELECT d.transaction_ref, d.id, d.kind, d.shares, d.pot, d.status, d.said_by, d.note
-		FROM sale_decisions d WHERE d.status IN ('open', 'applied') AND d.transaction_ref IN
-		(SELECT transaction_ref FROM shift_report_lines WHERE transaction_ref IS NOT NULL AND report_id IN (`+strings.Join(ids, ", ")+`))
+		FROM sale_decisions d WHERE d.status IN ('open', 'applied') AND d.transaction_ref IN `+refs+`
 		ORDER BY d.id`, args...)
 	if err != nil {
-		return nil, err
+		return out, err
 	}
-	defer rows.Close()
-	out := map[string]*Agreement{}
 	for rows.Next() {
 		var ref, shares string
 		var pot sql.NullString
 		a := &Agreement{}
 		if err := rows.Scan(&ref, &a.ID, &a.Kind, &shares, &pot, &a.Status, &a.SaidBy, &a.Note); err != nil {
-			return nil, err
+			rows.Close()
+			return out, err
 		}
 		a.Shares, a.Pot = json.RawMessage(shares), nullable(pot)
-		out[ref] = a // the latest stands
+		out.own[ref] = a // the latest stands
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return out, err
+	}
+	if out.hubFrom, err = decisions.HubFrom(ctx, q); err != nil || out.hubFrom == "" {
+		return out, err
+	}
+	rows, err = q.QueryContext(ctx, `SELECT d.transaction_ref, d.id, d.kind, d.shares, d.pot, d.applied_report_date IS NOT NULL,
+		COALESCE(d.said_by, ''), COALESCE(d.note, '') FROM hub_sale_decisions d
+		WHERE d.state = 'active' AND d.transaction_ref IN `+refs+` ORDER BY d.id`, args...)
+	if err != nil {
+		return out, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ref, shares string
+		var pot sql.NullString
+		var applied bool
+		a := &Agreement{Source: SourceHubDecision, Status: "open"}
+		if err := rows.Scan(&ref, &a.ID, &a.Kind, &shares, &pot, &applied, &a.SaidBy, &a.Note); err != nil {
+			return out, err
+		}
+		if applied {
+			a.Status = "applied"
+		}
+		a.Shares, a.Pot = hubShares(shares), nullable(pot)
+		out.hub[ref] = a
 	}
 	return out, rows.Err()
+}
+
+// hubShares renders the shares of Hub's decision the way a line's agreement carries ledger's: the person's code and the
+// percent; a share of a login no person holds names the login.
+func hubShares(raw string) json.RawMessage {
+	var in []struct {
+		Person  *string `json:"person"`
+		UserID  int64   `json:"userId"`
+		Percent int     `json:"percent"`
+	}
+	type share struct {
+		Person    string `json:"person"`
+		Percent   int    `json:"percent"`
+		HubUserID *int64 `json:"hub_user_id,omitempty"`
+	}
+	out := []share{}
+	if json.Unmarshal([]byte(raw), &in) == nil {
+		for _, x := range in {
+			s := share{Percent: x.Percent}
+			if x.Person != nil && *x.Person != "" {
+				s.Person = *x.Person
+			} else {
+				id := x.UserID
+				s.HubUserID = &id
+			}
+			out = append(out, s)
+		}
+	}
+	b, _ := json.Marshal(out)
+	return b
 }

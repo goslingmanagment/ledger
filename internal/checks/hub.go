@@ -41,6 +41,7 @@ var Keys = map[string]string{
 	"отчёты разобраны":                          "report_posts",
 	"у смен есть отчёты":                        "shift_reports",
 	hubReportsCheck:                             "hub_reports",
+	hubDecisionsCheck:                           "hub_decisions",
 	"изменения за выплаченные дни ждут решения": "pending_changes",
 	weekColumnsCheck:                            "week_columns",
 	"ставки вкладок как в карточках":            "tab_rates",

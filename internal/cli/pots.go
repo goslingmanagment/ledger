@@ -22,8 +22,10 @@ func init() {
 	Command(Cmd{Name: "pot list", Run: potList, Summary: "общаки: [--json]"})
 	Command(Cmd{Name: "pot show", Run: potShow, Summary: "общак: покупки и доля каждого: <код> [--json]"})
 	Command(Cmd{Name: "pot add-sale", Run: potAddSale,
-		Summary: "покупка в общак (право reports или decide): <код> --tx <transactionRef> | --from-line <отчёт>:<n> [--page … --net 12.50 --at время --fan-ref … --fan-name …] [--note …] [--force]"})
-	Command(Cmd{Name: "pot remove-sale", Run: potRemoveSale, Summary: `снять покупку из общака (строка остаётся): <id> --note "…"`})
+		Summary: "покупка в общак (право reports или decide): <код> --tx <transactionRef> | --from-line <отчёт>:<n> [--page … --net 12.50 --at время --fan-ref … --fan-name …] [--note …] [--force]; " +
+			"продажу хаба дня decision hub-from и позже в общак отдаёт только решение в хабе (hub sale decide --kind pot)"})
+	Command(Cmd{Name: "pot remove-sale", Run: potRemoveSale,
+		Summary: `снять покупку из общака (строка остаётся): <id> --note "…"; покупку по решению хаба снимает отмена решения в хабе`})
 	Command(Cmd{Name: "pot candidates", Run: potCandidates,
 		Summary: "строки отчётов, не вошедшие в итог с пометкой про общак и ещё не в общаке: [<код>] [--json]"})
 }
@@ -177,8 +179,12 @@ func potShow(ctx context.Context, args []string) error {
 		if s.TransactionRef != nil {
 			ref = *s.TransactionRef
 		}
+		from := s.Source
+		if s.HubDecisionID != nil {
+			from += fmt.Sprintf(", решение хаба %d", *s.HubDecisionID)
+		}
 		rows = append(rows, []string{strconv.FormatInt(s.ID, 10), s.OccurredAt, s.PageLabel, strings.TrimSpace(s.FanName + " " + s.FanRef), ref,
-			usd(s.NetMicros), s.Source, strings.Join(shares, ", ")})
+			usd(s.NetMicros), from, strings.Join(shares, ", ")})
 	}
 	writeTable(out, []string{"id", "когда", "страница", "фан", "продажа", "нетто", "откуда", "доли"}, rows,
 		[]bool{true, false, false, false, false, true, false, false})

@@ -120,8 +120,10 @@ type Sale struct {
 	KeyName        string  `json:"key_name"`
 	RemovedAt      *string `json:"removed_at"`
 	RemovedNote    *string `json:"removed_note"`
-	Shares         []Share `json:"shares"`
-	Flag           *string `json:"flag"` // a purchase with no participant on its date: no share
+	// HubDecisionID is Hub's decision of kind pot the purchase follows (written by the job hub-decisions); nil — by hand.
+	HubDecisionID *int64  `json:"hub_decision_id"`
+	Shares        []Share `json:"shares"`
+	Flag          *string `json:"flag"` // a purchase with no participant on its date: no share
 }
 
 // Total is a person's share of a pot in all.
@@ -449,15 +451,18 @@ func Show(ctx context.Context, q ledger.Querier, slug string) (Shown, error) {
 }
 
 const saleColumns = `id, pot, transaction_ref, page_label, fan_ref, fan_name, net_micros, occurred_at, day, source, report_id, report_n,
-	note, added_at, key_name, removed_at, removed_note`
+	note, added_at, key_name, removed_at, removed_note, hub_decision_id`
 
 func scanSale(row interface{ Scan(...any) error }) (Sale, error) {
 	var s Sale
 	var ref, removed, removedNote sql.NullString
-	var rid, rn sql.NullInt64
+	var rid, rn, decision sql.NullInt64
 	if err := row.Scan(&s.ID, &s.Pot, &ref, &s.PageLabel, &s.FanRef, &s.FanName, &s.NetMicros, &s.OccurredAt, &s.Day, &s.Source,
-		&rid, &rn, &s.Note, &s.AddedAt, &s.KeyName, &removed, &removedNote); err != nil {
+		&rid, &rn, &s.Note, &s.AddedAt, &s.KeyName, &removed, &removedNote, &decision); err != nil {
 		return Sale{}, err
+	}
+	if decision.Valid {
+		s.HubDecisionID = &decision.Int64
 	}
 	if ref.Valid {
 		s.TransactionRef = &ref.String
@@ -616,6 +621,16 @@ func AddSale(ctx context.Context, store *db.Store, slug string, in SaleInput, de
 	case SourceAgent, SourceReportLine, SourceOwner:
 	default:
 		return res, refuse("source бывает agent, report_line или owner, а не %q", source)
+	}
+	// From the switch day's sales on (settings.sale_decisions_hub_from) a sale Hub sees goes to a pot by Hub's decision
+	// alone: the job writes the purchase. By hand — money Hub does not see, and the sales before that day.
+	if in.TransactionRef != "" {
+		if why, err := hubOnly(ctx, tx, in.TransactionRef, slug); err != nil || why != "" {
+			if err != nil {
+				return res, err
+			}
+			return res, refuse("%s", why)
+		}
 	}
 	var s found
 	if s.page, err = fill("page_label", given.page, src.page); err != nil {
@@ -798,6 +813,12 @@ func RemoveSale(ctx context.Context, store *db.Store, id int64, in RemoveInput, 
 	}
 	if s.RemovedAt != nil {
 		return Sale{}, refuse("покупка %d уже снята из общака %s", id, s.Pot)
+	}
+	if why, err := hubKeeps(ctx, tx, s); err != nil || why != "" {
+		if err != nil {
+			return Sale{}, err
+		}
+		return Sale{}, refuse("%s", why)
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE pot_sales SET removed_at = ?, removed_note = ?, removed_by = ? WHERE id = ?`,
 		ts.Format(now), note, keyName, id); err != nil {
