@@ -645,7 +645,10 @@ func saveTeam(ctx context.Context, tx *sql.Tx, w teamSpan, a *teamAnswer, res Te
 			ON CONFLICT(transaction_ref) DO UPDATE SET window_from = excluded.window_from, page_label = excluded.page_label,
 			platform = excluded.platform, kind = excluded.kind, net_mills = excluded.net_mills, occurred_at = excluded.occurred_at,
 			ppv_sender_user_id = excluded.ppv_sender_user_id, last_writer_user_id = excluded.last_writer_user_id,
-			post_tip = excluded.post_tip, campaign = excluded.campaign, payload = excluded.payload, read_at = excluded.read_at`,
+			post_tip = excluded.post_tip, campaign = excluded.campaign,
+			payload = CASE WHEN json_extract(excluded.payload, '$.fanRef') IS NULL AND json_extract(hub_sales.payload, '$.fanRef') IS NOT NULL
+			  THEN json_set(excluded.payload, '$.fanRef', json_extract(hub_sales.payload, '$.fanRef')) ELSE excluded.payload END,
+			read_at = excluded.read_at`,
 			x.TransactionRef, win, x.PageLabel, x.Platform, x.Kind, *x.NetMills, ts.FormatMilli(x.OccurredAt), senderOf(x),
 			x.LastWriterUserID, bit(x.PostTip), bit(x.Campaign), string(a.salesRaw[i]), at, at); err != nil {
 			return err
