@@ -27,7 +27,7 @@ func SameCents(posted, draft int64) bool {
 	return d <= 5000
 }
 
-// Day is a row of v_report_pages: a person's page on a report date, as posted and as drafted.
+// Day is a row of v_report_pages: a person's page on a report date, as posted, as drafted and as handed in in Hub.
 type Day struct {
 	Person       string  `json:"person"`
 	ReportDate   string  `json:"report_date"`
@@ -40,6 +40,15 @@ type Day struct {
 	PostedAt     *string `json:"posted_at"`
 	ReportID     *int64  `json:"report_id"`
 	PostID       *int64  `json:"post_id"`
+	// HubMicros is the page in the reports handed in in Hub for the person and day (their shifts added); nil — none.
+	// HubDiffMicros is posted − Hub (0 — equal to the cent); HubState hub_equal, hub_changed, hub_only, hub_missing, or
+	// nil when Hub has no report of the person and day.
+	HubMicros     *int64  `json:"hub_micros"`
+	HubDiffMicros *int64  `json:"hub_diff_micros"`
+	HubState      *string `json:"hub_state"`
+	// Basis is what accrues the day (hub or post) and AccrueMicros the page's amount it accrues; nil — nothing.
+	Basis        string `json:"basis"`
+	AccrueMicros *int64 `json:"accrue_micros"`
 }
 
 // DaysAnswer is the reply of GET /v1/report-days.
@@ -70,8 +79,8 @@ func Days(ctx context.Context, q ledger.Querier, f Filter) ([]Day, error) {
 		args = append(args, person)
 	}
 	rows, err := q.QueryContext(ctx, `SELECT person, report_date, page, model, posted_micros, draft_micros, diff_micros, state,
-		posted_at, report_id, post_id FROM v_report_pages WHERE `+strings.Join(where, " AND ")+`
-		ORDER BY report_date, person, page`, args...)
+		posted_at, report_id, post_id, hub_micros, hub_diff_micros, hub_state, basis, accrue_micros FROM v_report_pages
+		WHERE `+strings.Join(where, " AND ")+` ORDER BY report_date, person, page`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -79,13 +88,15 @@ func Days(ctx context.Context, q ledger.Querier, f Filter) ([]Day, error) {
 	out := []Day{}
 	for rows.Next() {
 		var d Day
-		var posted, draft, diff, report, post sql.NullInt64
-		var at sql.NullString
-		if err := rows.Scan(&d.Person, &d.ReportDate, &d.Page, &d.Model, &posted, &draft, &diff, &d.State, &at, &report, &post); err != nil {
+		var posted, draft, diff, report, post, hubAmount, hubDiff, accrue sql.NullInt64
+		var at, hubState sql.NullString
+		if err := rows.Scan(&d.Person, &d.ReportDate, &d.Page, &d.Model, &posted, &draft, &diff, &d.State, &at, &report, &post,
+			&hubAmount, &hubDiff, &hubState, &d.Basis, &accrue); err != nil {
 			return nil, err
 		}
 		d.PostedMicros, d.DraftMicros, d.DiffMicros = nullInt(posted), nullInt(draft), nullInt(diff)
 		d.ReportID, d.PostID, d.PostedAt = nullInt(report), nullInt(post), nullable(at)
+		d.HubMicros, d.HubDiffMicros, d.HubState, d.AccrueMicros = nullInt(hubAmount), nullInt(hubDiff), nullable(hubState), nullInt(accrue)
 		out = append(out, d)
 	}
 	return out, rows.Err()

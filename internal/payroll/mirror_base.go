@@ -61,7 +61,8 @@ type MirrorTab struct {
 	Skip   string `json:"skip,omitempty"`
 }
 
-// MirrorPost is a posted page amount of the pay base (v_report_pages.posted_micros) for a person, model and report date.
+// MirrorPost is a page amount of the pay base that accrues (v_report_pages.accrue_micros: the post, or Hub's handed-in
+// report for the days accrued from it) for a person, model and report date. The wire name stays posted_micros.
 type MirrorPost struct {
 	Person string `json:"person"`
 	Model  string `json:"model"`
@@ -144,8 +145,8 @@ func LoadMirrorBase(ctx context.Context, q ledger.Querier, from string) (MirrorB
 	if b.From == "" {
 		return b, nil
 	}
-	rows, err = q.QueryContext(ctx, `SELECT person, model, report_date, page, posted_micros FROM v_report_pages
-		WHERE posted_micros IS NOT NULL AND report_date >= ? ORDER BY person, model, report_date, page`, b.From)
+	rows, err = q.QueryContext(ctx, `SELECT person, model, report_date, page, accrue_micros FROM v_report_pages
+		WHERE accrue_micros IS NOT NULL AND report_date >= ? ORDER BY person, model, report_date, page`, b.From)
 	if err != nil {
 		return b, err
 	}
@@ -209,8 +210,8 @@ func mirrorLagCells(ctx context.Context, q ledger.Querier, from string) (int, er
 	if err := rows.Err(); err != nil {
 		return 0, err
 	}
-	rows, err = q.QueryContext(ctx, `SELECT person, model, report_date, page, posted_micros FROM v_report_pages
-		WHERE posted_micros IS NOT NULL AND report_date >= ?`, from)
+	rows, err = q.QueryContext(ctx, `SELECT person, model, report_date, page, accrue_micros FROM v_report_pages
+		WHERE accrue_micros IS NOT NULL AND report_date >= ?`, from)
 	if err != nil {
 		return 0, err
 	}

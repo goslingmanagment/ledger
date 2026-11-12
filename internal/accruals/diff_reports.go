@@ -9,12 +9,14 @@ import (
 	"github.com/goslingmanagment/ledger/internal/ledger"
 	"github.com/goslingmanagment/ledger/internal/money"
 	"github.com/goslingmanagment/ledger/internal/payroll"
+	"github.com/goslingmanagment/ledger/internal/reports"
 )
 
 // The week of `ledger accruals diff` with the shift reports beside the sheet and the facts (R2): per person and day the
 // sheet, the reports and the facts, the differences sheet ↔ reports and reports ↔ facts, and for a day the sheet and
 // the reports differ on, its pages with both amounts. A difference under a dollar on a page whose sheet cell is a whole
-// number is «округление таблицы»: shown, not counted in the totals.
+// number is «округление таблицы»: shown, not counted in the totals. Beside them, the days where the report handed in in
+// Hub and the post differ (addHub): what changes when such a day accrues from Hub (payroll_basis_hub_from).
 
 // Presence of a day on one side only.
 const (
@@ -223,6 +225,67 @@ func addReports(ctx context.Context, q ledger.Querier, d *Diff, factsKnown bool)
 		sort.Slice(p.Days, func(i, j int) bool { return p.Days[i].Day < p.Days[j].Day })
 	}
 	return nil
+}
+
+// addHub lists the week's days where the report handed in in Hub and the post differ (v_report_pages.hub_state): a page
+// of another amount than the post to the cent, or on one side only. A day Hub has no report of is not listed.
+func addHub(ctx context.Context, q ledger.Querier, d *Diff) error {
+	var err error
+	if d.HubFrom, err = payroll.HubFrom(ctx, q); err != nil {
+		return err
+	}
+	d.HubDays = []HubDay{}
+	names, err := personNames(ctx, q)
+	if err != nil {
+		return err
+	}
+	rows, err := q.QueryContext(ctx, `SELECT person, report_date, page, posted_micros, hub_micros, hub_state, basis FROM v_report_pages
+		WHERE hub_state IS NOT NULL AND report_date BETWEEN ? AND ? ORDER BY person, report_date, page`, d.Week, d.Until)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var cur *HubDay
+	differs := false
+	flush := func() {
+		if cur != nil && differs {
+			d.HubDays = append(d.HubDays, *cur)
+		}
+		cur, differs = nil, false
+	}
+	for rows.Next() {
+		var person, day, page, state, basis string
+		var posted, hubAmount sql.NullInt64
+		if err := rows.Scan(&person, &day, &page, &posted, &hubAmount, &state, &basis); err != nil {
+			return err
+		}
+		if cur == nil || cur.Person != person || cur.Day != day {
+			flush()
+			cur = &HubDay{Person: person, Name: names[person], Day: day, Basis: basis, Pages: []HubPage{}}
+			if cur.Name == "" {
+				cur.Name = person
+			}
+		}
+		pg := HubPage{Page: page, PostMicros: ptr(posted), HubMicros: ptr(hubAmount), State: state}
+		if pg.PostMicros != nil {
+			cur.PostMicros = addTo(cur.PostMicros, *pg.PostMicros)
+		}
+		if pg.HubMicros != nil {
+			cur.HubMicros = addTo(cur.HubMicros, *pg.HubMicros)
+		}
+		differs = differs || state != reports.StateHubEqual
+		cur.Pages = append(cur.Pages, pg)
+	}
+	flush()
+	return rows.Err()
+}
+
+func addTo(sum *int64, v int64) *int64 {
+	if sum == nil {
+		return &v
+	}
+	x := *sum + v
+	return &x
 }
 
 // sheetCellsOf reads the person's sheet cells of the week by day and Hub page.

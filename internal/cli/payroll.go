@@ -30,6 +30,8 @@ func init() {
 		Summary: "начисления из фактов хаба с дня (рядом с базой): [ГГГГ-ММ-ДД | --off]; без аргумента — показать; затем пересборка"})
 	Command(Cmd{Name: "payroll reports-from", Run: payrollReportsFrom,
 		Summary: "начисления из отчётов смен с дня (рядом с базой): [ГГГГ-ММ-ДД | --off]; без аргумента — показать; затем пересборка"})
+	Command(Cmd{Name: "payroll hub-from", Run: payrollHubFrom,
+		Summary: "день отчётов — по отчёту, сданному в хабе, когда он есть, иначе по посту, с дня (рядом с базой): [ГГГГ-ММ-ДД | --off]; без аргумента — показать; затем пересборка"})
 	Command(Cmd{Name: "payroll change", Run: payrollChange,
 		Summary: `изменение выплаченного дня: apply <id> — сторно и новая проводка по отчёту, dismiss <id> — книги как были; [--note "…"] (ключ decide или рядом с базой)`})
 }
@@ -82,6 +84,57 @@ func payrollReportsFrom(ctx context.Context, args []string) error {
 		return err
 	}
 	return printJSON(map[string]any{"ok": true, "reportsFrom": day, "reports": shadow, "report": rep})
+}
+
+// payrollHubFrom sets or clears the day from which a reports day accrues from the report handed in in Hub, and rebuilds
+// the reports' accruals and the debts, as reports-from does. --off gives back the posts' days; a paid day waits for the
+// owner either way.
+func payrollHubFrom(ctx context.Context, args []string) error {
+	fs := Flags("payroll hub-from")
+	off := fs.Bool("off", false, "выключить: дни снова по постам (откат)")
+	pos, err := ParseArgs(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) > 1 || (*off && len(pos) > 0) {
+		return Exit{Code: 2, Msg: "ledger payroll hub-from [ГГГГ-ММ-ДД | --off]"}
+	}
+	store, err := OpenStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	if len(pos) == 0 && !*off {
+		from, err := payroll.HubFrom(ctx, store.RO)
+		if err != nil {
+			return err
+		}
+		return printJSON(map[string]any{"ok": true, "hubFrom": from})
+	}
+	day := ""
+	if !*off {
+		day = pos[0]
+	}
+	tx, err := store.RW.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := payroll.SetHubFrom(ctx, tx, day, ts.Now()); err != nil {
+		return Exit{Code: 2, Msg: "не записано: " + err.Error()}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	shadow, err := accruals.RebuildReports(ctx, store, ts.Now())
+	if err != nil {
+		return err
+	}
+	rep, err := payroll.Rebuild(ctx, store, ts.Now())
+	if err != nil {
+		return err
+	}
+	return printJSON(map[string]any{"ok": true, "hubFrom": day, "reports": shadow, "report": rep})
 }
 
 // payrollChange applies or dismisses a pending change of a paid day, next to the database or through the API (decide).

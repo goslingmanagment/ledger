@@ -21,10 +21,17 @@ import (
 // reportPlan). At most one is on. Both share how the books follow them (reconcileAccruals): the days the source wants are
 // posted on the person's tab of the model with the source in the source_key, a day it cannot answer for keeps what is
 // posted (holds) and stands in «не занесено» as unknown with the reason (marks), and what no tab takes is listed
-// (lost). The reports add one rule the facts never had: a day a payout reached does not change by itself.
+// (lost). The reports add one rule the facts never had: a day a payout reached does not change by itself. Inside the
+// reports a day may accrue from the report handed in in Hub instead of the post (settings.payroll_basis_hub_from, the
+// third case of the guard): only with the reports on, never before them.
 
 // SettingReportsFrom is the first Moscow day accrued from the shift reports; empty or absent — not from them.
 const SettingReportsFrom = "payroll_reports_from"
+
+// SettingHubFrom is the first Moscow day a reports day accrues from the report handed in in Hub (hub_shift_reports)
+// when the person has one for the day, else from the post as before; empty or absent — the posts only. It lives inside
+// the reports: only with payroll_reports_from on, never before it (v_report_pages.basis, accrue_micros).
+const SettingHubFrom = "payroll_basis_hub_from"
 
 // SourceReports is a day accrued from the shift reports (report_accruals).
 const SourceReports = "reports"
@@ -79,11 +86,54 @@ func SetReportsFrom(ctx context.Context, q ledger.Querier, day string, now time.
 			return fmt.Errorf("уже включены начисления из фактов хаба с %s: два источника после таблиц сразу нельзя — сначала ledger payroll facts-from --off", other)
 		}
 	}
-	_, err := q.ExecContext(ctx, `INSERT INTO settings(key, value, note, updated_at) VALUES (?, ?, ?, ?)
+	hubFrom, err := HubFrom(ctx, q)
+	if err != nil {
+		return err
+	}
+	if hubFrom != "" && (day == "" || day > hubFrom) {
+		return fmt.Errorf("отчёты хаба как основа дня включены с %s (%s): отчёты смен без них не выключить и не начать позже — сначала ledger payroll hub-from --off",
+			hubFrom, SettingHubFrom)
+	}
+	_, err = q.ExecContext(ctx, `INSERT INTO settings(key, value, note, updated_at) VALUES (?, ?, ?, ?)
 		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
 		SettingReportsFrom, day, reportsFromNote, ts.Format(now))
 	return err
 }
+
+// HubFrom is the first day a reports day accrues from Hub's handed-in report, "" when the posts only.
+func HubFrom(ctx context.Context, q ledger.Querier) (string, error) {
+	return settingDay(ctx, q, SettingHubFrom)
+}
+
+// SetHubFrom sets the first day a reports day accrues from Hub's handed-in report ("" turns it off). The reports must
+// accrue (payroll_reports_from) from that day already: Hub's report is a basis of the reports' days, not a source of
+// its own.
+func SetHubFrom(ctx context.Context, q ledger.Querier, day string, now time.Time) error {
+	if day != "" {
+		t, err := time.Parse(ts.DateLayout, day)
+		if err != nil || t.Format(ts.DateLayout) != day {
+			return fmt.Errorf("дата: нужна ГГГГ-ММ-ДД, а не %q", day)
+		}
+		reports, err := ReportsFrom(ctx, q)
+		if err != nil {
+			return err
+		}
+		if reports == "" {
+			return fmt.Errorf("отчёты смен не начисляют (%s пуст): отчёт хаба — основа дня отчётов, сначала ledger payroll reports-from", SettingReportsFrom)
+		}
+		if day < reports {
+			return fmt.Errorf("дата %s раньше начала отчётов смен %s (%s)", day, reports, SettingReportsFrom)
+		}
+	}
+	_, err := q.ExecContext(ctx, `INSERT INTO settings(key, value, note, updated_at) VALUES (?, ?, ?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		SettingHubFrom, day, hubFromNote, ts.Format(now))
+	return err
+}
+
+const hubFromNote = "С какого дня (МСК) день человека начисляется по отчёту, сданному в хабе (hub_shift_reports), когда он есть за человека и день, " +
+	"иначе по посту, как прежде; пусто — хаб в начисления не входит. Только вместе с payroll_reports_from и не раньше неё. " +
+	"Ставит и снимает ledger payroll hub-from; откат — --off и пересборка"
 
 const reportsFromNote = "С какого дня (МСК) начисления людям — из отчётов смен (report_accruals), а не из таблиц выплат; пусто — только таблицы. " +
 	"Ставит и снимает ledger payroll reports-from; откат — --off и пересборка. Вместе с payroll_facts_from не ставится"
@@ -98,10 +148,18 @@ func AfterFrom(ctx context.Context, q ledger.Querier) (day, source string, err e
 	if err != nil {
 		return "", "", err
 	}
+	// The third case: Hub's handed-in report is a basis of the reports' days, never on without them or before them.
+	hubFrom, err := HubFrom(ctx, q)
+	if err != nil {
+		return "", "", err
+	}
 	switch {
 	case facts != "" && reports != "":
 		return "", "", fmt.Errorf("включены оба источника после таблиц: %s с %s и %s с %s — оставьте один (ledger payroll facts-from --off или reports-from --off)",
 			SettingFactsFrom, facts, SettingReportsFrom, reports)
+	case hubFrom != "" && (reports == "" || hubFrom < reports):
+		return "", "", fmt.Errorf("отчёты хаба как основа дня (%s) с %s, а отчёты смен (%s) — «%s»: хаб — только внутри отчётов и не раньше них (ledger payroll hub-from --off)",
+			SettingHubFrom, hubFrom, SettingReportsFrom, reports)
 	case facts != "":
 		return facts, SourceFacts, nil
 	case reports != "":
@@ -245,6 +303,55 @@ func planReports(ctx context.Context, q ledger.Querier, from string, now time.Ti
 		return a.Model < b.Model
 	})
 
+	// A day that accrues from Hub's handed-in report (v_report_pages.basis hub) does not hang on its post.
+	hubDays := map[string]bool{}
+	rows, err = q.QueryContext(ctx, `SELECT DISTINCT person, report_date FROM v_report_pages WHERE basis = 'hub' AND report_date >= ?`, from)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var person, date string
+		if err := rows.Scan(&person, &date); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		hubDays[person+"\x00"+date] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// A version Hub served for a person's day that could not be stored holds every tab of the person that day: the day
+	// is neither Hub's whole nor the post's by default.
+	hubFrom, err := HubFrom(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	if hubFrom != "" {
+		rows, err = q.QueryContext(ctx, `SELECT id, person, report_date, problem FROM hub_shift_reports
+			WHERE current = 1 AND problem IS NOT NULL AND person IS NOT NULL AND report_date >= ? AND report_date >= ? ORDER BY id`, from, hubFrom)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var id int64
+			var person, date, problem string
+			if err := rows.Scan(&id, &person, &date, &problem); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			for _, t := range tabOf {
+				if t.person == person {
+					hold(t.model+"/"+t.name+":"+date, fmt.Sprintf("отчёт хаба не сохранён: версия %d — %s (ledger health)", id, problem))
+				}
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+
 	// The current posts of the days that cannot be read whole: blocked by a flag, or with a page in shift not mapped.
 	models, err := HubPageModels(ctx, q)
 	if err != nil {
@@ -263,6 +370,9 @@ func planReports(ctx context.Context, q ledger.Querier, from string, now time.Ti
 		if err := rows.Scan(&id, &person, &date, &topicModel, &flagsText, &pagesText); err != nil {
 			rows.Close()
 			return nil, err
+		}
+		if hubDays[person+"\x00"+date] {
+			continue
 		}
 		var flags []string
 		_ = json.Unmarshal([]byte(flagsText), &flags)
@@ -426,8 +536,9 @@ type ShiftGap struct {
 }
 
 // ShiftsWithoutReport lists the shifts of ledger's mirror of Hub's team facts (hub_works, kind shift) whose report date
-// is in [from, to], that ended more than 24 hours before now and whose person resolves, with no posted report page
-// (v_report_pages) of that person on that date. One row per shift and model of its pages.
+// is in [from, to], that ended more than 24 hours before now and whose person resolves, with no report page that accrues
+// (v_report_pages.accrue_micros: the post, or Hub's handed-in report from payroll_basis_hub_from) of that person on that
+// date. One row per shift and model of its pages.
 func ShiftsWithoutReport(ctx context.Context, q ledger.Querier, from, to string, now time.Time) ([]ShiftGap, error) {
 	res, err := NewResolver(ctx, q)
 	if err != nil {
@@ -466,7 +577,7 @@ func ShiftsWithoutReport(ctx context.Context, q ledger.Querier, from, to string,
 		return nil, err
 	}
 	reported := map[string]bool{}
-	rows, err = q.QueryContext(ctx, `SELECT DISTINCT person, report_date FROM v_report_pages WHERE posted_micros IS NOT NULL
+	rows, err = q.QueryContext(ctx, `SELECT DISTINCT person, report_date FROM v_report_pages WHERE accrue_micros IS NOT NULL
 		AND report_date BETWEEN ? AND ?`, from, to)
 	if err != nil {
 		return nil, err

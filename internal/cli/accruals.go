@@ -15,6 +15,7 @@ import (
 	"github.com/goslingmanagment/ledger/internal/accruals"
 	"github.com/goslingmanagment/ledger/internal/db"
 	"github.com/goslingmanagment/ledger/internal/money"
+	"github.com/goslingmanagment/ledger/internal/reports"
 	"github.com/goslingmanagment/ledger/internal/ts"
 )
 
@@ -180,6 +181,9 @@ func printDiff(out *bufio.Writer, d accruals.Diff) {
 	if d.ReportsFrom != "" {
 		fmt.Fprintf(out, "С %s начисляют отчёты смен: для этих дней таблица — зеркало.\n", d.ReportsFrom)
 	}
+	if d.HubFrom != "" {
+		fmt.Fprintf(out, "С %s день начисляет отчёт, сданный в хабе, когда он есть, иначе пост.\n", d.HubFrom)
+	}
 	if d.Facts.Status == "ok" {
 		fmt.Fprintf(out, "Факты недели доказаны, прочитаны %s.\n\n", d.Facts.ReadAt)
 	} else {
@@ -261,6 +265,26 @@ func printDiff(out *bufio.Writer, d accruals.Diff) {
 			writeTable(indent{out}, []string{"время", "страница", "вид", "net", "начислено", "заметка"}, rows,
 				[]bool{false, false, false, true, true, false})
 		}
+	}
+	if len(d.HubDays) > 0 {
+		fmt.Fprintln(out, "\nОтчёт, сданный в хабе, против поста — дни, где они расходятся:")
+		hubStates := map[string]string{reports.StateHubEqual: "равны", reports.StateHubChanged: "отличаются",
+			reports.StateHubOnly: "только в хабе", reports.StateHubMissing: "только в посте"}
+		rows := [][]string{}
+		for _, x := range d.HubDays {
+			basis := "пост"
+			if x.Basis == reports.BasisHub {
+				basis = "хаб"
+			}
+			var pages []string
+			for _, pg := range x.Pages {
+				pages = append(pages, fmt.Sprintf("%s: пост %s, хаб %s — %s", pg.Page, orDash(pg.PostMicros), orDash(pg.HubMicros), hubStates[pg.State]))
+			}
+			rows = append(rows, []string{x.Day, x.Name + " (" + x.Person + ")", orDash(x.PostMicros), orDash(x.HubMicros), basis,
+				strings.Join(pages, "; ")})
+		}
+		writeTable(indent{out}, []string{"день", "человек", "пост", "хаб", "основа", "страницы"}, rows,
+			[]bool{false, false, true, true, false, false})
 	}
 	group(out, "Общак за неделю (ничей смены, делит владелец)", d.Pot)
 	group(out, "Ждёт решения (владелец или согласные метки чаттеров)", d.Decide)

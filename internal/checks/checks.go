@@ -816,6 +816,64 @@ func ShiftReports(ctx context.Context, e Env) Result {
 	return fail(name, "warn", fmt.Sprintf("%d смен без опубликованного отчёта: %s", len(gaps), strings.Join(parts, "; ")), gaps)
 }
 
+// hubReportsCheck is the name of HubReports.
+const hubReportsCheck = "сданные в хабе отчёты сохраняются"
+
+// hubReportsStale is how old the last good read of Hub's feed may be: the job reads it every 5 minutes.
+const hubReportsStale = time.Hour
+
+// HubReports: the reports handed in in Hub reach ledger — the age of the last good read of Hub's feed (the job
+// hub-reports), and every current version Hub served that could not be stored: a person's code not in people, a page not
+// in hub_pages, sums that do not add up. A Hub without the feed yet (404) is a line, not a failure.
+func HubReports(ctx context.Context, e Env) Result {
+	const name = hubReportsCheck
+	st, err := reports.ReadHubStatus(ctx, e.Q)
+	if err != nil {
+		return fail(name, "warn", err.Error(), nil)
+	}
+	problems, err := reports.HubProblems(ctx, e.Q)
+	if err != nil {
+		return fail(name, "warn", err.Error(), nil)
+	}
+	if len(problems) > 0 {
+		parts := make([]string, 0, len(problems))
+		for _, p := range problems {
+			who := "пользователь хаба ?"
+			switch {
+			case p.Person != nil:
+				who = *p.Person
+			case p.HubPerson != nil:
+				who = "код «" + *p.HubPerson + "»"
+			case p.HubUserID != nil:
+				who = fmt.Sprintf("пользователь хаба %d", *p.HubUserID)
+			}
+			parts = append(parts, fmt.Sprintf("версия %d (смена %d, %s, %s): %s", p.ID, p.ShiftID, who, p.ReportDate, p.Problem))
+		}
+		return fail(name, "warn", fmt.Sprintf("%d сданных в хабе версий не сохранены — карточку в people или страницу в hub_pages, джоб попробует снова: %s",
+			len(problems), strings.Join(parts, " | ")), problems)
+	}
+	if st == nil {
+		return pass(name, "сданные в хабе отчёты ещё не читались: джоб "+reports.HubJob+" или ledger hub reports-sync")
+	}
+	last, age, stale := "никогда", "", true
+	if t, err := ts.Parse(st.LastOKAt); err == nil {
+		last, age, stale = st.LastOKAt, fmt.Sprintf(" (%d мин назад)", int(e.Now.Sub(t).Minutes())), e.Now.Sub(t) > hubReportsStale
+	}
+	switch {
+	case !st.OK:
+		return fail(name, "warn", fmt.Sprintf("лента хаба не прочитана %s: %s; последнее удачное чтение — %s%s", st.At, st.Error, last, age), st)
+	case stale:
+		return fail(name, "warn", fmt.Sprintf("лента хаба не читалась больше часа: последнее удачное чтение — %s%s", last, age), st)
+	case st.Absent:
+		return pass(name, fmt.Sprintf("%s; проверено %s%s", st.Error, last, age))
+	}
+	cursor := st.Next
+	if cursor == "" {
+		cursor = "с начала"
+	}
+	return pass(name, fmt.Sprintf("лента хаба прочитана %s%s, курсор %s; версий с ошибкой нет", last, age, cursor))
+}
+
 // PendingChanges: the changes of paid days that wait for the owner (under the reports a paid day does not change by
 // itself). A warning until decided: ledger payroll change apply|dismiss <id>.
 func PendingChanges(ctx context.Context, e Env) Result {
@@ -920,7 +978,7 @@ func WeekColumns(ctx context.Context, e Env) Result {
 // Run executes every check. A coverage that cannot be built fails its own checks, not the rest.
 func Run(ctx context.Context, e Env) []Result {
 	out := []Result{Balanced(ctx, e), BybitBalance(ctx, e), Coins(ctx, e), CoinsAtCost(ctx, e), CardAnchors(ctx, e), CardCover(ctx, e), Unlinked(ctx, e), Payables(ctx, e), Copies(ctx, e), Sources(ctx, e), ReportPosts(ctx, e),
-		ShiftReports(ctx, e), PendingChanges(ctx, e), WeekColumns(ctx, e)}
+		ShiftReports(ctx, e), HubReports(ctx, e), PendingChanges(ctx, e), WeekColumns(ctx, e)}
 	cv, tabs, _, err := month.PrepareCover(ctx, e.Q, month.Inputs{})
 	if err != nil {
 		for _, n := range []string{"заявки равны покрытому net", "k переводов в норме", "переводы не просрочены", "депозиты сходятся с заявками", "дрейф закрытых месяцев"} {

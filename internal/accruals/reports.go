@@ -23,7 +23,9 @@ import (
 // rate are «без ставки»: listed with the revenue, not accrued. The person's pot shares of the purchases made that day in
 // pots of the model (v_pot_shares, R3) are revenue of the day beside the pages (pot_micros, pots): the rate takes the sum,
 // and a day with a share only — the person did not work it — gets no fix. report_accruals is rebuilt after every parse of the posts,
-// every save of a draft and before every rebuild of the debts; before settings.payroll_reports_from it is a shadow.
+// every save of a draft, every read of Hub's handed-in reports and before every rebuild of the debts; before
+// settings.payroll_reports_from it is a shadow. From settings.payroll_basis_hub_from a person's day with a report handed in
+// in Hub takes its pages from it (v_report_pages.accrue_micros, basis hub; hub_reports names the versions), not from the post.
 
 func init() {
 	payroll.Refresh = func(ctx context.Context, store *db.Store, now time.Time) error {
@@ -74,6 +76,7 @@ type reportDay struct {
 	person, model, day string
 	pages              []reportPage
 	posts              []int64
+	hubReports         []int64 // Hub's handed-in versions the day is from (basis hub); nil — from the posts
 	pots               []potPart
 	potNet             int64
 	net                int64 // the pages and the pot shares
@@ -91,7 +94,7 @@ func (d reportDay) args() []any {
 	if len(d.pots) > 0 {
 		pots, _ = json.Marshal(d.pots)
 	}
-	var tm, tn, rate, amount any
+	var tm, tn, rate, amount, hubReports any
 	if d.tabModel != nil {
 		tm, tn = *d.tabModel, *d.tabName
 	}
@@ -101,8 +104,12 @@ func (d reportDay) args() []any {
 	if d.amount != nil {
 		amount = *d.amount
 	}
+	if d.hubReports != nil {
+		b, _ := json.Marshal(d.hubReports)
+		hubReports = string(b)
+	}
 	return []any{d.person, d.model, d.day, weekOf(d.day), string(pages), string(posts), d.net, tm, tn, rate, d.fix, amount, nullStr(d.reason),
-		d.potNet, string(pots)}
+		d.potNet, string(pots), hubReports}
 }
 
 // RebuildReports recomputes report_accruals from the pay base and writes only the rows that changed. Idempotent; it
@@ -126,18 +133,21 @@ func reportDays(ctx context.Context, q ledger.Querier) ([]reportDay, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := q.QueryContext(ctx, `SELECT person, report_date, page, model, posted_micros, post_id FROM v_report_pages
-		WHERE posted_micros IS NOT NULL ORDER BY person, report_date, model, page`)
+	// What accrues of each page: the post's amount, or Hub's handed-in report's on a day of basis hub
+	// (settings.payroll_basis_hub_from; with it empty accrue_micros is posted_micros).
+	rows, err := q.QueryContext(ctx, `SELECT person, report_date, page, model, accrue_micros, post_id, basis FROM v_report_pages
+		WHERE accrue_micros IS NOT NULL ORDER BY person, report_date, model, page`)
 	if err != nil {
 		return nil, err
 	}
 	byKey := map[[3]string]*reportDay{}
 	var order [][3]string
+	var fromHub [][3]string
 	for rows.Next() {
-		var person, day, page, model string
+		var person, day, page, model, basis string
 		var micros int64
 		var post sql.NullInt64
-		if err := rows.Scan(&person, &day, &page, &model, &micros, &post); err != nil {
+		if err := rows.Scan(&person, &day, &page, &model, &micros, &post, &basis); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -147,16 +157,31 @@ func reportDays(ctx context.Context, q ledger.Querier) ([]reportDay, error) {
 			d = &reportDay{person: person, model: model, day: day, pages: []reportPage{}, posts: []int64{}}
 			byKey[k] = d
 			order = append(order, k)
+			if basis == reports.BasisHub {
+				fromHub = append(fromHub, k)
+			}
 		}
 		d.pages = append(d.pages, reportPage{Page: page, Micros: micros})
 		d.net += micros
-		if post.Valid && (len(d.posts) == 0 || d.posts[len(d.posts)-1] != post.Int64) {
+		if basis != reports.BasisHub && post.Valid && (len(d.posts) == 0 || d.posts[len(d.posts)-1] != post.Int64) {
 			d.posts = append(d.posts, post.Int64)
 		}
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	if len(fromHub) > 0 {
+		versions, err := reports.HubVersionsByDay(ctx, q)
+		if err != nil {
+			return nil, err
+		}
+		for _, k := range fromHub {
+			byKey[k].hubReports = versions[k]
+			if byKey[k].hubReports == nil {
+				byKey[k].hubReports = []int64{}
+			}
+		}
 	}
 	// The pot shares of the purchases of the day, in pots of the model: revenue of the person's tab beside the pages.
 	rows, err = q.QueryContext(ctx, `SELECT person, model, day, pot, pot_name, SUM(share_micros) FROM v_pot_shares
@@ -248,13 +273,13 @@ func rebuildReportsTx(ctx context.Context, tx *sql.Tx, now time.Time) (ReportsRe
 	}
 	stored := map[[3]string]string{}
 	rows, err := tx.QueryContext(ctx, `SELECT person, model, day, week, pages, posts, net_micros, tab_model, tab_name, rate, fix_micros,
-		amount_micros, reason, pot_micros, pots FROM report_accruals`)
+		amount_micros, reason, pot_micros, pots, hub_reports FROM report_accruals`)
 	if err != nil {
 		return rep, err
 	}
 	for rows.Next() {
-		vals := make([]any, 15)
-		ptrs := make([]any, 15)
+		vals := make([]any, 16)
+		ptrs := make([]any, 16)
 		for i := range vals {
 			ptrs[i] = &vals[i]
 		}
@@ -286,11 +311,12 @@ func rebuildReportsTx(ctx context.Context, tx *sql.Tx, now time.Time) (ReportsRe
 		}
 		rep.Written++
 		if _, err := tx.ExecContext(ctx, `INSERT INTO report_accruals(person, model, day, week, pages, posts, net_micros, tab_model, tab_name,
-			rate, fix_micros, amount_micros, reason, pot_micros, pots, computed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			rate, fix_micros, amount_micros, reason, pot_micros, pots, hub_reports, computed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(person, model, day) DO UPDATE SET week = excluded.week, pages = excluded.pages, posts = excluded.posts,
 			net_micros = excluded.net_micros, tab_model = excluded.tab_model, tab_name = excluded.tab_name, rate = excluded.rate,
 			fix_micros = excluded.fix_micros, amount_micros = excluded.amount_micros, reason = excluded.reason,
-			pot_micros = excluded.pot_micros, pots = excluded.pots, computed_at = excluded.computed_at`, append(args, at)...); err != nil {
+			pot_micros = excluded.pot_micros, pots = excluded.pots, hub_reports = excluded.hub_reports,
+			computed_at = excluded.computed_at`, append(args, at)...); err != nil {
 			return rep, err
 		}
 	}
