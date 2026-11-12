@@ -263,7 +263,7 @@ func payoutPeople(ctx context.Context, q ledger.Querier) ([]PayoutPerson, error)
 	rows, err := q.QueryContext(ctx, `SELECT p.slug, p.name, p.aliases, p.status, v.balance_micros, v.to_pay, v.oldest_unpaid,
 		v.unentered_days, v.unentered_share, v.unentered_unknown
 		FROM people p JOIN v_payables v ON v.person = p.slug
-		WHERE EXISTS (SELECT 1 FROM payroll_tabs t WHERE t.person = p.slug)
+		WHERE (EXISTS (SELECT 1 FROM payroll_tabs t WHERE t.person = p.slug) OR `+registryPayee+`)
 		ORDER BY p.slug`)
 	if err != nil {
 		return nil, err

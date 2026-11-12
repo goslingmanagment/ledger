@@ -215,6 +215,16 @@ func loadMapping(ctx context.Context, q ledger.Querier) (mapping, error) {
 	if m.authors, err = hub.ParseReportAuthors(authorsRaw.String); err != nil {
 		return m, err
 	}
+	// From payroll_terms_hub_from the people registry names the authors report_authors does not (R5).
+	registry, err := payroll.RegistryAuthors(ctx, q)
+	if err != nil {
+		return m, err
+	}
+	for k, person := range registry {
+		if _, ok := m.authors[k]; !ok {
+			m.authors[k] = person
+		}
+	}
 	models, err := payroll.HubPageModels(ctx, q)
 	if err != nil {
 		return m, err

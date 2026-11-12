@@ -64,6 +64,22 @@ type TermsDiff struct {
 	Equal    int             `json:"equal"`
 	Differ   int             `json:"differ"`
 	Fallback []TermsFallback `json:"fallback"`
+	// Newcomers are the registry's people with terms on a model they have no payouts tab of: from the day on they are
+	// accrued on a tab of the books alone, with a people row from the registry if they have none (registry.go).
+	Newcomers []Newcomer `json:"newcomers"`
+}
+
+// NewcomersText lists the newcomers the way the owner reads them: «delta (Alpha, нет строки people)».
+func (d TermsDiff) NewcomersText() string {
+	var parts []string
+	for _, n := range d.Newcomers {
+		x := n.Person + " (" + n.Model
+		if !n.InPeople {
+			x += ", нет строки people"
+		}
+		parts = append(parts, x+")")
+	}
+	return strings.Join(parts, "; ")
 }
 
 // DifferText lists the rows that are not equal, the way the owner reads them: «alfa (Alpha) фикс 0 ≠ 15; …».
@@ -154,6 +170,9 @@ func CompareTerms(ctx context.Context, q ledger.Querier, day string) (TermsDiff,
 		if d.Fallback, err = termsFallback(ctx, q, d.From, tabs, hubs); err != nil {
 			return d, err
 		}
+	}
+	if d.Newcomers, err = Newcomers(ctx, q); err != nil {
+		return d, err
 	}
 	return d, nil
 }
@@ -267,7 +286,7 @@ func termsFallback(ctx context.Context, q ledger.Querier, from string, tabs []Te
 			}
 		}
 		if tab == nil || hubs.On(person, model, day) != nil {
-			continue // no tab: priced by nobody; a registry term: priced by it
+			continue // no payouts tab: priced by nobody, or by the registry on a tab of the books; a registry term: by it
 		}
 		k := person + "\x00" + ledger.Slug(model)
 		i, ok := byKey[k]

@@ -18,13 +18,23 @@ const PeoplePath = "/api/v1/agent/people"
 
 // RegistryPerson is a person of the feed, with what ledger keeps of them.
 type RegistryPerson struct {
-	ID        int64   `json:"id"`
-	Code      string  `json:"code"` // the ledger's people.slug
-	Kind      string  `json:"kind"` // human, agent, service
-	Role      string  `json:"role"`
-	State     string  `json:"state"` // invited, set_up, working, left
-	LeftOn    *string `json:"leftOn"`
-	UpdatedAt string  `json:"updatedAt"` // the latest change of the record or anything that hangs off it, terms included
+	ID          int64   `json:"id"`
+	Code        string  `json:"code"` // the ledger's people.slug
+	DisplayName string  `json:"displayName"`
+	Kind        string  `json:"kind"` // human, agent, service
+	Role        string  `json:"role"`
+	State       string  `json:"state"` // invited, set_up, working, left
+	LeftOn      *string `json:"leftOn"`
+	UpdatedAt   string  `json:"updatedAt"` // the latest change of the record or anything that hangs off it, terms included
+	Telegram    struct {
+		UserID    *int64  `json:"userId"`
+		ReportTag *string `json:"reportTag"` // the tag of the person's report post, e.g. #alex
+	} `json:"telegram"`
+	// Logins are the person's Hub logins; Active — signs in.
+	Logins []struct {
+		UserID int64 `json:"userId"`
+		Active bool  `json:"active"`
+	} `json:"logins"`
 	// PayTerms are the person's terms, every model, oldest first; nil — not served (the key lacks read:pay_terms).
 	PayTerms []PayTerm `json:"payTerms"`
 }

@@ -155,6 +155,11 @@
   факты смен и продаж (`hub-team`), сданные отчёты (`hub-reports`). Код человека в хабе — `people.slug`.
 - Дом условий оплаты (доля, фикс за смену) — реестр людей хаба: джоб `hub-terms` держит их в `hub_pay_terms` (ключу нужен `read:pay_terms`);
   шапки вкладок («Ставка %», «Фикс/см») читаются до даты владельца `ledger payroll terms-from ГГГГ-ММ-ДД`, расхождения — `ledger payroll terms diff`.
+  С этой даты новичку реестра не нужно ничего вручную: строка `people` — из реестра (`source` `hub-registry`, карточка /OS важнее), автор поста —
+  по Telegram id и тегу реестра, модель без вкладки выплат начисляется на вкладку книг «реестр <код>»; кто такой — `terms diff`, раздел новичков.
+- «Чья продажа» — дом в хабе (`hub sale decide|decisions|ask|answer|questions`): с `ledger decision hub-from ГГГГ-ММ-ДД`
+  (`settings.sale_decisions_hub_from`, пусто — пишет и ledger) `decision add|applied|cancel`, `question add|answer|drop` и `accruals claim|unclaim`
+  отказывают одной строкой с командой хаба; `decision list` и `question list` — история.
 - Хаб читает ledger своим ключом `payouts`: долги, отчёты, проверки, джобы, карточку месяца; правил составления отчёта в ledger нет.
 - Одна карта всей системы — `~/code/SYSTEM.md` на маке владельца.
 

@@ -121,6 +121,18 @@ func printTermsDiff(out *bufio.Writer, d payroll.TermsDiff) {
 	} else {
 		fmt.Fprintf(out, "Условия в реестре и во вкладках совпадают у %d.\n", d.Equal)
 	}
+	if len(d.Newcomers) > 0 {
+		fmt.Fprintln(out, "Из реестра без вкладки выплат — с даты начисляются по условиям реестра на вкладке книг, строка people — из реестра:")
+		rows := [][]string{}
+		for _, n := range d.Newcomers {
+			people := "есть"
+			if !n.InPeople {
+				people = "нет — будет из реестра"
+			}
+			rows = append(rows, []string{n.Person, n.Model, n.Tab, people})
+		}
+		writeTable(indent{out}, []string{"человек", "модель", "вкладка книг", "строка people"}, rows, []bool{false, false, false, false})
+	}
 	if len(d.Fallback) > 0 {
 		fmt.Fprintln(out, "Дни с "+d.From+", начисленные по шапке вкладки: в реестре нет условия на день:")
 		rows := [][]string{}

@@ -315,6 +315,12 @@ func planTabs(ctx context.Context, q ledger.Querier) ([]planTab, map[string]plan
 	if err := rows.Err(); err != nil {
 		return nil, nil, err
 	}
+	// From payroll_terms_hub_from a registry person's model with no payouts tab has a tab of the books alone.
+	more, err := registryTabs(ctx, q, tabs)
+	if err != nil {
+		return nil, nil, err
+	}
+	tabs = append(tabs, more...)
 	tabOf := map[string]planTab{}
 	for _, t := range tabs {
 		k := t.person + "\x00" + ledger.Slug(t.model)

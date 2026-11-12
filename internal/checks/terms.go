@@ -53,11 +53,15 @@ func PayTerms(ctx context.Context, e Env) Result {
 		if readProblem != "" {
 			lead += "; " + readProblem
 		}
+		tail := ""
+		if len(d.Newcomers) > 0 {
+			tail = "; без вкладки выплат, с даты — по условиям реестра на вкладке книг «реестр <код>»: " + d.NewcomersText()
+		}
 		if d.Differ > 0 {
 			return Result{Name: name, OK: true, Severity: "info", Details: d.Rows,
-				Summary: fmt.Sprintf("%s: условия в реестре и во вкладке расходятся у %d (реестр ≠ вкладка): %s", lead, d.Differ, d.DifferText())}
+				Summary: fmt.Sprintf("%s: условия в реестре и во вкладке расходятся у %d (реестр ≠ вкладка): %s%s", lead, d.Differ, d.DifferText(), tail)}
 		}
-		return pass(name, fmt.Sprintf("%s: условия в реестре и во вкладках совпадают у %d", lead, d.Equal))
+		return pass(name, fmt.Sprintf("%s: условия в реестре и во вкладках совпадают у %d%s", lead, d.Equal, tail))
 	}
 
 	var bad []string

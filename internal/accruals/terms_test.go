@@ -15,6 +15,7 @@ import (
 	"github.com/goslingmanagment/ledger/internal/db"
 	"github.com/goslingmanagment/ledger/internal/hub"
 	"github.com/goslingmanagment/ledger/internal/payroll"
+	"github.com/goslingmanagment/ledger/internal/reports"
 )
 
 // The pay terms of Hub's people registry (ecosystem H3) on the week of reportWeek. The registry (testdata/hub-people.json,
@@ -361,5 +362,103 @@ func TestAPaidDayDoesNotFollowTheRegistryByItself(t *testing.T) {
 	}
 	if got := dayOf(t, s, "alfa", "2026-11-12"); got != "8000000 0 8000000 reports" {
 		t.Fatalf("the unpaid 12th: %s", got)
+	}
+}
+
+// newcomer is a chatter only the registry knows: no people row, no payouts tab, no report_authors entry; 25 % on Alpha.
+func newcomer() map[string]any {
+	return map[string]any{"id": 15, "code": "delta", "displayName": "Дельта", "kind": "human", "role": "chatter", "state": "working",
+		"leftOn": nil, "telegram": map[string]any{"userId": 505, "handle": nil, "reportTag": "#delta"},
+		"logins": []any{map[string]any{"userId": 105, "username": "Delta", "active": true}}, "agentKeys": []any{}, "workingPages": []any{},
+		"schedule": nil, "scheduleSlots": []any{}, "rights": []any{}, "updatedAt": "2026-11-12T10:30:00.000Z",
+		"payTerms": []any{term(204, "2026-11-02", "", 2500, 0)}}
+}
+
+func reparse(t *testing.T, s *db.Store, ctx context.Context) {
+	t.Helper()
+	tx, err := s.RW.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := reports.ParsePosts(ctx, tx, reportNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := payroll.Rebuild(ctx, s, reportNow); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A newcomer of the registry needs no hand entry: while the setting is empty nothing moves and the comparison says who
+// would be accrued; from the day the people row comes from the registry, the post is known by the registry's Telegram
+// id, and the day accrues at the registry's terms on a tab of the books alone — and the payouts read shows the person.
+func TestFromTheTermsDayARegistryNewcomerIsAccruedWithoutATab(t *testing.T) {
+	s, ctx := termsWeek(t)
+	post(t, s, 4, "505", "2026-11-11", postText("2026-11-11", "", "A - $60"))
+	reparse(t, s, ctx)
+	before := everything(t, s, ctx)
+	reg := loadRegistry(t)
+	reg.Answer.People = append(reg.Answer.People, newcomer())
+	reg.read(t, s)
+	reparse(t, s, ctx)
+	if after := everything(t, s, ctx); after != before {
+		t.Fatalf("the newcomer moved the books with the setting off:\n%s\nwas\n%s", after, before)
+	}
+	if n := count(t, s, `SELECT count(*) FROM people WHERE slug = 'delta'`); n != 0 {
+		t.Fatal("a people row before the switch")
+	}
+	d, err := payroll.CompareTerms(ctx, s.RO, "2026-11-17")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := d.NewcomersText(); got != "delta (Alpha, нет строки people)" {
+		t.Fatalf("newcomers %q", got)
+	}
+
+	setTerms(t, s, ctx, "2026-11-10")
+	reparse(t, s, ctx)
+	if got := cols(t, s, `SELECT slug, name, aliases, status, models, source FROM people WHERE slug = 'delta'`); got !=
+		`delta Дельта ["hub:105"] active ["Alpha"] hub-registry` {
+		t.Fatalf("the people row: %s", got)
+	}
+	if got := cols(t, s, `SELECT day, net_micros, tab_model, tab_name, rate, amount_micros FROM report_accruals WHERE person = 'delta'`); got !=
+		"2026-11-11 60000000 Alpha реестр delta 0.25 15000000" {
+		t.Fatalf("report_accruals: %s", got)
+	}
+	if got := cols(t, s, `SELECT date, model, name, amount, unpaid, source FROM payable_days WHERE person = 'delta' AND kind = 'day'`); got !=
+		"2026-11-11 Alpha реестр delta 15000000 15000000 reports" {
+		t.Fatalf("payable_days: %s\n%s", got, books(t, s))
+	}
+	ans, err := payroll.ReadPayouts(ctx, s.RO, "2026-11-09", "2026-11-15", reportNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, p := range ans.People {
+		found = found || p.Slug == "delta"
+	}
+	if !found {
+		t.Fatalf("the payouts read has no newcomer: %+v", ans.People)
+	}
+	if _, err := payroll.LoadMirrorBase(ctx, s.RO, "2026-11-09"); err != nil {
+		t.Fatalf("the sheets mirror's base with a newcomer: %v", err)
+	}
+	if _, err := payroll.ReadPersonPay(ctx, s.RO, "delta", "2026-11-09", "2026-11-15", reportNow); err != nil {
+		t.Fatalf("the person read of a newcomer: %v", err)
+	}
+	if d, _ := payroll.CompareTerms(ctx, s.RO, "2026-11-17"); d.NewcomersText() != "delta (Alpha)" {
+		t.Fatalf("newcomers after the switch %q", d.NewcomersText())
+	}
+	// A card of /OS for the same code later takes the row over; the projection leaves it alone.
+	if err := payroll.PutPeople(ctx, s.RW, []payroll.Person{{Slug: "delta", Name: "Дельта (карточка)", Aliases: []string{"hub:105"},
+		Status: "active", Models: []string{"Alpha"}}}, "people", reportNow); err != nil {
+		t.Fatal(err)
+	}
+	reparse(t, s, ctx)
+	if got := cols(t, s, `SELECT name, source FROM people WHERE slug = 'delta'`); got != "Дельта (карточка) people" {
+		t.Fatalf("the card: %s", got)
 	}
 }

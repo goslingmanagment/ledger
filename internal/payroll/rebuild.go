@@ -68,6 +68,10 @@ var Refresh func(ctx context.Context, store *db.Store, now time.Time) error
 // every hour.
 func Rebuild(ctx context.Context, store *db.Store, now time.Time) (Report, error) {
 	var rep Report
+	// From payroll_terms_hub_from the registry's newcomers have their people rows before anything reads people.
+	if err := projectPeople(ctx, store, now); err != nil {
+		return rep, err
+	}
 	if Refresh != nil {
 		if err := Refresh(ctx, store, now); err != nil {
 			return rep, fmt.Errorf("начисления по отчётам: %w", err)

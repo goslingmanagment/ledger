@@ -136,7 +136,7 @@ func ReadPersonPay(ctx context.Context, db *sql.DB, slug, from, to string, now t
 	defer tx.Rollback()
 	var oldest sql.NullString
 	err = tx.QueryRowContext(ctx, `SELECT p.name, v.balance_micros, v.oldest_unpaid FROM people p JOIN v_payables v ON v.person = p.slug
-		WHERE p.slug = ? AND EXISTS (SELECT 1 FROM payroll_tabs t WHERE t.person = p.slug)`, slug).Scan(&ans.Name, &ans.BalanceMicros, &oldest)
+		WHERE p.slug = ? AND (EXISTS (SELECT 1 FROM payroll_tabs t WHERE t.person = p.slug) OR `+registryPayee+`)`, slug).Scan(&ans.Name, &ans.BalanceMicros, &oldest)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ans, fmt.Errorf("%s: %w", slug, ErrNoPayoutPerson)
 	}

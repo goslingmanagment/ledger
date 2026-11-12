@@ -718,15 +718,20 @@ func (p *people) person(user int64, username, model string) (string, string) {
 }
 
 // terms are the person's terms of the day on their tab of the model: from settings.payroll_terms_hub_from the registry's
-// term holding on the day (the first tab of the model takes the day), else — or with no registry term for the day — the
-// tab's header. Several tabs of one model must agree on the header.
+// term holding on the day (the first tab of the model takes the day; with no payouts tab, the tab of the books
+// «реестр <код>»), else — or with no registry term for the day — the tab's header. Several tabs of one model must agree
+// on the header.
 func (p *people) terms(person, model, day string) (payroll.Terms, string) {
 	found := p.tabsOf(person, model)
-	if len(found) == 0 {
-		return payroll.Terms{}, "нет вкладки человека в таблице выплат модели «" + model + "»: ставки нет"
-	}
-	if h := p.hubTerm(person, model, day); h != nil {
+	h := p.hubTerm(person, model, day)
+	switch {
+	case h != nil && len(found) > 0:
 		return h.Terms(found[0]), ""
+	case h != nil:
+		// A registry person with no payouts tab of the model: the tab of the books alone (payroll.RegistryTabName).
+		return h.Terms(payroll.Terms{Model: model, Name: payroll.RegistryTabName(person), Person: person}), ""
+	case len(found) == 0:
+		return payroll.Terms{}, "нет вкладки человека в таблице выплат модели «" + model + "»: ставки нет"
 	}
 	return p.tabTerms(person, model)
 }
