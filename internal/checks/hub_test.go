@@ -105,3 +105,51 @@ func TestHubChecksOpenOnlyToThePayoutsScope(t *testing.T) {
 		}
 	}
 }
+
+// GET /v1/health/jobs opens to the payouts scope only and lists every registered job, run or not.
+func TestHubJobsOpenOnlyToThePayoutsScope(t *testing.T) {
+	s, ctx := openDB(t)
+	srv := httptest.NewServer(server.New(s, slog.New(slog.NewTextHandler(io.Discard, nil)), "test").Mux)
+	defer srv.Close()
+	key := func(name string, scopes ...string) *client.Client {
+		token, _, err := auth.Create(ctx, s.RW, name, scopes, false, ts.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return client.New(config.Client{URL: srv.URL, Key: token})
+	}
+	status := func(err error) int {
+		t.Helper()
+		if err == nil {
+			return http.StatusOK
+		}
+		e, ok := err.(*client.Error)
+		if !ok {
+			t.Fatalf("not an HTTP answer: %v", err)
+		}
+		return e.Status
+	}
+	const path = "/v1/health/jobs"
+	var got server.JobsAnswer
+	if err := key("hub", auth.ScopePayouts).Do(ctx, http.MethodGet, path, nil, &got); err != nil {
+		t.Fatal(err)
+	}
+	var job *server.JobStatus
+	for i := range got.Jobs {
+		if got.Jobs[i].Job == "checks" {
+			job = &got.Jobs[i]
+		}
+	}
+	if !got.OK || got.Scheduler || got.StartedAt == "" || job == nil || job.IntervalSeconds != 3600 || job.LastStartedAt != nil ||
+		job.LastDoneAt != nil || job.LastFailedAt != nil || job.LastError != nil || job.FailedInRow != 0 {
+		t.Fatalf("jobs %+v", got)
+	}
+	for _, sc := range []string{auth.ScopeRead, auth.ScopePropose, auth.ScopeDecide, auth.ScopeCollect, auth.ScopeImport, auth.ScopeReports} {
+		if code := status(key("k-"+sc, sc).Do(ctx, http.MethodGet, path, nil, nil)); code != http.StatusForbidden {
+			t.Errorf("%s key: %d, want 403", sc, code)
+		}
+	}
+	if code := status(client.New(config.Client{URL: srv.URL}).Do(ctx, http.MethodGet, path, nil, nil)); code != http.StatusUnauthorized {
+		t.Errorf("no key: %d", code)
+	}
+}

@@ -14,6 +14,8 @@ import (
 	"github.com/goslingmanagment/ledger/internal/ts"
 )
 
+// GET /v1/health/jobs (below) is the last outcome of each scheduled job of this process, from memory (server.Jobs).
+//
 // GET /v1/payouts/checks is the last run of the health checks for Hub's server, which raises ledger's own findings as
 // matters for the owner: each check with a stable key, its sentence as ledger words it, the severity, ok or not and
 // since when it has failed without a passing run between, plus the tabs of the week-columns notice. Only the payouts
@@ -89,6 +91,10 @@ func init() {
 				return
 			}
 			server.WriteJSON(w, http.StatusOK, ans)
+		})))
+		// The scheduler's own jobs for Hub's «Состояние»: the last outcome of each since the process started, from memory.
+		s.Mux.Handle("GET /v1/health/jobs", auth.Require(s, auth.ScopePayouts, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server.WriteJSON(w, http.StatusOK, s.Jobs(time.Now()))
 		})))
 	})
 }
