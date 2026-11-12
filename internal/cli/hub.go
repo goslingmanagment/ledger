@@ -248,6 +248,9 @@ func hubReportsSync(ctx context.Context, args []string) error {
 	if st.Problems > 0 {
 		return Exit{Code: 3, Msg: fmt.Sprintf("%d версий не сохранены — ledger health", st.Problems)}
 	}
+	if st.Held > 0 {
+		return Exit{Code: 3, Msg: fmt.Sprintf("%d версий хаб придержал: у ключа ledger нет их страниц — ledger health", st.Held)}
+	}
 	return nil
 }
 

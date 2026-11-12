@@ -67,6 +67,19 @@ func book(t *testing.T) (*db.Store, context.Context) {
 			(3, 'page-b', '777', 'Other OF', NULL, NULL, 'owner', '[{"person":"anna","percent":100}]', 'владелец', '2026-11-11', 'не тот фан', 'x', 'agent')`,
 		`INSERT INTO sale_questions(id, page_label, fan_ref, fan_name, transaction_ref, question, asked_of, asked_at, note, status, answer, created_at, key_name)
 			VALUES (1, 'page-a', '777', 'Romeo', '1001', 'Ромео чей?', 'owner', '2026-11-11', 'спросили', 'answered', 'Ромео — Анны', 'x', 'agent')`,
+		// The same fan named the other ways the agent wrote him: "u" + his id, and his login in another case (the drafts
+		// hold the login beside his id). Beside them: another fan's "u" + id, the same shapes on the other platform, and a
+		// login ledger ties to no id.
+		`INSERT INTO sale_decisions(id, page_label, fan_ref, fan_name, transaction_ref, net_micros, kind, shares, said_by, said_at, note, created_at, key_name)
+			VALUES (4, 'page-a', 'u777', '', NULL, NULL, 'owner', '[]', 'владелец', '2026-11-11', 'обещал купить в пятницу', 'x', 'agent'),
+			(5, 'page-a', 'romeo', '', NULL, NULL, 'owner', '[]', 'владелец', '2026-11-11', 'логин вместо номера', 'x', 'agent'),
+			(6, 'page-a', 'u888', '', NULL, NULL, 'owner', '[]', 'владелец', '2026-11-11', 'другой фан', 'x', 'agent'),
+			(7, 'page-b', 'u777', '', NULL, NULL, 'owner', '[]', 'владелец', '2026-11-11', 'фан другой площадки', 'x', 'agent'),
+			(8, 'page-a', 'stranger', '', NULL, NULL, 'owner', '[]', 'владелец', '2026-11-11', 'логин без номера', 'x', 'agent')`,
+		`INSERT INTO sale_questions(id, page_label, fan_ref, fan_name, transaction_ref, question, asked_of, asked_at, note, status, created_at, key_name)
+			VALUES (2, 'page-a', 'U777', '', NULL, 'u777 чей?', 'chatters', '2026-11-11', '', 'open', 'x', 'agent'),
+			(3, 'page-a', 'Romeo', '', NULL, 'логин чей?', 'chatters', '2026-11-11', '', 'open', 'x', 'agent'),
+			(4, 'page-a', 'Other', '', NULL, 'другой фан чей?', 'chatters', '2026-11-11', '', 'open', 'x', 'agent')`,
 		`INSERT INTO pot_sales(id, pot, transaction_ref, page_label, fan_ref, fan_name, net_micros, occurred_at, day, source, note, added_at, key_name)
 			VALUES (1, 'set-one', '1001', 'page-a', '777', 'Romeo', 20000000, '2026-11-10T20:00:00+03:00', '2026-11-10', 'agent', 'набор', 'x', 'agent')`,
 	} {
@@ -153,9 +166,14 @@ func TestAnErasedFansWordsGoAndTheMoneyStays(t *testing.T) {
 			"1|1001|||[]|20000000\n2|∅|||[]|1000000\n3|1002|888|Other|[]|5000000"},
 		{`SELECT json_extract(payload, '$.lines[0].fan_name'), json_extract(payload, '$.lines[1].fan_ref'), json_extract(payload, '$.lines[2].fan_name'),
 			content_hash FROM shift_reports`, "||Other|h"},
-		{`SELECT id, fan_ref, fan_name, note, kind, shares FROM sale_decisions ORDER BY id`,
+		{`SELECT id, fan_ref, fan_name, note, kind, shares FROM sale_decisions WHERE id <= 3 ORDER BY id`,
 			"1||||owner|[{\"person\":\"anna\",\"percent\":100}]\n2||||owner|[{\"person\":\"anna\",\"percent\":100}]\n3|777|Other OF|не тот фан|owner|[{\"person\":\"anna\",\"percent\":100}]"},
-		{`SELECT fan_ref, fan_name, question, note, answer, status FROM sale_questions`, "||" + Erased + "||" + Erased + "|answered"},
+		// However the fan was named — "u" + id, his login — his rows go; the other fan's, the other platform's and a
+		// login no row ties to his id stay.
+		{`SELECT id, fan_ref, note FROM sale_decisions WHERE id > 3 ORDER BY id`,
+			"4||\n5||\n6|u888|другой фан\n7|u777|фан другой площадки\n8|stranger|логин без номера"},
+		{`SELECT id, fan_ref, fan_name, question, note, COALESCE(answer, '∅'), status FROM sale_questions ORDER BY id`,
+			"1|||" + Erased + "||" + Erased + "|answered\n2|||" + Erased + "||∅|open\n3|||" + Erased + "||∅|open\n4|Other||другой фан чей?||∅|open"},
 		{`SELECT fan_ref, fan_name, note, net_micros, pot FROM pot_sales`, "|||20000000|set-one"},
 		{`SELECT transaction_ref, COALESCE(json_extract(payload, '$.fanRef'), '∅'), net_mills FROM hub_sales ORDER BY transaction_ref`,
 			"1001|∅|20000\n1002|888|5000\n1003|777|7000"},
@@ -197,5 +215,41 @@ func TestErasuresFeedAbsentAndGone(t *testing.T) {
 	status = http.StatusNotFound
 	if st, err := Sync(ctx, s, c, now); err == nil || st.OK || !strings.Contains(st.Error, "404") {
 		t.Fatalf("404 after reading %+v %v", st, err)
+	}
+}
+
+// Hub's feed counts its `limit` in erasures of every key and leaves out those of pages outside the key's, so a page of
+// the feed can serve fewer erasures than asked with more behind it: the end of the feed is «nothing placed after the
+// place asked from», never a short page.
+func TestAShortPageOfErasuresIsNotTheEndOfTheFeed(t *testing.T) {
+	s, ctx := book(t)
+	defer func(n int) { limit = n }(limit)
+	limit = 2
+	// Erasure 2 is of a page outside the key: left out, and `next` moves past it.
+	all := []hub.Erasure{{ID: 1, Platform: "fansly", FanRef: "888", ErasedAt: "2026-11-13T08:00:00.000Z"},
+		{ID: 2, Platform: "fansly", FanRef: "outside", ErasedAt: "2026-11-13T08:01:00.000Z"},
+		{ID: 3, Platform: "fansly", FanRef: "777", ErasedAt: "2026-11-13T08:02:00.000Z"}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
+		n, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		out, next, read := []hub.Erasure{}, since, 0
+		for _, e := range all {
+			if e.ID <= since || read >= n {
+				continue
+			}
+			read, next = read+1, e.ID
+			if e.FanRef != "outside" {
+				out = append(out, e)
+			}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"erasures": out, "next": strconv.FormatInt(next, 10), "serverNow": "2026-11-13T09:00:00.000Z"})
+	}))
+	defer srv.Close()
+	st, err := Sync(ctx, s, hub.NewClient(hub.Config{BaseURL: srv.URL, Key: "k"}, nil), now)
+	if err != nil || st.Read != 2 || st.Next != "3" {
+		t.Fatalf("one pass must read to the end of the feed: %+v %v", st, err)
+	}
+	if got := rows(t, s, `SELECT id FROM hub_erasures ORDER BY id`); got != "1\n3" {
+		t.Fatalf("erasures applied: %q", got)
 	}
 }

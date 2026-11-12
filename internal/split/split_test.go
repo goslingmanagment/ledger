@@ -284,3 +284,84 @@ func TestAHolderMissingFromTheWorksIsUnknown(t *testing.T) {
 	s := sale(SaleTip, "page-a", "2026-11-05 14:00", 10_000, holder)
 	expect(t, HomeOf(s, nil, later), Unknown, ReasonHolderNotInWorks, nil)
 }
+
+// Hub's decision of a sale (Sale.Decision) comes before the rule, as Hub's own rule puts the owner's decision first.
+
+func TestHubsNobodyAndPotDecisionsComeBeforeTheRule(t *testing.T) {
+	holder := shift(101, "2026-11-05 09:00", "2026-11-05 13:00", "page-a")
+	s := sale(SaleTip, "page-a", "2026-11-05 11:00", 30_000, holder)
+	expect(t, HomeOf(s, []Work{holder}, later), Shift, ReasonHolder, whole100(holder, 30_000))
+	s.Decision = &Decision{Kind: DecisionNobody}
+	expect(t, HomeOf(s, []Work{holder}, later), Nobody, ReasonOwnerNobody, nil)
+	s.Decision = &Decision{Kind: DecisionPot, Pot: "spring"}
+	got := HomeOf(s, []Work{holder}, later)
+	expect(t, got, Pot, ReasonOwnerPot, nil)
+	if got.Pot != "spring" {
+		t.Errorf("pot %q, want spring", got.Pot)
+	}
+	// A pot decision that names no pot gives no home: the rule's stands.
+	s.Decision = &Decision{Kind: DecisionPot}
+	expect(t, HomeOf(s, []Work{holder}, later), Shift, ReasonHolder, whole100(holder, 30_000))
+	// «Никому» wins over a claim; a PPV waiting for its sender's shift is decided too.
+	s.Decision, s.ClaimedBy = &Decision{Kind: DecisionNobody}, ref(102)
+	expect(t, HomeOf(s, []Work{holder}, later), Nobody, ReasonOwnerNobody, nil)
+	ppv := ppvBy(sale(SalePPV, "page-a", "2026-11-05 20:00", 12_000), 102, RoleChatter)
+	ppv.Decision = &Decision{Kind: DecisionPot, Pot: "spring"}
+	expect(t, HomeOf(ppv, nil, msk("2026-11-06 12:00")), Pot, ReasonOwnerPot, nil)
+}
+
+func TestHubsDecisionGivesTheSaleToPeopleByItsShares(t *testing.T) {
+	a := shift(101, "2026-11-05 09:00", "2026-11-05 13:00", "page-a")
+	b := shift(102, "2026-11-05 09:00", "2026-11-05 13:00", "page-b") // works, but does not hold page-a
+	look := visit(103, "2026-11-05 10:00", "2026-11-05 10:20", "page-a")
+	works := []Work{a, b, look}
+	s := sale(SaleTip, "page-a", "2026-11-05 10:10", 1_001, a, look)
+	s.Decision = &Decision{Kind: DecisionSplit}
+	// The whole sale to a person who held nothing: on no work.
+	s.Resolution = []OwnerShare{{UserID: 102, Percent: 100}}
+	expect(t, HomeOf(s, works, later), Shift, ReasonOwnerSplit, []Share{{UserID: 102, Percent: 100, Mills: 1_001}})
+	// Shares: the rule's own person on the work the rule names, a look-in's person on the look-in, the last takes the rounding.
+	s.Resolution = []OwnerShare{{UserID: 103, Percent: 33}, {UserID: 101, Percent: 67}}
+	expect(t, HomeOf(s, works, later), Shift, ReasonOwnerSplit, []Share{
+		{WorkRef: look.Ref, UserID: 103, Percent: 33, Mills: 330},
+		{WorkRef: a.Ref, UserID: 101, Percent: 67, Mills: 671},
+	})
+	// Every share a look-in's: a look-in's home.
+	s.Resolution = []OwnerShare{{UserID: 103, Percent: 100}}
+	expect(t, HomeOf(s, works, later), Visit, ReasonOwnerSplit, whole100(look, 1_001))
+	// A PPV its sender's next shift takes by the rule, given to the sender: that shift.
+	next := shift(102, "2026-11-06 09:00", "2026-11-06 13:00", "page-a")
+	ppv := ppvBy(sale(SalePPV, "page-a", "2026-11-05 20:00", 12_000), 102, RoleChatter)
+	ppv.Decision, ppv.Resolution = &Decision{Kind: DecisionSplit}, []OwnerShare{{UserID: 102, Percent: 100}}
+	expect(t, HomeOf(ppv, []Work{next}, later), Shift, ReasonOwnerSplit, whole100(next, 12_000))
+	// A decision with no shares gives no home.
+	s.Resolution = nil
+	expect(t, HomeOf(s, works, later), Shift, ReasonHolder, whole100(a, 1_001))
+}
+
+func TestANobodysSaleHubGivesToAPersonIsTheirsAsAClaim(t *testing.T) {
+	s := sale(SaleTip, "page-a", "2026-11-05 03:00", 50_000)
+	expect(t, HomeOf(s, nil, later), Nobody, ReasonNoHolder, nil)
+	s.Decision, s.Resolution = &Decision{Kind: DecisionSplit}, []OwnerShare{{UserID: 102, Percent: 100}}
+	expect(t, HomeOf(s, nil, later), Shift, ReasonOwnerClaim, []Share{{UserID: 102, Percent: 100, Mills: 50_000}})
+	// Shares of a nobody's sale are the owner's split.
+	s.Resolution = []OwnerShare{{UserID: 101, Percent: 50}, {UserID: 102, Percent: 50}}
+	expect(t, HomeOf(s, nil, later), Shift, ReasonOwnerSplit, []Share{{UserID: 101, Percent: 50, Mills: 25_000}, {UserID: 102, Percent: 50, Mills: 25_000}})
+}
+
+func TestHubsDecisionLeavesASaleBeforeTheRuleAndAJunctionAlreadySplit(t *testing.T) {
+	// Before the rule the payout sheets pay: no decision moves it.
+	old := shift(101, "2026-11-01 11:00", "2026-11-01 16:30", "page-a")
+	s := sale(SaleTip, "page-a", "2026-11-01 16:00", 30_000, old)
+	s.Decision = &Decision{Kind: DecisionNobody}
+	expect(t, HomeOf(s, []Work{old}, later), BeforeRule, ReasonSaleBeforeRule, nil)
+	// A junction the shares already split is the same home with or without the decision beside them.
+	a := shift(101, "2026-11-05 09:00", "2026-11-05 13:00", "page-a")
+	b := shift(102, "2026-11-05 10:30", "2026-11-05 14:00", "page-a")
+	j := sale(SaleTip, "page-a", "2026-11-05 11:00", 1_001, a, b)
+	j.Resolution = []OwnerShare{{UserID: 102, Percent: 33}, {UserID: 101, Percent: 67}}
+	want := []Share{{WorkRef: b.Ref, UserID: 102, Percent: 33, Mills: 330}, {WorkRef: a.Ref, UserID: 101, Percent: 67, Mills: 671}}
+	expect(t, HomeOf(j, []Work{a, b}, later), Shift, ReasonOwnerSplit, want)
+	j.Decision = &Decision{Kind: DecisionSplit}
+	expect(t, HomeOf(j, []Work{a, b}, later), Shift, ReasonOwnerSplit, want)
+}

@@ -6,16 +6,7 @@ package split
 func decide(sale Sale, holders, shifts []*Work, ix index) Home {
 	net := sale.NetMills
 	if len(sale.Resolution) > 0 {
-		shares := make([]Share, len(sale.Resolution))
-		var given int64
-		for i, s := range sale.Resolution {
-			mills := percentOf(net, s.Percent)
-			if i == len(sale.Resolution)-1 {
-				mills = net - given // the last share takes the rounding: the shares sum to the net exactly
-			}
-			given += mills
-			shares[i] = Share{WorkRef: workRefOf(s.UserID, holders), UserID: s.UserID, Percent: s.Percent, Mills: mills}
-		}
+		shares := ownerShares(net, sale.Resolution, func(user int64) string { return workRefOf(user, holders) })
 		return sharesHome(shares, ReasonOwnerSplit, ix)
 	}
 	settled := judgeMarks(sale.Marks)
@@ -53,6 +44,22 @@ func decide(sale Sale, holders, shifts []*Work, ix index) Home {
 		return Home{Kind: Decide, Reason: ReasonMarksDisagree}
 	}
 	return Home{Kind: Decide, Reason: ReasonNoLastWriter}
+}
+
+// ownerShares is the owner's split as shares of the net (Hub's `splitShares`): in the order given, the last share takes
+// the rounding, so the shares sum to the net exactly. workRefOf names each person's work.
+func ownerShares(net int64, resolution []OwnerShare, workRefOf func(user int64) string) []Share {
+	shares := make([]Share, len(resolution))
+	var given int64
+	for i, s := range resolution {
+		mills := percentOf(net, s.Percent)
+		if i == len(resolution)-1 {
+			mills = net - given
+		}
+		given += mills
+		shares[i] = Share{WorkRef: workRefOf(s.UserID), UserID: s.UserID, Percent: s.Percent, Mills: mills}
+	}
+	return shares
 }
 
 // settlement is what the marks agree on: MarkMine (one user), MarkSplit (two), MarkNotMine (nobody claims it), or ""

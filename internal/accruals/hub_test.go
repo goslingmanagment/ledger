@@ -331,3 +331,124 @@ func TestAHubDayMissingAPostedPageFailsTheCheck(t *testing.T) {
 		t.Fatalf("after the corrected report: %+v", r)
 	}
 }
+
+// placed puts a version at a place of Hub's feed (seq).
+func placed(t *testing.T, seq int64, v json.RawMessage) json.RawMessage {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal(v, &m); err != nil {
+		t.Fatal(err)
+	}
+	m["seq"] = seq
+	b, _ := json.Marshal(m)
+	return b
+}
+
+// readFeed reads one scripted answer of Hub's feed the way the job does: the answer to the first request of the pass,
+// then «nothing after it».
+func readFeed(t *testing.T, s *db.Store, next string, held []any, versions ...json.RawMessage) reports.HubStatus {
+	t.Helper()
+	first := true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		out := []json.RawMessage{}
+		if first {
+			out = versions
+		}
+		first = false
+		_ = json.NewEncoder(w).Encode(map[string]any{"reports": out, "held": held, "next": next, "serverNow": "2026-11-17T09:00:00Z"})
+	}))
+	defer srv.Close()
+	st, err := reports.SyncHub(context.Background(), s, hub.NewClient(hub.Config{BaseURL: srv.URL, Key: "k"}, nil), reportNow)
+	if err != nil {
+		t.Fatalf("read the feed: %+v %v", st, err)
+	}
+	return st
+}
+
+// A version Hub holds back from ledger's key is stored and accrued like any other once Hub releases it (it comes at a
+// new place at the end of the feed); while it is held the day accrues without it and the health check names it.
+func TestAHeldVersionIsAccruedOnceItComes(t *testing.T) {
+	s, ctx := reportWeek(t)
+	setReports(t, s, ctx, "2026-11-10")
+	setHub(t, s, ctx, "2026-11-10")
+	// Браво handed in the 10th (place 1) and the 12th (place 3). Hub holds the 10th back: a page outside the key.
+	twelfth := placed(t, 3, hubVersion(5, 4, 1, "bravo", "2026-11-12", hubPage{"page-a", 50}))
+	held := []any{map[string]any{"id": 3, "seq": 1, "shiftId": 2, "person": "bravo", "reportDate": "2026-11-10",
+		"reason": "page_outside_key", "pageLabels": []string{"page-q"}}}
+	if st := readFeed(t, s, "3", held, twelfth); st.Stored != 1 || st.Held != 1 || st.Next != "3" {
+		t.Fatalf("first pass %+v", st)
+	}
+	// The 10th is her post's 50 (× 20% + the fix), the 12th Hub's.
+	if got := dayOf(t, s, "bravo", "2026-11-10"); got != "20000000 0 20000000 reports" {
+		t.Fatalf("the 10th while its version is held: %s", got)
+	}
+	r := checks.HubReports(ctx, checks.Env{Q: s.RO, Now: reportNow})
+	if r.OK || !strings.Contains(r.Summary, "версия 3 (смена 2, bravo, 2026-11-10): page-q") {
+		t.Fatalf("health while held: %+v", r)
+	}
+	// The key may read the page: Hub gives version 3 a new place at the end of the feed, 4.
+	tenth := placed(t, 4, hubVersion(3, 2, 1, "bravo", "2026-11-10", hubPage{"page-a", 30}))
+	if st := readFeed(t, s, "4", []any{}, twelfth, tenth); st.Stored != 1 || st.Same != 1 || st.Held != 0 || st.Next != "4" {
+		t.Fatalf("second pass %+v", st)
+	}
+	// The 10th accrues from the version that came: 30 × 20% + the fix.
+	if got := dayOf(t, s, "bravo", "2026-11-10"); got != "16000000 0 16000000 reports" {
+		t.Fatalf("the 10th after the late version: %s\n%s", got, books(t, s))
+	}
+	if got := cols(t, s, `SELECT day, net_micros, hub_reports FROM report_accruals WHERE person = 'bravo' ORDER BY day`); got != "2026-11-10 30000000 [3]\n2026-11-12 50000000 [5]" {
+		t.Fatalf("report_accruals:\n%s", got)
+	}
+	if r := checks.HubReports(ctx, checks.Env{Q: s.RO, Now: reportNow}); !r.OK {
+		t.Fatalf("health after it came: %+v", r)
+	}
+}
+
+// A version carries the shift's report date at hand-in, and a report's date follows its newest version (hub#1279): a
+// night shift first handed in before midnight moves to the day it ended in with its next version. Each version keeps the
+// date Hub served with it; the earlier day no longer has the report — it is the post's again — and the later day accrues
+// from it. The order the versions come in does not matter: the newest version of the shift is its report.
+func TestAReportsDateFollowsItsNewestVersion(t *testing.T) {
+	s, ctx := reportWeek(t)
+	setReports(t, s, ctx, "2026-11-10")
+	setHub(t, s, ctx, "2026-11-10")
+	// Браво's night shift 7: handed in before midnight for the 10th (30), then after it for the 11th (45).
+	first := hubVersion(1, 7, 1, "bravo", "2026-11-10", hubPage{"page-a", 30})
+	handIn(t, s, first)
+	if got := dayOf(t, s, "bravo", "2026-11-10"); got != "16000000 0 16000000 reports" { // 30 × 20% + the fix
+		t.Fatalf("the 10th by the first version: %s", got)
+	}
+	handIn(t, s, first, hubVersion(2, 7, 2, "bravo", "2026-11-11", hubPage{"page-a", 45}))
+	if got, want := cols(t, s, `SELECT id, report_date, current FROM hub_shift_reports ORDER BY id`), "1 2026-11-10 0\n2 2026-11-11 1"; got != want {
+		t.Fatalf("versions:\n%s\nwant\n%s", got, want)
+	}
+	if got, want := cols(t, s, `SELECT report_date, COALESCE(posted_micros, '-'), COALESCE(hub_micros, '-'), basis, COALESCE(accrue_micros, '-')
+		FROM v_report_pages WHERE person = 'bravo' AND report_date IN ('2026-11-10', '2026-11-11') ORDER BY report_date`),
+		"2026-11-10 50000000 - post 50000000\n2026-11-11 - 45000000 hub 45000000"; got != want {
+		t.Fatalf("the pay base:\n%s\nwant\n%s", got, want)
+	}
+	// The 10th is her post's 50 again, the 11th the report's 45: each × 20% + the fix.
+	if got := dayOf(t, s, "bravo", "2026-11-10"); got != "20000000 0 20000000 reports" {
+		t.Fatalf("the 10th after the report moved: %s", got)
+	}
+	if got := dayOf(t, s, "bravo", "2026-11-11"); got != "19000000 0 19000000 reports" {
+		t.Fatalf("the 11th: %s", got)
+	}
+	if got, want := cols(t, s, `SELECT day, net_micros, COALESCE(hub_reports, '-') FROM report_accruals WHERE person = 'bravo'
+		AND day IN ('2026-11-10', '2026-11-11') ORDER BY day`), "2026-11-10 50000000 -\n2026-11-11 45000000 [2]"; got != want {
+		t.Fatalf("report_accruals:\n%s\nwant\n%s", got, want)
+	}
+	// Альфа's shift 8 the other way round: its second version (the 11th, 60) is read first, the first (the 10th) comes
+	// late. The 10th stays her post's 140 × 25%, the 11th is the report's 60 × 25%.
+	second := hubVersion(4, 8, 2, "alfa", "2026-11-11", hubPage{"page-a", 60})
+	handIn(t, s, first, second)
+	handIn(t, s, first, hubVersion(3, 8, 1, "alfa", "2026-11-10", hubPage{"page-a", 10}), second)
+	if got, want := cols(t, s, `SELECT id, report_date, current FROM hub_shift_reports WHERE shift_id = 8 ORDER BY id`), "3 2026-11-10 0\n4 2026-11-11 1"; got != want {
+		t.Fatalf("versions of shift 8:\n%s\nwant\n%s", got, want)
+	}
+	if got := dayOf(t, s, "alfa", "2026-11-10"); got != "35000000 0 35000000 reports" {
+		t.Fatalf("Альфа's 10th: %s", got)
+	}
+	if got := dayOf(t, s, "alfa", "2026-11-11"); got != "15000000 0 15000000 reports" {
+		t.Fatalf("Альфа's 11th: %s", got)
+	}
+}

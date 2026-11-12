@@ -30,6 +30,10 @@ import (
 // their pages for the day (only this source: a post and an agent's draft keep «the last one wins»). A version that cannot
 // be stored — the person's code is not in people, a page not in hub_pages, sums that do not add up — is kept with its
 // problem and no pages, tried again on every pass, and shown by `ledger health`: never skipped, never a guessed person.
+// A version Hub holds back from ledger's key (a line on a page outside the key's pages, hub#1279) is named in the
+// answer's `held` and kept in hub_shift_report_held as a problem of the same check until it comes: once the key may read
+// it Hub places it anew at the end of the feed, and it is stored like any other. A version is known by its id (and its
+// shift and number), never judged by its place: served at another place again, it writes nothing.
 // What a version accrues is decided elsewhere: v_report_pages.basis by settings.payroll_basis_hub_from (empty — nothing).
 
 // SourceHub is a report handed in in Hub.
@@ -96,6 +100,7 @@ type HubStatus struct {
 	Same     int    `json:"same"`     // served again, already stored
 	Problems int    `json:"problems"` // versions of this pass that could not be stored
 	Fixed    int    `json:"fixed"`    // versions kept with a problem that are stored now
+	Held     int    `json:"held"`     // versions Hub holds back from ledger's key now (hub_shift_report_held)
 	LastOKAt string `json:"lastOkAt,omitempty"`
 }
 
@@ -175,6 +180,12 @@ func SyncHub(ctx context.Context, store *db.Store, c *hub.Client, now time.Time)
 					st.Problems++
 				}
 			}
+			// What Hub holds back from the key now, after this answer's versions are in: one of them may be a held one come.
+			if ans.Held != nil {
+				if err := keepHeld(ctx, tx, ans.Held, now); err != nil {
+					return err
+				}
+			}
 			// The cursor never moves back: a read of the overlap ends behind it.
 			if next, _ := strconv.ParseInt(ans.Next, 10, 64); next > cursor {
 				cursor = next
@@ -186,9 +197,13 @@ func SyncHub(ctx context.Context, store *db.Store, c *hub.Client, now time.Time)
 		if err != nil {
 			return st, err
 		}
-		done := len(ans.Reports) < hubLimit || ans.Next == ask
+		// The feed is read to its end when it placed nothing after the place asked from — never when a page serves fewer
+		// versions than asked: Hub's `limit` counts places, held ones too, and a held place serves no version. Taking a
+		// short page for the end, one held version inside the window read again stopped every later version for good.
+		from, _ := strconv.ParseInt(ask, 10, 64)
+		next, _ := strconv.ParseInt(ans.Next, 10, 64)
 		ask = ans.Next
-		if done {
+		if next <= from {
 			break
 		}
 	}
@@ -217,6 +232,9 @@ func SyncHub(ctx context.Context, store *db.Store, c *hub.Client, now time.Time)
 		return err
 	})
 	if err != nil {
+		return st, err
+	}
+	if err := store.RW.QueryRowContext(ctx, `SELECT COUNT(*) FROM hub_shift_report_held WHERE cleared_at IS NULL`).Scan(&st.Held); err != nil {
 		return st, err
 	}
 	if err := save(); err != nil {
@@ -347,6 +365,8 @@ func (v *validator) check(it hub.ShiftReport) (person string, problem string) {
 		case !inVersion:
 			add("строка %d (продажа %d): страницы %s нет в pages версии", i+1, l.TransactionID, l.PageLabel)
 			sums = false
+		case l.ClaimedMills != nil && !millsOK(l.ClaimedMills):
+			add("строка %d (продажа %d): claimedMills вне разумного", i+1, l.TransactionID)
 		}
 		if millsOK(l.AmountMills) {
 			lines[l.PageLabel] += *l.AmountMills
@@ -454,12 +474,17 @@ func storeHub(ctx context.Context, tx *sql.Tx, v *validator, it hub.ShiftReport,
 		}
 	}
 	for i, l := range it.Lines {
+		// What a disputed «моё» claims (hub#1279): the line itself counts nothing, the page is its lines' amountMills.
+		var claimed any
+		if l.ClaimedMills != nil {
+			claimed = int64(money.FromMills(*l.ClaimedMills))
+		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO hub_shift_report_lines(report_id, seq, transaction_ref, page_label, grp, net_micros,
-			rule_share_micros, rule_home, rule_reason, statement, share_with_user_id, note, amount_micros, counted, added, disputed)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, rowID, i+1, strconv.FormatInt(l.TransactionID, 10), l.PageLabel, l.Group,
-			int64(money.FromMills(*l.NetMills)), int64(money.FromMills(*l.RuleShareMills)), l.RuleHome, l.RuleReason, l.Statement,
-			l.ShareWithUserID, l.Note, int64(money.FromMills(*l.AmountMills)), boolInt(*l.AmountMills != 0), boolInt(l.Added),
-			boolInt(l.Disputed)); err != nil {
+			rule_share_micros, rule_home, rule_reason, statement, share_with_user_id, note, amount_micros, counted, added, disputed,
+			claimed_micros) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, rowID, i+1, strconv.FormatInt(l.TransactionID, 10),
+			l.PageLabel, l.Group, int64(money.FromMills(*l.NetMills)), int64(money.FromMills(*l.RuleShareMills)), l.RuleHome, l.RuleReason,
+			l.Statement, l.ShareWithUserID, l.Note, int64(money.FromMills(*l.AmountMills)), boolInt(*l.AmountMills != 0), boolInt(l.Added),
+			boolInt(l.Disputed), claimed); err != nil {
 			return "", err
 		}
 	}
@@ -612,6 +637,115 @@ func HubVersionsByDay(ctx context.Context, q ledger.Querier) (map[[3]string][]in
 	}
 	for _, list := range out {
 		sort.Slice(list, func(i, j int) bool { return list[i] < list[j] })
+	}
+	return out, rows.Err()
+}
+
+// keepHeld brings hub_shift_report_held in line with the versions Hub's answer says it holds back from ledger's key. A
+// version listed and not here yet is held; one the list no longer names is cleared: Hub released it (it comes at a new
+// place at the end of the feed, in this pass or the next) or no longer has it. A version listed that ledger already has
+// is not held: its page left the key after it was read. While the list stays the same nothing is written.
+func keepHeld(ctx context.Context, tx *sql.Tx, held []hub.HeldVersion, now time.Time) error {
+	type row struct {
+		seq, shift                      int64
+		person, date, reason, pageLabel string
+	}
+	rowOf := func(h hub.HeldVersion) row {
+		labels := h.PageLabels
+		if labels == nil {
+			labels = []string{}
+		}
+		b, _ := json.Marshal(labels)
+		r := row{seq: h.Seq, shift: h.ShiftID, date: h.ReportDate, reason: h.Reason, pageLabel: string(b)}
+		if h.Person != nil {
+			r.person = *h.Person
+		}
+		return r
+	}
+	open := map[int64]row{}
+	rows, err := tx.QueryContext(ctx, `SELECT id, seq, shift_id, COALESCE(person, ''), report_date, reason, page_labels
+		FROM hub_shift_report_held WHERE cleared_at IS NULL`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var id int64
+		var r row
+		if err := rows.Scan(&id, &r.seq, &r.shift, &r.person, &r.date, &r.reason, &r.pageLabel); err != nil {
+			rows.Close()
+			return err
+		}
+		open[id] = r
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	at := ts.Format(now)
+	listed := map[int64]bool{}
+	for _, h := range held {
+		var stored int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM hub_shift_reports WHERE id = ?`, h.ID).Scan(&stored); err != nil {
+			return err
+		}
+		if stored > 0 {
+			continue
+		}
+		listed[h.ID] = true
+		r := rowOf(h)
+		if old, ok := open[h.ID]; ok && old == r {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO hub_shift_report_held(id, seq, shift_id, person, report_date, reason, page_labels,
+			first_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(id) DO UPDATE SET seq = excluded.seq, shift_id = excluded.shift_id, person = excluded.person,
+			report_date = excluded.report_date, reason = excluded.reason, page_labels = excluded.page_labels,
+			cleared_at = NULL`, h.ID, r.seq, r.shift, nullStr(r.person), r.date, r.reason, r.pageLabel, at); err != nil {
+			return err
+		}
+	}
+	for id := range open {
+		if listed[id] {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE hub_shift_report_held SET cleared_at = ? WHERE id = ?`, at, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// HeldVersion is a version Hub holds back from ledger's key: a line of it is on a page outside the key's pages.
+type HeldVersion struct {
+	ID         int64    `json:"id"`
+	Seq        int64    `json:"seq"`
+	ShiftID    int64    `json:"shiftId"`
+	Person     *string  `json:"person"` // the code Hub sent; nil — a login no person holds
+	ReportDate string   `json:"reportDate"`
+	Reason     string   `json:"reason"`
+	PageLabels []string `json:"pageLabels"`
+	Since      string   `json:"since"` // when ledger first saw it held
+}
+
+// HeldVersions lists the versions held back now, in the feed's order.
+func HeldVersions(ctx context.Context, q ledger.Querier) ([]HeldVersion, error) {
+	rows, err := q.QueryContext(ctx, `SELECT id, seq, shift_id, person, report_date, reason, page_labels, first_seen_at
+		FROM hub_shift_report_held WHERE cleared_at IS NULL ORDER BY seq, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []HeldVersion{}
+	for rows.Next() {
+		var h HeldVersion
+		var person sql.NullString
+		var labels string
+		if err := rows.Scan(&h.ID, &h.Seq, &h.ShiftID, &person, &h.ReportDate, &h.Reason, &labels, &h.Since); err != nil {
+			return nil, err
+		}
+		h.Person, h.PageLabels = nullable(person), []string{}
+		_ = json.Unmarshal([]byte(labels), &h.PageLabels)
+		out = append(out, h)
 	}
 	return out, rows.Err()
 }

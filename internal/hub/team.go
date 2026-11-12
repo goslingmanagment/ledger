@@ -129,7 +129,18 @@ type TeamSale struct {
 	LastWriterUserID *int64       `json:"lastWriterUserId"`
 	Writers          []TeamWriter `json:"writers"`
 	Marks            []TeamMark   `json:"marks"`
-	Resolution       []TeamShare  `json:"resolution"`
+	// Resolution is the owner's split: since hub#1279 the shares of Hub's active decision that gives the sale to people
+	// (a nobody's sale given to a person included), else what Hub's old shift-report tables held.
+	Resolution []TeamShare `json:"resolution"`
+	// Decision is Hub's active decision of the sale (hub#1279), of any kind that names a home; nil — none, or an older Hub.
+	Decision *TeamDecision `json:"decision"`
+}
+
+// TeamDecision is Hub's active decision of a sale: split — given to people (Resolution has the shares), nobody —
+// «никому», pot — a pot's, named by the ledger's pot slug.
+type TeamDecision struct {
+	Kind string  `json:"kind"`
+	Pot  *string `json:"pot"`
 }
 
 // TeamPerson is a bought PPV's sender with their role now.
@@ -168,7 +179,8 @@ var (
 	teamWorkKinds = map[string]bool{split.Shift: true, split.Visit: true}
 	teamSaleKinds = map[string]bool{split.SalePPV: true, split.SaleTip: true, split.SaleSubscription: true, split.SalePost: true}
 	// Hub's marks → the split's: «делим» is Hub's share, the split's MarkSplit.
-	teamMarks = map[string]string{"mine": split.MarkMine, "share": split.MarkSplit, "not_mine": split.MarkNotMine}
+	teamMarks     = map[string]string{"mine": split.MarkMine, "share": split.MarkSplit, "not_mine": split.MarkNotMine}
+	teamDecisions = map[string]bool{split.DecisionSplit: true, split.DecisionNobody: true, split.DecisionPot: true}
 )
 
 // Split is the work as the split rules read it: the pages it holds sales of, from when.
@@ -206,6 +218,12 @@ func (s TeamSale) Split() split.Sale {
 	}
 	for _, r := range s.Resolution {
 		out.Resolution = append(out.Resolution, split.OwnerShare{UserID: r.UserID, Percent: r.Percent})
+	}
+	if s.Decision != nil {
+		out.Decision = &split.Decision{Kind: s.Decision.Kind}
+		if s.Decision.Pot != nil {
+			out.Decision.Pot = *s.Decision.Pot
+		}
 	}
 	return out
 }
@@ -273,6 +291,9 @@ func (s TeamSale) check() error {
 		if r.UserID <= 0 || r.Percent < 0 || r.Percent > 100 {
 			return fmt.Errorf("продажа %s: решение владельца не по контракту", s.TransactionRef)
 		}
+	}
+	if s.Decision != nil && !teamDecisions[s.Decision.Kind] {
+		return fmt.Errorf("продажа %s: решение хаба вида %q", s.TransactionRef, s.Decision.Kind)
 	}
 	return nil
 }

@@ -5,13 +5,15 @@
 //
 //   - Hub's handed-in versions: a line's note (hub_shift_report_lines and the version's stored payload);
 //   - the agent's drafts: a line's fan reference, fan name and notes (shift_report_lines and the draft's payload);
-//   - decisions, questions and pot purchases on those sales or naming that fan reference on a page of the platform:
-//     fan reference, fan name, the note, the question and answer texts;
+//   - decisions, questions and pot purchases on those sales or naming that fan on a page of the platform — by his id,
+//     by "u" + the id or by a login ledger holds for him (namesOf): fan reference, fan name, the note, the question and
+//     answer texts;
 //   - hub_sales: the fan reference in the payload, which also makes a second pass find nothing (idempotent).
 //
 // What no fan reference ties to the fan stays: «мимо площадки» (who paid, what for), the shift's comment, the posts of
-// «Отчётность» (their texts are in the immutable events), a decision or question that names the fan by a login only,
-// with no sale, and the owner's word on a nobody's sale (sale_claims, immutable).
+// «Отчётность» (their texts are in the immutable events), a decision or question that names the fan only by a login no
+// other row of ledger ties to his id (Hub's feed names the id alone), and the owner's word on a nobody's sale
+// (sale_claims, immutable).
 package erasure
 
 import (
@@ -20,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -137,9 +140,12 @@ func Sync(ctx context.Context, store *db.Store, c *hub.Client, now time.Time) (S
 		if err != nil {
 			return st, err
 		}
-		done := len(ans.Erasures) < limit || ans.Next == st.Next
+		// The feed is read to its end when it placed nothing after the place asked from. A page with fewer erasures than
+		// asked is not the end: Hub counts `limit` in erasures of every key and leaves out those of pages outside this one's.
+		from, _ := strconv.ParseInt(st.Next, 10, 64)
+		next, _ := strconv.ParseInt(ans.Next, 10, 64)
 		st.Next = ans.Next
-		if done {
+		if next <= from {
 			break
 		}
 	}
@@ -193,6 +199,11 @@ func Apply(ctx context.Context, tx *sql.Tx, e hub.Erasure, now time.Time) (map[s
 	if err != nil {
 		return nil, err
 	}
+	// How a row may name the fan (namesOf), read before anything is cleared.
+	names, err := namesOf(ctx, tx, e.FanRef, refs, pages)
+	if err != nil {
+		return nil, err
+	}
 	exec := func(table, query string, args ...any) error {
 		res, err := tx.ExecContext(ctx, query, args...)
 		if err != nil {
@@ -204,16 +215,21 @@ func Apply(ctx context.Context, tx *sql.Tx, e hub.Erasure, now time.Time) (map[s
 	}
 	refList, refArgs := inList(refs)
 	pageList, pageArgs := inList(pages)
-	// The rows of the fan's sales, or naming the fan's reference on a page of the platform.
+	nameList, nameArgs := inList(names)
+	// The rows of the fan's sales, or naming the fan — in any of his shapes — on a page of the platform.
 	whose := func(refCol, fanCol, pageCol string) (string, []any) {
-		where := "(" + refCol + " IN " + refList + " OR (" + fanCol + " = ? AND " + fanCol + " <> '' AND " + pageCol + " IN " + pageList + "))"
-		args := append(append(append([]any{}, refArgs...), e.FanRef), pageArgs...)
+		where := "(" + refCol + " IN " + refList + " OR (" + fanCol + " <> '' AND lower(" + fanCol + ") IN " + nameList + " AND " + pageCol + " IN " + pageList + "))"
+		args := append(append(append([]any{}, refArgs...), nameArgs...), pageArgs...)
 		return where, args
 	}
 
 	inRefs := map[string]bool{}
 	for _, r := range refs {
 		inRefs[r] = true
+	}
+	isFan := map[string]bool{}
+	for _, n := range names {
+		isFan[n] = true
 	}
 	onPlatform := map[string]bool{}
 	for _, p := range pages {
@@ -240,7 +256,7 @@ func Apply(ctx context.Context, tx *sql.Tx, e hub.Erasure, now time.Time) (map[s
 		WHERE `+where, args, `UPDATE shift_reports SET payload = ? WHERE id = ?`,
 		func(m map[string]any) bool {
 			ref, fan, page := refString(m["transaction_ref"]), refString(m["fan_ref"]), refString(m["page"])
-			return inRefs[ref] || (fan == e.FanRef && onPlatform[page])
+			return inRefs[ref] || (fan != "" && isFan[strings.ToLower(fan)] && onPlatform[page])
 		}, map[string]any{"fan_ref": "", "fan_name": "", "notes": []any{}})
 	if err != nil {
 		return nil, fmt.Errorf("shift_reports: %w", err)
@@ -285,6 +301,36 @@ func Apply(ctx context.Context, tx *sql.Tx, e hub.Erasure, now time.Time) (map[s
 func salesOf(ctx context.Context, q ledger.Querier, platform, fanRef string) ([]string, error) {
 	return strings1(ctx, q, `SELECT transaction_ref FROM hub_sales WHERE platform = ? AND json_extract(payload, '$.fanRef') = ?
 		ORDER BY transaction_ref`, platform, fanRef)
+}
+
+// loginRe is the shape of a login: what a fan name must look like to stand for the fan's login.
+var loginRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{1,63}$`)
+
+// namesOf are the ways ledger's rows may name the fan, lower-cased — the three Hub's carry-over of ledger's decisions
+// matched a fan by: his platform id, "u" + the id (the login of an account that never chose one), and his login. Hub's
+// feed carries no login, so the logins are the ones ledger itself holds for him: the fan name of a row with his id or on
+// one of his sales, when it has the shape of a login. A login no row of ledger ties to his id is not known to be his.
+func namesOf(ctx context.Context, q ledger.Querier, fanRef string, refs, pages []string) ([]string, error) {
+	id := strings.ToLower(fanRef)
+	out := []string{id, "u" + id}
+	seen := map[string]bool{id: true, "u" + id: true}
+	refList, refArgs := inList(refs)
+	pageList, pageArgs := inList(pages)
+	args := append(append(append([]any{}, refArgs...), id, "u"+id), pageArgs...)
+	for _, table := range []string{"shift_report_lines", "sale_decisions", "sale_questions", "pot_sales"} {
+		found, err := strings1(ctx, q, `SELECT DISTINCT lower(fan_name) FROM `+table+` WHERE fan_name <> '' AND (transaction_ref IN `+refList+`
+			OR (lower(fan_ref) IN (?, ?) AND page_label IN `+pageList+`)) ORDER BY 1`, args...)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", table, err)
+		}
+		for _, n := range found {
+			if loginRe.MatchString(n) && !seen[n] {
+				seen[n] = true
+				out = append(out, n)
+			}
+		}
+	}
+	return out, nil
 }
 
 // pagesOf are the platform's pages ledger knows.

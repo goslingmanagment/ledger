@@ -827,8 +827,9 @@ const hubReportsCheck = "сданные в хабе отчёты сохраня�
 const hubReportsStale = time.Hour
 
 // HubReports: the reports handed in in Hub reach ledger — the age of the last good read of Hub's feed (the job
-// hub-reports), and every current version Hub served that could not be stored: a person's code not in people, a page not
-// in hub_pages, sums that do not add up. A Hub without the feed yet (404) is a line, not a failure.
+// hub-reports), every current version Hub served that could not be stored: a person's code not in people, a page not
+// in hub_pages, sums that do not add up, and every version Hub holds back from ledger's key (a line on a page outside
+// the key's pages), until it comes. A Hub without the feed yet (404) is a line, not a failure.
 func HubReports(ctx context.Context, e Env) Result {
 	const name = hubReportsCheck
 	st, err := reports.ReadHubStatus(ctx, e.Q)
@@ -872,6 +873,24 @@ func HubReports(ctx context.Context, e Env) Result {
 		failures = append(failures, fmt.Sprintf("%d сданных в хабе версий не сохранены — карточку в people или страницу в hub_pages, джоб попробует снова: %s",
 			len(problems), strings.Join(parts, " | ")))
 		details["problems"] = problems
+	}
+	// The versions Hub holds back from ledger's key: handed in, but not here — their days accrue nothing from them.
+	held, err := reports.HeldVersions(ctx, e.Q)
+	if err != nil {
+		return fail(name, "warn", err.Error(), nil)
+	}
+	if len(held) > 0 {
+		parts := make([]string, 0, len(held))
+		for _, h := range held {
+			who := "логин без человека"
+			if h.Person != nil {
+				who = *h.Person
+			}
+			parts = append(parts, fmt.Sprintf("версия %d (смена %d, %s, %s): %s", h.ID, h.ShiftID, who, h.ReportDate, strings.Join(h.PageLabels, ", ")))
+		}
+		failures = append(failures, fmt.Sprintf("%d сданных в хабе версий хаб придержал: у ключа ledger в хабе нет их страниц — %s; "+
+			"дайте ключу эти страницы в хабе, версии придут сами", len(held), strings.Join(parts, "; ")))
+		details["held"] = held
 	}
 	if len(failures) > 0 {
 		return fail(name, "warn", strings.Join(failures, " || "), details)

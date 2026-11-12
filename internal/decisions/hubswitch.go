@@ -17,6 +17,10 @@ import (
 // them — `ledger decision add|applied|cancel`, `ledger question add|answer|drop` and `ledger accruals claim|unclaim`,
 // beside the database and over HTTP, refuse with one line naming Hub's command — and keeps what it has as history:
 // `decision list` and `question list` read as before. Empty — ledger writes them as it always did.
+//
+// The same day parts the sales: a sale of that Moscow day or later goes by Hub's word — the facts rule reads Hub's
+// decision of it (internal/accruals) —, a sale before it by ledger's own rows, as it did. A writer has no sale's day
+// to go by, so it goes by today (HubOnly); what reads a sale goes by the sale's day (HubRules).
 
 // SettingHubFrom is the first Moscow day on which only Hub writes the decisions about whose a sale is; empty — ledger too.
 const SettingHubFrom = "sale_decisions_hub_from"
@@ -66,9 +70,11 @@ func SetHubFrom(ctx context.Context, q ledger.Querier, day string, now time.Time
 	return err
 }
 
-const hubFromNote = "С какого дня (МСК) решения «чья продажа», вопросы о ней и слово владельца о ничьей продаже пишет только хаб " +
-	"(hub sale decide|ask|answer); ledger decision add|applied|cancel, question add|answer|drop и accruals claim|unclaim отказывают, " +
-	"списки остаются историей. Пусто — пишет и ledger. Ставит ledger decision hub-from"
+const hubFromNote = "С какого дня (МСК) у «чья продажа» один дом — хаб. С этого дня решения, вопросы о ней и слово владельца о ничьей " +
+	"продаже пишет только хаб (hub sale decide|ask|answer): ledger decision add|applied|cancel, question add|answer|drop и accruals " +
+	"claim|unclaim отказывают, списки остаются историей. У продаж этого дня и позже правило фактов читает решение хаба (никому, в общак, " +
+	"доли, ничья — человеку); у продаж раньше действуют записи ledger. Пусто — пишет и ledger, решения хаба не читаются. " +
+	"Ставит ledger decision hub-from"
 
 // HubOnly says, from the switch day on, why ledger does not write this (what: HubDecisions, HubQuestions, HubClaims);
 // "" — ledger writes it.
@@ -79,6 +85,10 @@ func HubOnly(ctx context.Context, q ledger.Querier, now time.Time, what string) 
 	}
 	return fmt.Sprintf(hubLines[what], day), nil
 }
+
+// HubRules says whether Hub's word rules a sale of the Moscow day given: the switch day is set and the day is not before
+// it. from is HubFrom's answer.
+func HubRules(from, day string) bool { return from != "" && day >= from }
 
 // hubOnly is HubOnly as a refusal.
 func hubOnly(ctx context.Context, q ledger.Querier, now time.Time, what string) error {

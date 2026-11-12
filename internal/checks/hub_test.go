@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -151,5 +152,25 @@ func TestHubJobsOpenOnlyToThePayoutsScope(t *testing.T) {
 	}
 	if code := status(client.New(config.Client{URL: srv.URL}).Do(ctx, http.MethodGet, path, nil, nil)); code != http.StatusUnauthorized {
 		t.Errorf("no key: %d", code)
+	}
+}
+
+// A version Hub holds back from ledger's key fails «сданные в хабе отчёты сохраняются» — the check Hub raises as a matter —
+// naming the person, the report date and the pages outside the key, until the version comes or leaves Hub's list.
+func TestAHeldVersionFailsTheHubReportsCheck(t *testing.T) {
+	s, ctx := openDB(t)
+	exec(t, s, `INSERT INTO hub_shift_report_held(id, seq, shift_id, person, report_date, reason, page_labels, first_seen_at)
+		VALUES (12, 2, 70, 'alfa', '2026-11-10', 'page_outside_key', '["page-x","page-y"]', '2026-11-12T10:00:00+03:00'),
+		       (13, 3, 71, NULL, '2026-11-11', 'page_outside_key', '["page-x"]', '2026-11-12T10:00:00+03:00')`)
+	r := HubReports(ctx, Env{Q: s.RO, Now: now})
+	if r.OK || r.Severity != "warn" || KeyOf(r.Name) != "hub_reports" ||
+		!strings.Contains(r.Summary, "2 сданных в хабе версий хаб придержал") ||
+		!strings.Contains(r.Summary, "версия 12 (смена 70, alfa, 2026-11-10): page-x, page-y") ||
+		!strings.Contains(r.Summary, "версия 13 (смена 71, логин без человека, 2026-11-11): page-x") {
+		t.Fatalf("held versions: %+v", r)
+	}
+	exec(t, s, `UPDATE hub_shift_report_held SET cleared_at = '2026-11-12T11:00:00+03:00'`)
+	if r := HubReports(ctx, Env{Q: s.RO, Now: now}); !r.OK {
+		t.Fatalf("after the versions came: %+v", r)
 	}
 }

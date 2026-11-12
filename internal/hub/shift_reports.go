@@ -14,8 +14,11 @@ import (
 // version of every report after a cursor, and `next` is the cursor to ask from. Since hub#1266 the feed's order is the
 // place Hub gives a version once it is committed (`seq`), no longer the version's id: a version committed late is placed
 // after the cursor. ledger follows `next` and also reads a window behind it again (internal/reports, hubOverlap), so a
-// version an older Hub served late is not lost either. It reads with its key (read:team and read:money) and keeps the
-// versions in internal/reports; this file is only the wire.
+// version an older Hub served late is not lost either. Since hub#1279 a version with a line on a page outside the key's
+// pages is held back, not dropped: `held` names it on every read until the key may read it; then Hub gives it a new
+// place at the end of the feed and it comes in `reports` by the ordinary cursor. `limit` counts places, held ones too,
+// and `next` is the last place read, held or not. ledger reads with its key (read:team and read:money) and keeps the
+// versions in internal/reports, by their id whatever their place; this file is only the wire.
 
 // ShiftReportsPath is Hub's feed of the handed-in shift reports.
 const ShiftReportsPath = "/api/v1/agent/shift-reports"
@@ -63,6 +66,10 @@ type ShiftReportLine struct {
 	AmountMills     *int64  `json:"amountMills"`
 	Added           bool    `json:"added"`
 	Disputed        bool    `json:"disputed"`
+	// ClaimedMills is what a disputed «моё» claims (hub#1279): such a line counts nothing (AmountMills 0) until the
+	// dispute is settled, and says here the net it claims. nil — not disputed, or a Hub before hub#1279, whose disputed
+	// line counted its whole net.
+	ClaimedMills *int64 `json:"claimedMills"`
 }
 
 // ShiftReportOffSale is money «мимо площадки»: never in the version's total until the owner confirms it; a confirmed one
@@ -85,10 +92,25 @@ func (o ShiftReportOffSale) CountsOnPage() string {
 	return *o.PageLabel
 }
 
+// HeldVersion is a version the feed holds back from the key (hub#1279): a line of it is on a page outside the key's
+// pages. No sums and no lines: who, when, and the pages outside the key.
+type HeldVersion struct {
+	ID         int64    `json:"id"`
+	Seq        int64    `json:"seq"`
+	ShiftID    int64    `json:"shiftId"`
+	Person     *string  `json:"person"` // the ledger's people.slug; null — a login no person holds
+	ReportDate string   `json:"reportDate"`
+	Reason     string   `json:"reason"` // page_outside_key
+	PageLabels []string `json:"pageLabels"`
+}
+
 // ShiftReportsAnswer is one page of the feed, each version with its raw JSON.
 type ShiftReportsAnswer struct {
-	Reports   []ShiftReport
-	Raw       []json.RawMessage
+	Reports []ShiftReport
+	Raw     []json.RawMessage
+	// Held are all the versions Hub holds back from the key now, whatever the cursor; nil — the answer has no such list
+	// (a Hub before hub#1279), which says nothing about what is held.
+	Held      []HeldVersion
 	Next      string
 	ServerNow string
 }
@@ -110,6 +132,7 @@ func (c *Client) ShiftReports(ctx context.Context, since string, limit int) (*Sh
 	}
 	var env struct {
 		Reports   []json.RawMessage `json:"reports"`
+		Held      []HeldVersion     `json:"held"`
 		Next      *string           `json:"next"`
 		ServerNow *string           `json:"serverNow"`
 	}
@@ -119,9 +142,14 @@ func (c *Client) ShiftReports(ctx context.Context, since string, limit int) (*Sh
 		}
 		return nil, refusef("хаб %s: ответ не по контракту (%v)", what, err)
 	}
-	a := &ShiftReportsAnswer{Raw: env.Reports, Next: *env.Next, ServerNow: *env.ServerNow}
+	a := &ShiftReportsAnswer{Raw: env.Reports, Held: env.Held, Next: *env.Next, ServerNow: *env.ServerNow}
 	if _, err := strconv.ParseInt(a.Next, 10, 64); err != nil && a.Next != "" {
 		return nil, refusef("хаб %s: ответ не по контракту (next %q — не номер версии)", what, a.Next)
+	}
+	for i, h := range a.Held {
+		if h.ID <= 0 {
+			return nil, refusef("хаб %s: придержанная версия %d ответа без id", what, i+1)
+		}
 	}
 	for i, r := range env.Reports {
 		var s ShiftReport
