@@ -172,14 +172,14 @@ func TestHubReportsAreStoredTheDayAddsAndTheNewerVersionSupersedes(t *testing.T)
 		t.Fatalf("problems %+v %v", problems, err)
 	}
 
-	// Read again from the cursor: nothing new. From the first: the same versions, no new rows.
-	if st, err := SyncHub(ctx, s, c, hubNow); err != nil || st.Read != 0 || st.Stored != 0 || st.Next != "106" {
+	// Read again from the cursor less the overlap: the same versions, nothing new. From the first: the same, no new rows.
+	if st, err := SyncHub(ctx, s, c, hubNow); err != nil || st.Read != 6 || st.Same != 6 || st.Stored != 0 || st.Problems != 0 || st.Next != "106" {
 		t.Fatalf("again: %+v %v", st, err)
 	}
 	if _, err := s.RW.Exec(`DELETE FROM cursors WHERE name = ?`, hubCursor); err != nil {
 		t.Fatal(err)
 	}
-	if st, err := SyncHub(ctx, s, c, hubNow); err != nil || st.Read != 6 || st.Stored != 0 || st.Same != 4 || st.Problems != 2 {
+	if st, err := SyncHub(ctx, s, c, hubNow); err != nil || st.Read != 6 || st.Stored != 0 || st.Same != 6 || st.Problems != 0 {
 		t.Fatalf("from the first: %+v %v", st, err)
 	}
 	if n := count(t, s, "hub_shift_reports"); n != 6 {
@@ -198,7 +198,7 @@ func TestHubReportsAreStoredTheDayAddsAndTheNewerVersionSupersedes(t *testing.T)
 		t.Fatal(err)
 	}
 	st, err = SyncHub(ctx, s, c, hubNow)
-	if err != nil || st.Fixed != 2 {
+	if err != nil || st.Stored+st.Fixed != 2 { // read again in the overlap, or tried again
 		t.Fatalf("fixed: %+v %v", st, err)
 	}
 	if problems, err := HubProblems(ctx, s.RO); err != nil || len(problems) != 0 {
@@ -314,5 +314,40 @@ func TestAConfirmedOffPlatformAmountCountsOnItsPage(t *testing.T) {
 	if err != nil || len(problems) != 1 || problems[0].ID != 4 ||
 		!strings.Contains(problems[0].Problem, "«мимо площадки» 1 (запись 73): страницы «page-q» нет в hub_pages") {
 		t.Fatalf("problems %+v %v", problems, err)
+	}
+}
+
+// A version Hub serves late — committed after a version with a bigger id was read (an older Hub ordered its feed by id), or
+// placed later in the order of a newer Hub (seq) — is read on the next pass, never lost behind the cursor.
+func TestALateVersionBehindTheCursorIsReadOnTheNextPass(t *testing.T) {
+	s := book(t)
+	ctx := context.Background()
+	item := func(id, shift int64) json.RawMessage {
+		return raw(t, map[string]any{"id": id, "seq": id, "person": "anna", "hubUserId": 41, "shiftId": shift, "reportDate": "2026-11-10",
+			"version": 1, "submittedAt": "2026-11-10T20:00:00Z", "door": "workboard", "telegramMessageRef": nil, "totalMills": 10_000,
+			"pages": []any{map[string]any{"pageLabel": "page-a", "amountMills": 10_000}},
+			"lines": []any{map[string]any{"transactionId": 7000 + id, "pageLabel": "page-a", "group": "mine", "netMills": 10_000,
+				"ruleShareMills": 10_000, "ruleHome": "shift", "ruleReason": "holder", "statement": nil, "shareWithUserId": nil, "note": nil,
+				"amountMills": 10_000, "added": false, "disputed": false}},
+			"offPlatform": []any{}, "comment": "", "dayPaid": nil, "ruleVersion": "c2"})
+	}
+	stub, c := newStubHub(t, []json.RawMessage{item(1, 1), item(3, 3)})
+	if st, err := SyncHub(ctx, s, c, hubNow); err != nil || st.Stored != 2 || st.Next != "3" {
+		t.Fatalf("first pass %+v %v", st, err)
+	}
+	// Version 2 commits now, behind the cursor 3.
+	stub.mu.Lock()
+	stub.items = []json.RawMessage{item(1, 1), item(2, 2), item(3, 3)}
+	stub.mu.Unlock()
+	st, err := SyncHub(ctx, s, c, hubNow.Add(5*time.Minute))
+	if err != nil || st.Stored != 1 || st.Next != "3" {
+		t.Fatalf("second pass %+v %v", st, err)
+	}
+	if n := count(t, s, "hub_shift_reports"); n != 3 {
+		t.Fatalf("%d versions, want 3: the late one is lost", n)
+	}
+	// The cursor never moves back, and reading again writes nothing.
+	if st, err := SyncHub(ctx, s, c, hubNow.Add(10*time.Minute)); err != nil || st.Stored != 0 || st.Next != "3" {
+		t.Fatalf("third pass %+v %v", st, err)
 	}
 }

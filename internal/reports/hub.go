@@ -59,6 +59,11 @@ const (
 	hubPageSlack = 5
 )
 
+// hubOverlap is how many places behind the cursor every pass reads again: a version an older Hub served late, behind
+// a bigger one already read (its feed was ordered by id), is not lost. Read again, a stored version writes nothing. A
+// Hub with hub#1266 places a late version after the cursor itself (seq); the overlap then only reads known versions.
+var hubOverlap int64 = 200
+
 // hubLimit is how many versions one request asks (tests ask fewer).
 var hubLimit = 200
 
@@ -133,13 +138,18 @@ func SyncHub(ctx context.Context, store *db.Store, c *hub.Client, now time.Time)
 		return st, err
 	}
 	st.Since, st.Next = since, since
+	cursor, _ := strconv.ParseInt(since, 10, 64) // "" — from the first
+	ask := ""
+	if from := cursor - hubOverlap; from > 0 {
+		ask = strconv.FormatInt(from, 10)
+	}
 	save := func() error {
 		b, _ := json.Marshal(st)
 		return brief.InTx(ctx, store, func(tx *sql.Tx) error { return putCursor(ctx, tx, hubStatusCursor, string(b), now) })
 	}
 	var readErr error
 	for st.Requests < hubMaxRequests {
-		ans, err := c.ShiftReports(ctx, st.Next, hubLimit)
+		ans, err := c.ShiftReports(ctx, ask, hubLimit)
 		st.Requests++
 		if err != nil {
 			readErr = err
@@ -165,13 +175,19 @@ func SyncHub(ctx context.Context, store *db.Store, c *hub.Client, now time.Time)
 					st.Problems++
 				}
 			}
-			return putCursor(ctx, tx, hubCursor, ans.Next, now)
+			// The cursor never moves back: a read of the overlap ends behind it.
+			if next, _ := strconv.ParseInt(ans.Next, 10, 64); next > cursor {
+				cursor = next
+				st.Next = ans.Next
+				return putCursor(ctx, tx, hubCursor, ans.Next, now)
+			}
+			return nil
 		})
 		if err != nil {
 			return st, err
 		}
-		done := len(ans.Reports) < hubLimit || ans.Next == st.Next
-		st.Next = ans.Next
+		done := len(ans.Reports) < hubLimit || ans.Next == ask
+		ask = ans.Next
 		if done {
 			break
 		}
@@ -383,6 +399,10 @@ func storeHub(ctx context.Context, tx *sql.Tx, v *validator, it hub.ShiftReport,
 		return "", err
 	}
 	person, why := v.check(it)
+	// Kept with the same problem and read again (the overlap, a retry): nothing changes, nothing to write.
+	if rowID != 0 && why != "" && problem.String == why {
+		return hubSame, nil
+	}
 	at := ts.Format(now)
 	submitted := it.SubmittedAt
 	if t, err := time.Parse(time.RFC3339Nano, it.SubmittedAt); err == nil {
