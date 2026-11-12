@@ -749,25 +749,22 @@ func fromLine(ctx context.Context, q ledger.Querier, l LineRef) (found, error) {
 	return f, nil
 }
 
-// countedIn says which saved report counts the sale in a chatter's own page amount (a counted line of a current
-// version); "" — none.
+// countedIn says which report counts the sale in a person's own page amount — a counted line of a current version of
+// an agent's draft or of a report handed in in Hub (v_report_lines); "" — none.
 func countedIn(ctx context.Context, q ledger.Querier, ref string) (string, error) {
+	var source, date, who string
 	var id int64
-	var date, user string
-	var person sql.NullString
 	var n sql.NullInt64
-	err := q.QueryRowContext(ctx, `SELECT r.id, r.report_date, r.hub_username, r.person, l.n FROM shift_report_lines l
-		JOIN shift_reports r ON r.id = l.report_id
-		WHERE l.transaction_ref = ? AND l.counted = 1 AND r.status <> 'superseded' ORDER BY r.id DESC LIMIT 1`, ref).Scan(&id, &date, &user, &person, &n)
+	err := q.QueryRowContext(ctx, `SELECT source, report_id, report_date, who, line FROM v_report_lines
+		WHERE transaction_ref = ? AND counted = 1 ORDER BY source = 'hub' DESC, report_id DESC LIMIT 1`, ref).Scan(&source, &id, &date, &who, &n)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	if err != nil {
 		return "", err
 	}
-	who := user
-	if person.Valid {
-		who = person.String
+	if source == "hub" {
+		return fmt.Sprintf("продажа %s учтена в отчёте, сданном в хабе: версия %d (%s, %s)", ref, id, who, date), nil
 	}
 	line := ""
 	if n.Valid {

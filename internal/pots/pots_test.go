@@ -300,3 +300,31 @@ func TestThePurchaseFromHubsMirrorAndFromAReportLine(t *testing.T) {
 }
 
 func itoa(v int64) string { return strconv.FormatInt(v, 10) }
+
+// A sale counted in a report handed in in Hub stays its person's too: the guard against counting it twice reads every
+// report line, whatever its source (v_report_lines), not only the agent's drafts.
+func TestASaleCountedInAHubReportIsGuarded(t *testing.T) {
+	s, ctx := book(t)
+	if _, err := pots.Declare(ctx, s, pot(), "owner", now); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`INSERT INTO hub_shift_reports(id, shift_id, version, person, hub_person, hub_user_id, report_date, submitted_at, door, total_micros,
+			current, payload, received_at, stored_at) VALUES (501, 51, 1, 'boris', 'boris', 42, '2026-11-12', '2026-11-12T21:00:00+03:00',
+			'workboard', 5000000, 1, '{}', '2026-11-12T21:01:00+03:00', '2026-11-12T21:01:00+03:00')`,
+		`INSERT INTO hub_shift_report_lines(report_id, seq, transaction_ref, page_label, grp, net_micros, rule_share_micros, amount_micros,
+			counted, added, disputed) VALUES (501, 1, 'tx-h1', 'page-a', 'mine', 5000000, 5000000, 5000000, 1, 0, 0)`,
+	} {
+		if _, err := s.RW.ExecContext(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	in := pots.SaleInput{TransactionRef: "tx-h1", PageLabel: "page-a", OccurredAt: "2026-11-12T19:00:00+03:00", NetMills: mills(5000)}
+	_, err := add(t, s, ctx, in)
+	refusal(t, err, "учтена в отчёте, сданном в хабе")
+	in.Force = true
+	out, err := add(t, s, ctx, in)
+	if err != nil || len(out.Warnings) != 1 || !strings.Contains(out.Warnings[0], "версия 501 (boris, 2026-11-12)") {
+		t.Fatalf("forced %+v %v", out, err)
+	}
+}
