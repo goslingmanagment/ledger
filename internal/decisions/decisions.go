@@ -291,6 +291,9 @@ func Add(ctx context.Context, store *db.Store, in Input, keyName string, now tim
 		return Decision{}, err
 	}
 	defer tx.Rollback()
+	if err := hubOnly(ctx, tx, now, HubDecisions); err != nil {
+		return Decision{}, err
+	}
 	if in, err = normalize(ctx, tx, in); err != nil {
 		return Decision{}, err
 	}
@@ -365,6 +368,9 @@ type AppliedInput struct {
 
 // Applied marks an open decision used in a person's report.
 func Applied(ctx context.Context, store *db.Store, id int64, in AppliedInput, now time.Time) (Decision, error) {
+	if err := hubOnly(ctx, store.RO, now, HubDecisions); err != nil {
+		return Decision{}, err
+	}
 	in.Person = strings.TrimSpace(in.Person)
 	date, err := NormDate("report_date", in.ReportDate)
 	if err != nil {
@@ -409,6 +415,9 @@ type CancelInput struct {
 
 // Cancel cancels an open or applied decision, with a note why.
 func Cancel(ctx context.Context, store *db.Store, id int64, in CancelInput, now time.Time) (Decision, error) {
+	if err := hubOnly(ctx, store.RO, now, HubDecisions); err != nil {
+		return Decision{}, err
+	}
 	note := strings.TrimSpace(in.Note)
 	if note == "" {
 		return Decision{}, refuse("нужна заметка, почему отменено (note)")

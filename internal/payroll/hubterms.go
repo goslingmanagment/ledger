@@ -160,7 +160,10 @@ type TermsStatus struct {
 	People  int    `json:"people"`
 	Terms   int    `json:"terms"`
 	Written int    `json:"written"` // terms new or changed
-	Gone    int    `json:"gone"`    // terms Hub no longer serves
+	// PeopleWritten are the people new or changed (their state, logins, Telegram): with the setting on they move the
+	// people projection and the authors of the posts.
+	PeopleWritten int `json:"peopleWritten"`
+	Gone          int `json:"gone"` // terms Hub no longer serves
 	// LastOKAt is the last pass that read the terms; with NoTerms it stays as it was.
 	LastOKAt string `json:"lastOkAt,omitempty"`
 }
@@ -265,7 +268,7 @@ func SyncHubTerms(ctx context.Context, store *db.Store, c *hub.Client, now time.
 	if err := save(); err != nil {
 		return st, err
 	}
-	if st.Written+st.Gone == 0 {
+	if st.Written+st.Gone+st.PeopleWritten == 0 {
 		return st, nil
 	}
 	from, err := TermsHubFrom(ctx, store.RO)
@@ -294,15 +297,29 @@ func storeRegistry(ctx context.Context, tx *sql.Tx, ans *hub.PeopleAnswer, now t
 		if t, _ := time.Parse(time.RFC3339Nano, p.UpdatedAt); t.After(nextT) {
 			nextT, next = t, p.UpdatedAt
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO hub_people(hub_id, code, kind, role, state, left_on, updated_at, stored_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		logins := []int64{}
+		for _, l := range p.Logins {
+			logins = append(logins, l.UserID)
+		}
+		loginsJSON, _ := json.Marshal(logins)
+		res, err := tx.ExecContext(ctx, `INSERT INTO hub_people(hub_id, code, kind, role, state, left_on, updated_at, stored_at,
+			display_name, logins, telegram_user_id, report_tag) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(hub_id) DO UPDATE SET code = excluded.code, kind = excluded.kind, role = excluded.role, state = excluded.state,
-			  left_on = excluded.left_on, updated_at = excluded.updated_at, stored_at = excluded.stored_at
+			  left_on = excluded.left_on, updated_at = excluded.updated_at, stored_at = excluded.stored_at,
+			  display_name = excluded.display_name, logins = excluded.logins, telegram_user_id = excluded.telegram_user_id,
+			  report_tag = excluded.report_tag
 			WHERE hub_people.code IS NOT excluded.code OR hub_people.kind IS NOT excluded.kind OR hub_people.role IS NOT excluded.role
 			  OR hub_people.state IS NOT excluded.state OR hub_people.left_on IS NOT excluded.left_on
-			  OR hub_people.updated_at IS NOT excluded.updated_at`,
-			p.ID, p.Code, p.Kind, p.Role, p.State, p.LeftOn, p.UpdatedAt, at); err != nil {
+			  OR hub_people.updated_at IS NOT excluded.updated_at OR hub_people.display_name IS NOT excluded.display_name
+			  OR hub_people.logins IS NOT excluded.logins OR hub_people.telegram_user_id IS NOT excluded.telegram_user_id
+			  OR hub_people.report_tag IS NOT excluded.report_tag`,
+			p.ID, p.Code, p.Kind, p.Role, p.State, p.LeftOn, p.UpdatedAt, at, p.DisplayName, string(loginsJSON), p.Telegram.UserID,
+			p.Telegram.ReportTag)
+		if err != nil {
 			return "", err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			st.PeopleWritten++
 		}
 		served := map[int64]bool{}
 		for _, t := range p.PayTerms {

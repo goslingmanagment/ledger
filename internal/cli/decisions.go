@@ -28,6 +28,41 @@ func init() {
 		Summary: "решение учтено в отчёте: ledger decision applied <id> --person <код> --date <ГГГГ-ММ-ДД>"})
 	Command(Cmd{Name: "decision cancel", Run: decisionCancel,
 		Summary: `отменить решение: ledger decision cancel <id> --note "…"`})
+	Command(Cmd{Name: "decision hub-from", Run: decisionHubFrom,
+		Summary: "с дня решения, вопросы и заявки «чья продажа» пишет только хаб (рядом с базой): [ГГГГ-ММ-ДД | --off]; без аргумента — показать"})
+}
+
+// decisionHubFrom sets or clears the day from which only Hub writes whose a sale is (settings.sale_decisions_hub_from).
+func decisionHubFrom(ctx context.Context, args []string) error {
+	fs := Flags("decision hub-from")
+	off := fs.Bool("off", false, "выключить: решения снова пишет и ledger")
+	pos, err := ParseArgs(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) > 1 || (*off && len(pos) > 0) {
+		return Exit{Code: 2, Msg: "ledger decision hub-from [ГГГГ-ММ-ДД | --off]"}
+	}
+	store, err := OpenStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	if len(pos) == 0 && !*off {
+		from, err := decisions.HubFrom(ctx, store.RO)
+		if err != nil {
+			return err
+		}
+		return printJSON(map[string]any{"ok": true, "hubFrom": from})
+	}
+	day := ""
+	if !*off {
+		day = pos[0]
+	}
+	if err := decisions.SetHubFrom(ctx, store.RW, day, time.Now()); err != nil {
+		return Exit{Code: 2, Msg: "не записано: " + err.Error()}
+	}
+	return printJSON(map[string]any{"ok": true, "hubFrom": day})
 }
 
 // shareFlags collects --share person:percent.

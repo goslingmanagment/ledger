@@ -14,6 +14,7 @@ import (
 
 	"github.com/goslingmanagment/ledger/internal/auth"
 	"github.com/goslingmanagment/ledger/internal/db"
+	"github.com/goslingmanagment/ledger/internal/decisions"
 	"github.com/goslingmanagment/ledger/internal/ledger"
 	"github.com/goslingmanagment/ledger/internal/money"
 	"github.com/goslingmanagment/ledger/internal/server"
@@ -115,6 +116,12 @@ type claim struct {
 // Claim writes the owner's word that a nobody's sale is the person's, rebuilds the shadow tables and returns the sale
 // as they now hold it, in one transaction. A sale already claimed, not in the proven facts, or not nobody's is refused.
 func Claim(ctx context.Context, store *db.Store, in ClaimInput, author string, now time.Time) (ClaimResult, error) {
+	if why, err := decisions.HubOnly(ctx, store.RO, now, decisions.HubClaims); err != nil || why != "" {
+		if err != nil {
+			return ClaimResult{}, err
+		}
+		return ClaimResult{}, refuse("%s", why)
+	}
 	in.Ref, in.Person, in.Note = strings.TrimSpace(in.Ref), strings.TrimSpace(in.Person), strings.TrimSpace(in.Note)
 	switch {
 	case in.Ref == "":
@@ -166,6 +173,12 @@ func Claim(ctx context.Context, store *db.Store, in ClaimInput, author string, n
 // Unclaim writes that a sale's claim is removed (a new row: the claim stays in the history), rebuilds the shadow
 // tables and returns the sale as the rule alone gives it.
 func Unclaim(ctx context.Context, store *db.Store, in ClaimInput, author string, now time.Time) (ClaimResult, error) {
+	if why, err := decisions.HubOnly(ctx, store.RO, now, decisions.HubClaims); err != nil || why != "" {
+		if err != nil {
+			return ClaimResult{}, err
+		}
+		return ClaimResult{}, refuse("%s", why)
+	}
 	in.Ref, in.Note = strings.TrimSpace(in.Ref), strings.TrimSpace(in.Note)
 	switch {
 	case in.Ref == "":

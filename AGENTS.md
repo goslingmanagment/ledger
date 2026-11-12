@@ -42,7 +42,8 @@
   очередь `~/.config/ledger/spool`, только `gog --readonly`); `ledger payroll open --dry-run` — стартовые долги таблицей, без `--dry-run` они замораживаются
   навсегда; `ledger payroll rebuild` — свести сейчас, `ledger payables` — что вышло. Строки вкладок, которые не пишутся как страница хаба, — в `settings.sheet_pages`.
   Хабу («Выплаты» Workboard) — `GET /v1/payouts?from&to` (до 62 дней) ключом с правом `payouts`: он открывает только его и
-  `GET /v1/payouts/prepare?person=код`; то же глазами — `ledger payouts --from ГГГГ-ММ-ДД --to … [--person код]`.
+  `GET /v1/payouts/prepare?person=код`; то же глазами — `ledger payouts --from ГГГГ-ММ-ДД --to … [--person код]`. В ответе и выключатели:
+  `termsHubFrom` (`payroll_terms_hub_from`) и `basisHubFrom` (`payroll_basis_hub_from`), `null` — выключен (экран «График и условия» хаба).
   Деньги одного человека для него самого («Мои смены» хаба) — `GET /v1/payouts/person?person=код&from&to`, только право `payouts`
   (ключ `read` — 403): дни книг с постами отчёта, что оплачено какой строкой журнала, ручные поправки, выплаты, долг по `v_payables`;
   ни ставок, ни выручки, ни «К выплате» вкладки, ни чужих строк. Дела владельцу из проверок — `GET /v1/payouts/checks`, тоже только `payouts`:
@@ -154,6 +155,11 @@
   факты смен и продаж (`hub-team`), сданные отчёты (`hub-reports`). Код человека в хабе — `people.slug`.
 - Дом условий оплаты (доля, фикс за смену) — реестр людей хаба: джоб `hub-terms` держит их в `hub_pay_terms` (ключу нужен `read:pay_terms`);
   шапки вкладок («Ставка %», «Фикс/см») читаются до даты владельца `ledger payroll terms-from ГГГГ-ММ-ДД`, расхождения — `ledger payroll terms diff`.
+  С этой даты новичку реестра не нужно ничего вручную: строка `people` — из реестра (`source` `hub-registry`, карточка /OS важнее), автор поста —
+  по Telegram id и тегу реестра, модель без вкладки выплат начисляется на вкладку книг «реестр <код>»; кто такой — `terms diff`, раздел новичков.
+- «Чья продажа» — дом в хабе (`hub sale decide|decisions|ask|answer|questions`): с `ledger decision hub-from ГГГГ-ММ-ДД`
+  (`settings.sale_decisions_hub_from`, пусто — пишет и ledger) `decision add|applied|cancel`, `question add|answer|drop` и `accruals claim|unclaim`
+  отказывают одной строкой с командой хаба; `decision list` и `question list` — история.
 - Хаб читает ledger своим ключом `payouts`: долги, отчёты, проверки, джобы, карточку месяца; правил составления отчёта в ledger нет.
 - Одна карта всей системы — `~/code/SYSTEM.md` на маке владельца.
 

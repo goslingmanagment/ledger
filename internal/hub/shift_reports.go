@@ -11,16 +11,20 @@ import (
 )
 
 // The shift reports handed in in Hub (ecosystem F2; Hub's side is hub#1225): `agentShiftReportsFeed` serves every
-// version of every report in the order they were made, after a cursor that is the version's own id. A version is served
-// once it is 10 seconds old, so one that commits late is never skipped past. ledger reads it with its key (read:team and
-// read:money) and keeps the versions in internal/reports; this file is only the wire.
+// version of every report after a cursor, and `next` is the cursor to ask from. Since hub#1266 the feed's order is the
+// place Hub gives a version once it is committed (`seq`), no longer the version's id: a version committed late is placed
+// after the cursor. ledger follows `next` and also reads a window behind it again (internal/reports, hubOverlap), so a
+// version an older Hub served late is not lost either. It reads with its key (read:team and read:money) and keeps the
+// versions in internal/reports; this file is only the wire.
 
 // ShiftReportsPath is Hub's feed of the handed-in shift reports.
 const ShiftReportsPath = "/api/v1/agent/shift-reports"
 
 // ShiftReport is one version in the feed. Amounts are integer mills; a page's amount is its lines' rounded to the cent.
 type ShiftReport struct {
-	ID                 int64                `json:"id"`
+	ID int64 `json:"id"`
+	// Seq is the version's place in the feed (hub#1266); 0 — an older Hub, whose order was the id.
+	Seq                int64                `json:"seq"`
 	Person             *string              `json:"person"` // the ledger's people.slug; null — a login no person holds
 	HubUserID          int64                `json:"hubUserId"`
 	ShiftID            int64                `json:"shiftId"`

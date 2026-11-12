@@ -149,11 +149,16 @@ type PayoutsAnswer struct {
 	To          string `json:"to"`
 	AccrualFrom string `json:"accrualFrom"` // days before it are in the opening debt, not one by one
 	// FactsFrom and ReportsFrom are the switch days to Hub's facts and to the shift reports; "" — off (one at most is on).
-	FactsFrom   string         `json:"factsFrom"`
-	ReportsFrom string         `json:"reportsFrom"`
-	GeneratedAt string         `json:"generatedAt"`
-	People      []PayoutPerson `json:"people"`
-	Checks      PayoutChecks   `json:"checks"`
+	FactsFrom   string `json:"factsFrom"`
+	ReportsFrom string `json:"reportsFrom"`
+	// TermsHubFrom is the day from which a day's accrual takes the person's terms from Hub's people registry
+	// (payroll_terms_hub_from), BasisHubFrom the day from which a reports day accrues from the report handed in in Hub
+	// (payroll_basis_hub_from); null — off: the tabs' headers price the days, the posts are the reports.
+	TermsHubFrom *string        `json:"termsHubFrom"`
+	BasisHubFrom *string        `json:"basisHubFrom"`
+	GeneratedAt  string         `json:"generatedAt"`
+	People       []PayoutPerson `json:"people"`
+	Checks       PayoutChecks   `json:"checks"`
 }
 
 // PayoutWindow checks a window of MSK dates: both given, from not after to, at most MaxPayoutDays days.
@@ -207,6 +212,18 @@ func ReadPayouts(ctx context.Context, db *sql.DB, from, to string, now time.Time
 	if ans.ReportsFrom, err = ReportsFrom(ctx, tx); err != nil {
 		return ans, err
 	}
+	for _, x := range []struct {
+		get func(context.Context, ledger.Querier) (string, error)
+		to  **string
+	}{{TermsHubFrom, &ans.TermsHubFrom}, {HubFrom, &ans.BasisHubFrom}} {
+		day, err := x.get(ctx, tx)
+		if err != nil {
+			return ans, err
+		}
+		if day != "" {
+			*x.to = &day
+		}
+	}
 	people, err := payoutPeople(ctx, tx)
 	if err != nil {
 		return ans, err
@@ -246,7 +263,7 @@ func payoutPeople(ctx context.Context, q ledger.Querier) ([]PayoutPerson, error)
 	rows, err := q.QueryContext(ctx, `SELECT p.slug, p.name, p.aliases, p.status, v.balance_micros, v.to_pay, v.oldest_unpaid,
 		v.unentered_days, v.unentered_share, v.unentered_unknown
 		FROM people p JOIN v_payables v ON v.person = p.slug
-		WHERE EXISTS (SELECT 1 FROM payroll_tabs t WHERE t.person = p.slug)
+		WHERE (EXISTS (SELECT 1 FROM payroll_tabs t WHERE t.person = p.slug) OR `+registryPayee+`)
 		ORDER BY p.slug`)
 	if err != nil {
 		return nil, err

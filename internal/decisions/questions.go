@@ -132,6 +132,9 @@ func normalizeQuestion(in QuestionInput) (QuestionInput, error) {
 
 // AddQuestion checks a question and writes it open.
 func AddQuestion(ctx context.Context, store *db.Store, in QuestionInput, keyName string, now time.Time) (Question, error) {
+	if err := hubOnly(ctx, store.RO, now, HubQuestions); err != nil {
+		return Question{}, err
+	}
 	in, err := normalizeQuestion(in)
 	if err != nil {
 		return Question{}, err
@@ -172,6 +175,9 @@ type AnswerInput struct {
 
 // AnswerQuestion closes an open question as answered.
 func AnswerQuestion(ctx context.Context, store *db.Store, id int64, in AnswerInput, now time.Time) (Question, error) {
+	if err := hubOnly(ctx, store.RO, now, HubQuestions); err != nil {
+		return Question{}, err
+	}
 	in.Answer = strings.TrimSpace(in.Answer)
 	if in.DecisionID == nil && in.Answer == "" {
 		return Question{}, refuse("нужен ответ: decision_id (решение) или answer (словами)")
@@ -234,6 +240,9 @@ type DropInput struct {
 // DropQuestion closes an open question that went away: the sale never happened, the chatters settled it and nothing
 // needs recording.
 func DropQuestion(ctx context.Context, store *db.Store, id int64, in DropInput, now time.Time) (Question, error) {
+	if err := hubOnly(ctx, store.RO, now, HubQuestions); err != nil {
+		return Question{}, err
+	}
 	note := strings.TrimSpace(in.Note)
 	if note == "" {
 		return Question{}, refuse("нужна заметка, почему вопрос отпал (note)")
