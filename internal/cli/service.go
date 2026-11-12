@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/goslingmanagment/ledger/internal/auth"
 	"github.com/goslingmanagment/ledger/internal/config"
 	"github.com/goslingmanagment/ledger/internal/db"
 	"github.com/goslingmanagment/ledger/internal/server"
@@ -61,6 +62,10 @@ func serve(ctx context.Context, args []string) error {
 		return err
 	}
 	defer store.Close()
+	// An agent's hub key is accepted only with ledger's own hub key for the question «who is this key».
+	hk := auth.HubKeysFromEnv()
+	auth.UseHubKeys(hk)
+	log.Info("hub keys", "accepted", hk != nil)
 	return server.New(store, log, cfg.Deployment).Run(ctx, cfg.Addr, cfg.Scheduler)
 }
 
