@@ -84,8 +84,21 @@ const potFlag = "Общак: набор, не в итоге"
 // line held out of the total carries the pot's flag.
 func post(t *testing.T, s *db.Store, date string, lines ...line) int64 {
 	t.Helper()
+	return postWith(t, s, date, nil, lines...)
+}
+
+// late is an amount added to a report by hand: a sale paid after the report was composed. ref names the sale — by
+// either of its two references — or is "": nothing ties the amount to a sale, as before an add could name one.
+type late struct {
+	ref   string
+	mills int64
+}
+
+// postWith is post with amounts added by hand: they are in the page's amount beside the counted lines.
+func postWith(t *testing.T, s *db.Store, date string, adds []late, lines ...line) int64 {
+	t.Helper()
 	var total int64
-	out := []any{}
+	out, added := []any{}, []any{}
 	for _, l := range lines {
 		flags := []any{}
 		if l.counted {
@@ -96,9 +109,17 @@ func post(t *testing.T, s *db.Store, date string, lines ...line) int64 {
 		out = append(out, map[string]any{"n": l.n, "transaction_ref": l.ref, "page": "page-a", "fan_ref": "fan-1", "fan_name": "nick-1",
 			"occurred_at": l.at, "net_mills": l.mills, "counted": l.counted, "flags": flags})
 	}
+	for _, a := range adds {
+		total += a.mills
+		add := map[string]any{"page": "page-a", "amount_mills": a.mills, "what": "долёт: куплено после отчёта"}
+		if a.ref != "" {
+			add["transaction_ref"] = a.ref
+		}
+		added = append(added, add)
+	}
 	raw, _ := json.Marshal(map[string]any{"hub_username": "anna_hub", "report_date": date, "window_from": date + "T00:00:00+03:00",
 		"window_to": date + "T23:59:00+03:00", "cut_at": date + "T23:50:00+03:00", "source": "agent", "total_mills": total,
-		"pages": []any{map[string]any{"page": "page-a", "amount_mills": total}}, "lines": out})
+		"pages": []any{map[string]any{"page": "page-a", "amount_mills": total}}, "lines": out, "adds": added})
 	saved, err := reports.Save(context.Background(), s, raw, "agent", now)
 	if err != nil {
 		t.Fatal(err)
@@ -211,6 +232,58 @@ func TestAddSaleSeesTheReportThatCountsTheSaleByTheOtherReference(t *testing.T) 
 	_, err = add(t, s, ctx, pots.SaleInput{TransactionRef: "pf-7002"})
 	refusal(t, err, "учтена в отчёте, сданном в хабе")
 	if got := inPots(t, s); got != "set-one 7001" {
+		t.Fatalf("purchases: %s", got)
+	}
+}
+
+// An amount added to a report by hand that names its sale pays that sale to the person as a counted line does — most
+// adds are sales of Hub paid after the report was composed. The guard against paying a sale twice sees it, by hand and
+// in the job, whichever of the sale's two references the add carries and whichever the pot is asked with; an add that
+// names no sale guards nothing, as every add did before.
+func TestAnAddThatNamesItsSaleGuardsItFromThePot(t *testing.T) {
+	s, ctx := book(t)
+	if _, err := pots.Declare(ctx, s, pot(), "owner", now); err != nil {
+		t.Fatal(err)
+	}
+	switchDay(t, s, "2026-11-11")
+	hubSale(t, s, "7701", "pf-7701", "page-a", "2026-11-05T10:00:00.000+03:00", 10_000) // before the switch day: a pot's by hand
+	hubSale(t, s, "7702", "pf-7702", "page-a", "2026-11-12T10:00:00.000+03:00", 20_000) // from the switch day: by Hub's decision
+	hubSale(t, s, "7703", "pf-7703", "page-a", "2026-11-05T11:00:00.000+03:00", 30_000) // held out as the pot's, then added by word
+	// anna's report of the 12th pays her the three by adds: one named by the platform's reference, two by Hub's id — and
+	// the third is also a line of the window, held out of the total.
+	held := line{n: 1, ref: "pf-7703", at: "2026-11-05T11:00:00+03:00", mills: 30_000}
+	saved := postWith(t, s, "2026-11-12", []late{{"pf-7701", 10_000}, {"7702", 20_000}, {"7703", 30_000}}, held)
+	counted := " учтена в отчёте " + itoa(saved) + " (anna, 2026-11-12) добавленной суммой"
+
+	// By hand: asked by either reference, and from the held-out line whose sale the add names.
+	_, err := add(t, s, ctx, pots.SaleInput{TransactionRef: "7701"})
+	refusal(t, err, "продажа 7701"+counted)
+	_, err = add(t, s, ctx, pots.SaleInput{TransactionRef: "pf-7701"})
+	refusal(t, err, "продажа pf-7701"+counted)
+	_, err = add(t, s, ctx, pots.SaleInput{FromLine: &pots.LineRef{ReportID: saved, N: 1}})
+	refusal(t, err, "продажа pf-7703"+counted)
+	// The job: Hub's decision gives the sale to the pot while the report pays it to its person.
+	potDecision(t, s, 1, "7702", "set-one", now)
+	rep, err := pots.FollowHub(ctx, s, now)
+	if err != nil || rep.Added != 0 || len(rep.Problems) != 1 || !strings.Contains(rep.Problems[0].Why, "продажа 7702"+counted) ||
+		!strings.Contains(rep.Problems[0].Why, "иначе оплачена дважды") {
+		t.Fatalf("a sale an add pays to its person went to the pot (paid twice): added %d, purchases [%s], problems %+v, %v",
+			rep.Added, inPots(t, s), rep.Problems, err)
+	}
+	if got := inPots(t, s); got != "" {
+		t.Fatalf("purchases: %s", got)
+	}
+
+	// The report's next version adds the same amounts and names no sale: nothing ties them to the sales, and the guard
+	// has nothing to see — the purchases are written.
+	postWith(t, s, "2026-11-12", []late{{"", 10_000}, {"", 20_000}, {"", 30_000}}, held)
+	if rep, err = pots.FollowHub(ctx, s, now.Add(5*time.Minute)); err != nil || rep.Added != 1 || len(rep.Problems) != 0 {
+		t.Fatalf("after the adds stopped naming the sales: %+v %v", rep, err)
+	}
+	if _, err := add(t, s, ctx, pots.SaleInput{TransactionRef: "7701"}); err != nil {
+		t.Fatalf("by hand, after the add stopped naming the sale: %v", err)
+	}
+	if got := inPots(t, s); got != "set-one 7702, set-one 7701" {
 		t.Fatalf("purchases: %s", got)
 	}
 }

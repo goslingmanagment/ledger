@@ -182,3 +182,38 @@ func TestANameOnlyTheErasedFanCarriesStillFindsHisRows(t *testing.T) {
 		{`SELECT json_extract(rows, '$.ambiguous_names'), json_extract(rows, '$.sale_decisions') FROM hub_erasures WHERE id = 71`, "0|1"},
 	})
 }
+
+// An amount added to a draft by hand carries no fan, but it may name the sale it pays, by either of the sale's two
+// references, and then what it says it was for is words about that sale. When the sale's fan is erased they go — in the
+// table and in the stored payload; the amount, the reference and the draft's hash stay. An add that names another fan's
+// sale keeps its words, and so does one that names no sale: nothing ties it to the fan.
+func TestTheWordsOfAnAddThatNamesTheFansSaleGo(t *testing.T) {
+	s, _ := book(t)
+	sale(t, s, "4001", "pf-4001", "600")
+	sale(t, s, "4002", "pf-4002", "600")
+	sale(t, s, "4003", "pf-4003", "601")
+	seed(t, s,
+		`INSERT INTO shift_reports(id, person, hub_username, report_date, window_from, window_to, cut_at, version, total_micros, source, status,
+			content_hash, payload, created_at, key_name) VALUES (11, 'boris', 'boris_hub', '2026-11-10', 'w', 'w', 'w', 1, 80000000, 'agent', 'posted', 'h11',
+			'{"lines":[],"adds":[{"page":"page-a","amount_mills":20000,"what":"долёт от Big Spender","transaction_ref":"4001"},{"page":"page-a","amount_mills":20000,"what":"продление Big Spender","transaction_ref":" pf-4002 "},{"page":"page-a","amount_mills":20000,"what":"долёт от Quiet One","transaction_ref":"pf-4003"},{"page":"page-a","amount_mills":20000,"what":"перевод мимо хаба"}]}',
+			'x', 'agent')`,
+		`INSERT INTO shift_report_lines(report_id, seq, transaction_ref, page_label, net_micros, counted, added, what)
+			VALUES (11, 1, '4001', 'page-a', 20000000, 1, 1, 'долёт от Big Spender'),
+			(11, 2, 'pf-4002', 'page-a', 20000000, 1, 1, 'продление Big Spender'),
+			(11, 3, 'pf-4003', 'page-a', 20000000, 1, 1, 'долёт от Quiet One'),
+			(11, 4, NULL, 'page-a', 20000000, 1, 1, 'перевод мимо хаба')`)
+	cases := [][2]string{
+		{`SELECT seq, COALESCE(transaction_ref, '∅'), what, net_micros, counted FROM shift_report_lines WHERE report_id = 11 ORDER BY seq`,
+			"1|4001|" + Erased + "|20000000|1\n2|pf-4002|" + Erased + "|20000000|1\n3|pf-4003|долёт от Quiet One|20000000|1\n4|∅|перевод мимо хаба|20000000|1"},
+		{`SELECT json_extract(payload, '$.adds[0].what'), json_extract(payload, '$.adds[0].transaction_ref'), json_extract(payload, '$.adds[0].amount_mills'),
+			json_extract(payload, '$.adds[1].what'), json_extract(payload, '$.adds[2].what'), json_extract(payload, '$.adds[3].what'), content_hash
+			FROM shift_reports WHERE id = 11`, Erased + "|4001|20000|" + Erased + "|долёт от Quiet One|перевод мимо хаба|h11"},
+	}
+	erase(t, s, hub.Erasure{ID: 81, Platform: "fansly", FanRef: "600", ErasedAt: "2026-11-13T08:00:00.000Z"})
+	check(t, s, append(cases, [2]string{`SELECT json_extract(rows, '$.shift_report_lines'), json_extract(rows, '$.shift_reports') FROM hub_erasures
+		WHERE id = 81`, "2|1"}))
+	// The same fan erased again changes nothing.
+	erase(t, s, hub.Erasure{ID: 82, Platform: "fansly", FanRef: "600", ErasedAt: "2026-11-13T09:00:00.000Z"})
+	check(t, s, append(cases, [2]string{`SELECT json_extract(rows, '$.shift_report_lines'), json_extract(rows, '$.shift_reports') FROM hub_erasures
+		WHERE id = 82`, "0|0"}))
+}

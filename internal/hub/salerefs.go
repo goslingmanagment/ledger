@@ -13,9 +13,9 @@ import (
 // dataset (hub_transactions.key): that is what its team facts (hub_sales.transaction_ref), its decisions about whose a
 // sale is (hub_sale_decisions.transaction_ref) and the lines of the reports handed in in Hub (hub_shift_report_lines)
 // carry. The platform names the same sale by its own reference of the transaction (hub_transactions.ref): that is what
-// the reports the team's agent saves from the posts carry (shift_report_lines.transaction_ref). A row one of ledger's
-// own writers made — a pot purchase, a decision, a question — carries whichever its writer had, and keeps it: a stored
-// reference is never rewritten.
+// the lines of the reports the team's agent saves from the posts carry (shift_report_lines.transaction_ref). A row one
+// of ledger's own writers made — a pot purchase, a decision, a question — and an amount such a report adds by hand and
+// ties to its sale carry whichever the writer had, and keep it: a stored reference is never rewritten.
 //
 // The mirror of Hub's transactions is the one place that holds both, so whatever asks «is this the same sale» asks
 // here: SaleRefsOf for a reference of either kind, PlatformRefs for many of Hub's ids, SameSaleSQL inside a query. The
