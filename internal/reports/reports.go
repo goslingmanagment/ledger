@@ -16,8 +16,10 @@ import (
 	"io"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/goslingmanagment/ledger/internal/db"
+	"github.com/goslingmanagment/ledger/internal/hub"
 	"github.com/goslingmanagment/ledger/internal/ledger"
 	"github.com/goslingmanagment/ledger/internal/money"
 	"github.com/goslingmanagment/ledger/internal/payroll"
@@ -36,6 +38,9 @@ const SourceAgent = "agent"
 
 // maxMills bounds every amount: a billion dollars, far past any shift, keeps ×1000 from overflowing.
 const maxMills = 1_000_000_000_000
+
+// maxRef bounds the reference an add names its sale by: a platform's reference is a few dozen characters.
+const maxRef = 200
 
 // Refusal is a report not saved: the request is wrong. Its message is Russian and names what is wrong.
 type Refusal struct{ Msg string }
@@ -86,11 +91,16 @@ type LineIn struct {
 	PPVSentAt      string   `json:"ppv_sent_at,omitempty"`
 }
 
-// AddIn is an amount added by hand: outside the window or outside Hub.
+// AddIn is an amount added by hand: outside the window or outside Hub. TransactionRef names the sale the amount pays
+// when it is a sale Hub has — bought after the report was composed, counted by the owner's word —, by either of the
+// sale's two references (hub.SaleRefsOf): the platform's, as the lines carry, or Hub's id; "" — the amount is no sale
+// of Hub's. Left out of the JSON when empty: a report whose adds name no sale hashes as it did before the field, so
+// saved again it is the same version.
 type AddIn struct {
-	Page        string `json:"page"`
-	AmountMills *int64 `json:"amount_mills"`
-	What        string `json:"what"`
+	Page           string `json:"page"`
+	AmountMills    *int64 `json:"amount_mills"`
+	What           string `json:"what"`
+	TransactionRef string `json:"transaction_ref,omitempty"`
 }
 
 // Decode reads a request body strictly: unknown fields and trailing data are refused.
@@ -127,6 +137,17 @@ func checkMills(name string, v *int64) (int64, error) {
 }
 
 func mills(v int64) string { return money.FromMills(v).String() }
+
+// lineName is how a refusal names a line: by the number the agent's script printed, else by its place.
+func lineName(i int, l LineIn) string {
+	if l.N != nil {
+		return fmt.Sprintf("строка n=%d", *l.N)
+	}
+	return fmt.Sprintf("строка %d", i+1)
+}
+
+// addName is how a refusal names an add: by its place.
+func addName(i int) string { return fmt.Sprintf("добавка %d", i+1) }
 
 // Normalize checks the report and brings it to its canonical form (trimmed text, times in MSK, empty lists not
 // null), or says what is wrong.
@@ -196,10 +217,7 @@ func Normalize(in Input) (Input, error) {
 	}
 	for i := range in.Lines {
 		l := &in.Lines[i]
-		name := fmt.Sprintf("строка %d", i+1)
-		if l.N != nil {
-			name = fmt.Sprintf("строка n=%d", *l.N)
-		}
+		name := lineName(i, *l)
 		l.Page, l.TransactionRef = strings.TrimSpace(l.Page), strings.TrimSpace(l.TransactionRef)
 		l.Decision = strings.TrimSpace(l.Decision)
 		if _, ok := amount[l.Page]; !ok {
@@ -236,8 +254,8 @@ func Normalize(in Input) (Input, error) {
 	}
 	for i := range in.Adds {
 		a := &in.Adds[i]
-		a.Page, a.What = strings.TrimSpace(a.Page), strings.TrimSpace(a.What)
-		name := fmt.Sprintf("добавка %d", i+1)
+		a.Page, a.What, a.TransactionRef = strings.TrimSpace(a.Page), strings.TrimSpace(a.What), strings.TrimSpace(a.TransactionRef)
+		name := addName(i)
 		if _, ok := amount[a.Page]; !ok {
 			return in, refuse("%s: страницы %q нет в pages", name, a.Page)
 		}
@@ -247,6 +265,9 @@ func Normalize(in Input) (Input, error) {
 		}
 		if a.What == "" {
 			return in, refuse("%s (страница %s): нужно объяснение, что это за сумма (what)", name, a.Page)
+		}
+		if n := utf8.RuneCountInString(a.TransactionRef); n > maxRef {
+			return in, refuse("%s (страница %s): transaction_ref — %d знаков, можно до %d", name, a.Page, n, maxRef)
 		}
 		counted[a.Page] += v
 	}
@@ -268,6 +289,53 @@ func Hash(in Input) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// paidOnce refuses a report in which an add names a sale the report pays already — the sale of a line counted in the
+// total, or of another add: one sale would be paid twice in one report. An add may name the sale of a line held out of
+// the total: the script excluded the sale and the amount is added by the chatter's word. A line names its sale by the
+// platform's reference and an add by either of the sale's two, so «the same sale» is asked of the mirror of Hub's
+// transactions (hub.SaleRefsOf); a sale the mirror does not have is known by the reference alone.
+func paidOnce(ctx context.Context, q ledger.Querier, in Input) error {
+	counted := map[string]string{} // the reference a counted line carries → the line
+	for i, l := range in.Lines {
+		if _, dup := counted[l.TransactionRef]; l.Counted && l.TransactionRef != "" && !dup {
+			counted[l.TransactionRef] = lineName(i, l)
+		}
+	}
+	type named struct{ add, ref string }
+	adds := map[string]named{} // either reference of a sale an add names → the add and the reference it carries
+	for i, a := range in.Adds {
+		if a.TransactionRef == "" {
+			continue
+		}
+		name := fmt.Sprintf("%s (страница %s)", addName(i), a.Page)
+		refs, err := hub.SaleRefsOf(ctx, q, a.TransactionRef)
+		if err != nil {
+			return err
+		}
+		one, other := refs.Either()
+		for _, ref := range []string{one, other} {
+			if line, ok := counted[ref]; ok {
+				return refuse("%s: продажа %s уже в итоге отчёта — %s%s; одна продажа была бы оплачена дважды: уберите добавку или "+
+					"исключите строку из итога", name, a.TransactionRef, line, otherRef(a.TransactionRef, ref))
+			}
+			if n, ok := adds[ref]; ok {
+				return refuse("%s: продажу %s уже называет %s%s; одна продажа была бы оплачена дважды: оставьте одну добавку",
+					name, a.TransactionRef, n.add, otherRef(a.TransactionRef, n.ref))
+			}
+		}
+		adds[one], adds[other] = named{addName(i), a.TransactionRef}, named{addName(i), a.TransactionRef}
+	}
+	return nil
+}
+
+// otherRef says that a sale was found under the other of its two references; "" — under the one asked.
+func otherRef(asked, found string) string {
+	if asked == found {
+		return ""
+	}
+	return " (под другой ссылкой той же продажи — " + found + ")"
+}
+
 // SaveResult is the answer of POST /v1/reports.
 type SaveResult struct {
 	ID      int64   `json:"id"`
@@ -277,7 +345,9 @@ type SaveResult struct {
 }
 
 // Save checks a report and writes it as a new draft version, superseding the current one, in one transaction. The
-// same content as the current version writes nothing (Created false). raw is the request as received.
+// same content as the current version writes nothing (Created false). raw is the request as received. A sale the
+// report would pay twice (paidOnce) is refused whether or not the content is new: the mirror that knows a sale's two
+// references is read hourly, and may have learned since the version was saved that two of them name one sale.
 func Save(ctx context.Context, store *db.Store, raw []byte, keyName string, now time.Time) (SaveResult, error) {
 	in, err := Decode(raw)
 	if err != nil {
@@ -297,6 +367,9 @@ func Save(ctx context.Context, store *db.Store, raw []byte, keyName string, now 
 		return SaveResult{}, err
 	}
 	defer tx.Rollback()
+	if err := paidOnce(ctx, tx, in); err != nil {
+		return SaveResult{}, err
+	}
 	var cur struct {
 		id      int64
 		version int
@@ -378,7 +451,7 @@ func Save(ctx context.Context, store *db.Store, raw []byte, keyName string, now 
 	}
 	for _, a := range in.Adds {
 		seq++
-		if _, err := tx.ExecContext(ctx, insert, out.ID, seq, nil, nil, a.Page, "", "", "", nil,
+		if _, err := tx.ExecContext(ctx, insert, out.ID, seq, nil, nullStr(a.TransactionRef), a.Page, "", "", "", nil,
 			int64(money.FromMills(*a.AmountMills)), nil, 1, "", 1, a.What, "[]", "[]", "", ""); err != nil {
 			return SaveResult{}, err
 		}

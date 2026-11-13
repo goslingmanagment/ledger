@@ -24,7 +24,9 @@ type Page struct {
 	PostState    string `json:"post_state"`
 }
 
-// Line is a sale of the breakdown, or an amount added by hand (Added, What).
+// Line is a sale of the breakdown, or an amount added by hand (Added, What). TransactionRef of a sale is the
+// platform's reference of it; of an added amount — the sale it pays, by either of the sale's two references
+// (hub.SaleRefsOf), nil when it names none. An added amount that names its sale carries the sale's Agreement too.
 type Line struct {
 	N              *int64   `json:"n"`
 	TransactionRef *string  `json:"transaction_ref"`
@@ -310,8 +312,8 @@ func fill(ctx context.Context, q ledger.Querier, reports []Report) error {
 }
 
 // agreements are the decisions about the sales of some reports' lines: ledger's own, and Hub's for the sales its word
-// rules. Both maps are keyed by the reference the line carries — the platform's —, whichever of the sale's two
-// references the decision was written with (hub.SameSaleSQL).
+// rules. Both maps are keyed by the reference the line carries — the platform's; an added amount's may be either —,
+// whichever of the sale's two references the decision was written with (hub.SameSaleSQL).
 type agreements struct {
 	own map[string]*Agreement
 	// hub are Hub's active decisions by sale; hubFrom is settings.sale_decisions_hub_from ("" — Hub's are not read).

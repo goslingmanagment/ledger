@@ -4,7 +4,8 @@
 // the fan that ledger keeps of those sales and of that fan — money, ids, states and who of the team stay:
 //
 //   - Hub's handed-in versions: a line's note (hub_shift_report_lines and the version's stored payload);
-//   - the agent's drafts: a line's fan reference, fan name and notes (shift_report_lines and the draft's payload);
+//   - the agent's drafts: a line's fan reference, fan name and notes, and the explanation (what) of an amount added by
+//     hand that names one of those sales (shift_report_lines and the draft's payload);
 //   - decisions, questions and pot purchases on those sales or naming that fan on a page of the platform — by his id,
 //     by "u" + the id or by a login ledger holds for him (namesOf): fan reference, fan name, the note, the question and
 //     answer texts;
@@ -12,14 +13,14 @@
 //   - hub_sales: the fan reference in the payload, which also makes a second pass find nothing (idempotent).
 //
 // A sale has two references (hub.SaleRefsOf): hub_sales and Hub's own rows name it by Hub's id, the agent's drafts by
-// the platform's reference, a decision, a question or a pot purchase by whichever its writer had. «His sales» are his
-// by either.
+// the platform's reference, a decision, a question, a pot purchase or an amount added to a draft by whichever its
+// writer had. «His sales» are his by either.
 //
-// What no fan reference ties to the fan stays: «мимо площадки» (who paid, what for), the shift's comment, the posts of
-// «Отчётность» (their texts are in the immutable events), a decision or question that names the fan only by a login no
-// other row of ledger ties to his id (Hub's feed names the id alone) or by a name ledger's rows tie to another fan too
-// (it is not known whose such a row is; hub_erasures.rows counts those names), and the owner's word on a nobody's sale
-// (sale_claims, immutable).
+// What no fan reference ties to the fan stays: «мимо площадки» (who paid, what for), an amount added to a draft that
+// names no sale of his, the shift's comment, the posts of «Отчётность» (their texts are in the immutable events), a
+// decision or question that names the fan only by a login no other row of ledger ties to his id (Hub's feed names the
+// id alone) or by a name ledger's rows tie to another fan too (it is not known whose such a row is; hub_erasures.rows
+// counts those names), and the owner's word on a nobody's sale (sale_claims, immutable).
 package erasure
 
 import (
@@ -264,7 +265,7 @@ func Apply(ctx context.Context, tx *sql.Tx, e hub.Erasure, now time.Time) (map[s
 	if len(sales) > 0 {
 		n, err := rewritePayloads(ctx, tx, `SELECT DISTINCT r.id, r.payload FROM hub_shift_reports r JOIN hub_shift_report_lines l ON l.report_id = r.id
 			WHERE l.transaction_ref IN `+saleList, saleArgs, `UPDATE hub_shift_reports SET payload = ? WHERE id = ?`,
-			func(m map[string]any) bool { return inSales[refString(m["transactionId"])] }, map[string]any{"note": nil})
+			part{"lines", func(m map[string]any) bool { return inSales[refString(m["transactionId"])] }, map[string]any{"note": nil}})
 		if err != nil {
 			return nil, 0, fmt.Errorf("hub_shift_reports: %w", err)
 		}
@@ -275,14 +276,17 @@ func Apply(ctx context.Context, tx *sql.Tx, e hub.Erasure, now time.Time) (map[s
 		}
 	}
 	// The agent's drafts: the line's fan and notes, in the stored payload (its content hash stays, so the same draft sent
-	// again makes no new version) and in the table.
+	// again makes no new version) and in the table. An amount added by hand carries no fan, but one that names a sale of
+	// his — by either of the sale's references — says what it was for, and that is words about his sale: they go too.
 	where, args := whose("l.transaction_ref", "l.fan_ref", "l.page_label")
 	n, err := rewritePayloads(ctx, tx, `SELECT DISTINCT r.id, r.payload FROM shift_reports r JOIN shift_report_lines l ON l.report_id = r.id
 		WHERE `+where, args, `UPDATE shift_reports SET payload = ? WHERE id = ?`,
-		func(m map[string]any) bool {
+		part{"lines", func(m map[string]any) bool {
 			ref, fan, page := refString(m["transaction_ref"]), refString(m["fan_ref"]), refString(m["page"])
 			return inRefs[ref] || (fan != "" && isFan[strings.ToLower(fan)] && onPlatform[page])
-		}, map[string]any{"fan_ref": "", "fan_name": "", "notes": []any{}})
+		}, map[string]any{"fan_ref": "", "fan_name": "", "notes": []any{}}},
+		part{"adds", func(m map[string]any) bool { return inRefs[strings.TrimSpace(refString(m["transaction_ref"]))] },
+			map[string]any{"what": Erased}})
 	if err != nil {
 		return nil, 0, fmt.Errorf("shift_reports: %w", err)
 	}
@@ -290,6 +294,10 @@ func Apply(ctx context.Context, tx *sql.Tx, e hub.Erasure, now time.Time) (map[s
 	where, args = whose("transaction_ref", "fan_ref", "page_label")
 	if err := exec("shift_report_lines", `UPDATE shift_report_lines SET fan_ref = '', fan_name = '', notes = '[]'
 		WHERE (fan_ref <> '' OR fan_name <> '' OR notes <> '[]') AND `+where, args...); err != nil {
+		return nil, 0, err
+	}
+	if err := exec("shift_report_lines", `UPDATE shift_report_lines SET what = ? WHERE added = 1 AND what <> ? AND transaction_ref IN `+refList,
+		append([]any{Erased, Erased}, refArgs...)...); err != nil {
 		return nil, 0, err
 	}
 	// Decisions, questions, pot purchases.
@@ -469,9 +477,16 @@ func inList(xs []string) (string, []any) {
 	return "(" + strings.TrimSuffix(strings.Repeat("?, ", len(xs)), ", ") + ")", args
 }
 
-// rewritePayloads sets fields of the payload's lines that match and writes back the payloads that changed.
-func rewritePayloads(ctx context.Context, tx *sql.Tx, query string, args []any, update string, match func(map[string]any) bool,
-	set map[string]any) (int, error) {
+// part is a list of a stored payload — a report's lines, the amounts added to it by hand — and the fields to set on
+// the rows of it that match.
+type part struct {
+	list  string
+	match func(map[string]any) bool
+	set   map[string]any
+}
+
+// rewritePayloads sets fields of the rows that match in the payload's lists and writes back the payloads that changed.
+func rewritePayloads(ctx context.Context, tx *sql.Tx, query string, args []any, update string, parts ...part) (int, error) {
 	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return 0, err
@@ -501,17 +516,19 @@ func rewritePayloads(ctx context.Context, tx *sql.Tx, query string, args []any, 
 		if err := dec.Decode(&p); err != nil {
 			return changed, fmt.Errorf("%d: %w", d.id, err)
 		}
-		lines, _ := p["lines"].([]any)
 		touched := false
-		for _, l := range lines {
-			m, ok := l.(map[string]any)
-			if !ok || !match(m) {
-				continue
-			}
-			for k, v := range set {
-				if cur, has := m[k]; !has || !sameJSON(cur, v) {
-					m[k] = v
-					touched = true
+		for _, pt := range parts {
+			list, _ := p[pt.list].([]any)
+			for _, l := range list {
+				m, ok := l.(map[string]any)
+				if !ok || !pt.match(m) {
+					continue
+				}
+				for k, v := range pt.set {
+					if cur, has := m[k]; !has || !sameJSON(cur, v) {
+						m[k] = v
+						touched = true
+					}
 				}
 			}
 		}

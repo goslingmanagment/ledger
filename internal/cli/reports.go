@@ -20,7 +20,8 @@ import (
 
 func init() {
 	Command(Cmd{Name: "report save", Run: reportSave,
-		Summary: "сохранить расклад отчёта смены (POST /v1/reports, право reports); ничего не проводит: <файл|->"})
+		Summary: "сохранить расклад отчёта смены (POST /v1/reports, право reports); ничего не проводит: <файл|->; " +
+			"добавка (adds: page, amount_mills, what) называет свою продажу хаба в transaction_ref — ссылкой площадки или id хаба"})
 	Command(Cmd{Name: "report list", Run: reportList,
 		Summary: "отчёты смен (GET /v1/reports): [--from ГГГГ-ММ-ДД] [--to …] [--person код] [--json]; по умолчанию 14 дней"})
 	Command(Cmd{Name: "report show", Run: reportShow,
@@ -170,6 +171,9 @@ func printReport(out *bufio.Writer, r reports.Report) {
 		var why []string
 		if l.Added {
 			what = l.What
+			if l.TransactionRef != nil {
+				why = append(why, "продажа "+*l.TransactionRef)
+			}
 		} else if l.Decision != "" && l.Decision != "auto" {
 			why = append(why, l.Decision)
 		}

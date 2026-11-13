@@ -811,15 +811,18 @@ func fromLine(ctx context.Context, q ledger.Querier, l LineRef) (found, error) {
 }
 
 // countedIn says which report counts the sale in a person's own page amount — a counted line of a current version of
-// an agent's draft or of a report handed in in Hub (v_report_lines); "" — none. The agent's line names the sale by the
-// platform's reference and Hub's line by Hub's id, so the sale is looked for by both of its references.
+// an agent's draft or of a report handed in in Hub, or an amount added by hand to a draft that names the sale
+// (v_report_lines); "" — none. The agent's line names the sale by the platform's reference, Hub's line by Hub's id and
+// an added amount by either, so the sale is looked for by both of its references.
 func countedIn(ctx context.Context, q ledger.Querier, refs hub.SaleRefs) (string, error) {
 	var source, date, who string
 	var id int64
 	var n sql.NullInt64
+	var added bool
 	a, b := refs.Either()
-	err := q.QueryRowContext(ctx, `SELECT source, report_id, report_date, who, line FROM v_report_lines
-		WHERE transaction_ref IN (?, ?) AND counted = 1 ORDER BY source = 'hub' DESC, report_id DESC LIMIT 1`, a, b).Scan(&source, &id, &date, &who, &n)
+	err := q.QueryRowContext(ctx, `SELECT source, report_id, report_date, who, line, added FROM v_report_lines
+		WHERE transaction_ref IN (?, ?) AND counted = 1 ORDER BY source = 'hub' DESC, report_id DESC LIMIT 1`, a, b).
+		Scan(&source, &id, &date, &who, &n, &added)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
@@ -831,7 +834,10 @@ func countedIn(ctx context.Context, q ledger.Querier, refs hub.SaleRefs) (string
 		return fmt.Sprintf("продажа %s учтена в отчёте, сданном в хабе: версия %d (%s, %s)", ref, id, who, date), nil
 	}
 	line := ""
-	if n.Valid {
+	switch {
+	case added:
+		line = " добавленной суммой"
+	case n.Valid:
 		line = fmt.Sprintf(" строкой %d", n.Int64)
 	}
 	return fmt.Sprintf("продажа %s учтена в отчёте %d (%s, %s)%s", ref, id, who, date, line), nil

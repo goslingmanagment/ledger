@@ -30,10 +30,10 @@ import (
 // доходят». With the setting empty nothing here does anything.
 //
 // One sale has two references (hub.SaleRefsOf): Hub's decision names it by Hub's id, a report made from a post by the
-// platform's reference, a purchase written by hand by either. The guards look for the sale by both, so a decision is
-// acted on only once the mirror of Hub's transactions holds the sale and both are known; until then it waits, like a
-// decision whose sale has not reached hub_sales, and after the same wait it is a problem — never a purchase written
-// without the guard.
+// platform's reference, a purchase written by hand — and an amount added to such a report by hand that names the sale
+// it pays — by either. The guards look for the sale by both, so a decision is acted on only once the mirror of Hub's
+// transactions holds the sale and both are known; until then it waits, like a decision whose sale has not reached
+// hub_sales, and after the same wait it is a problem — never a purchase written without the guard.
 
 // HubKey is the key name of the purchases the job writes and removes.
 const HubKey = decisions.HubJob
