@@ -491,6 +491,49 @@ func (m *mirrorSums) total() (books, sheet money.Micros) {
 	return books, sheet
 }
 
+// unpaid is the person's days the payouts have not paid in full: a paid day leaves both the books and the sheet.
+func (m *mirrorSums) unpaid(paid map[string]bool) *mirrorSums {
+	out := &mirrorSums{books: map[string]money.Micros{}, sheet: map[string]money.Micros{}}
+	for d, v := range m.books {
+		if !paid[d] {
+			out.books[d] = v
+		}
+	}
+	for d, v := range m.sheet {
+		if !paid[d] {
+			out.sheet[d] = v
+		}
+	}
+	return out
+}
+
+// paidUnder is what a day may still owe and count as paid: less than a cent, the FIFO splits micros.
+const paidUnder = money.Micros(10_000)
+
+// paidDaysFrom are the days from the switch on that the payouts have paid in full, by person: the payable_days rows of
+// the date owe less than a cent together. The tab marks such a week «да», so it is out of «К выплате» as the day is out
+// of the debt, and what the mirror differs on it no longer counts.
+func paidDaysFrom(ctx context.Context, q ledger.Querier, from string) (map[string]map[string]bool, error) {
+	rows, err := q.QueryContext(ctx, `SELECT person, date FROM payable_days WHERE kind = 'day' AND date >= ?
+		GROUP BY person, date HAVING SUM(unpaid) < ?`, from, int64(paidUnder))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]map[string]bool{}
+	for rows.Next() {
+		var person, date string
+		if err := rows.Scan(&person, &date); err != nil {
+			return nil, err
+		}
+		if out[person] == nil {
+			out[person] = map[string]bool{}
+		}
+		out[person][date] = true
+	}
+	return out, rows.Err()
+}
+
 // mirror reads every person's days from the switch on, books and sheet.
 func mirror(ctx context.Context, q ledger.Querier, from string) (map[string]*mirrorSums, error) {
 	out := map[string]*mirrorSums{}
