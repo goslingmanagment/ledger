@@ -203,11 +203,11 @@ func printBrief(out *bufio.Writer, b payroll.PayoutBrief) {
 			for _, bl := range b.Blocks {
 				s := fmt.Sprintf("%s неделя %s (%s — %s)", bl.Model, bl.Week, bl.From, bl.To)
 				if !bl.WeekOver {
-					s += ": неделя не кончилась, «оплатил по " + bl.To + " включительно»"
+					s += ": неделя не кончилась, отметка всё равно «да»; дни после " + bl.To + " ledger начислит и покажет в следующей выплате"
 				}
 				parts = append(parts, s)
 			}
-			fmt.Fprintf(out, "\nзакрывает блоки: %s\n", strings.Join(parts, "; "))
+			fmt.Fprintf(out, "\nзакрывает блоки (во вкладке «Выплачено: да»): %s\n", strings.Join(parts, "; "))
 		}
 	}
 	if len(b.Flags) > 0 {
