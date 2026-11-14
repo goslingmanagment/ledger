@@ -723,3 +723,38 @@ func TestASheetDayPaidBeforeTheSwitchWaitsForTheOwner(t *testing.T) {
 		t.Fatal("a change still open with the reports off")
 	}
 }
+
+// A payout of the reports' days, and the week marked «да» in the tab: «К выплате» is 0 and the books owe nothing, so the
+// check passes, though the mirror still has 25 for the paid 10th where the report says 35 (Максим, 14.11: −9.14 of the
+// pots' shares, which only the reports carry).
+func TestAPaidReportDayLeavesTheMirrorOutOfTheCheck(t *testing.T) {
+	s, ctx := reportWeek(t)
+	setReports(t, s, ctx, "2026-11-10")
+	importPayouts(t, s, ctx, payoutRow(1, "2026-11-12", "Альфа", "Alpha", "55.00"))
+	closed := pageTab("2026-11-09", "Page A", 0.25, 0, [7]any{80, 100, nil, nil, nil, nil, nil})
+	closed[1][0], closed[1][4], closed[4][11] = num(0), num(45), "да"
+	tables(t, s, ctx, map[string]map[string][][]payroll.Cell{
+		"Alpha": {"Альфа": closed, "Браво": pageTab("2026-11-09", "Page A", 0.2, 10, [7]any{nil, 50, nil, 50, nil, nil, nil})},
+	})
+	if _, err := payroll.Rebuild(ctx, s, reportNow); err != nil {
+		t.Fatal(err)
+	}
+	if got := dayOf(t, s, "alfa", "2026-11-10"); got != "35000000 35000000 0 reports" || balance(t, s, "alfa") != 0 {
+		t.Fatalf("the paid 10th: %s\n%s", got, books(t, s))
+	}
+	c, err := payroll.Check(ctx, s.RO)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range c.People {
+		if p.Person == "alfa" && (!p.OK || p.Diff != 0 || p.Facts != 0 || p.Sheet != 0) {
+			t.Fatalf("Альфа's check %+v", p)
+		}
+	}
+	if len(c.Mirror) != 0 {
+		t.Fatalf("a paid day is still the mirror's difference: %+v", c.Mirror)
+	}
+	if r := checks.Payables(ctx, checks.Env{Q: s.RO, Now: reportNow}); !r.OK {
+		t.Fatalf("health %+v", r)
+	}
+}

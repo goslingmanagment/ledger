@@ -95,8 +95,10 @@ func Payables(ctx context.Context, q ledger.Querier, person string) ([]Payable, 
 // tolerance is how far a debt may stand from «К выплате» (the sheets round): $1.
 const tolerance = money.Scale
 
-// PersonCheck is one person's debt against their tabs. From the switch to Hub's facts on, Diff is what the sheet still
-// governs: the debt with the switch's days as the sheet has them (Payable − Facts + Sheet) against «К выплате».
+// PersonCheck is one person's debt against their tabs. From the switch to Hub's facts or to the shift reports on, Diff
+// is what the sheet still governs: the debt with the switch's unpaid days as the sheet has them (Payable − Facts + Sheet)
+// against «К выплате». A day the payouts have paid in full is out of both sides: the books owe nothing on it and its
+// week is «да» in the tab, whatever the mirror says the day was worth.
 type PersonCheck struct {
 	Person  string       `json:"person"`
 	Name    string       `json:"name"`
@@ -105,8 +107,8 @@ type PersonCheck struct {
 	Diff    money.Micros `json:"diff"`
 	OK      bool         `json:"ok"`
 	Reason  string       `json:"reason,omitempty"`
-	// Facts is what the books accrued from the switch day on (from the facts or the reports, whichever is on); Sheet what
-	// the mirror has for those days.
+	// Facts is what the books accrued from the switch day on for the days not yet paid in full (from the facts or the
+	// reports, whichever is on); Sheet what the mirror has for those days.
 	Facts money.Micros `json:"facts,omitempty"`
 	Sheet money.Micros `json:"sheet,omitempty"`
 }
@@ -127,8 +129,8 @@ type CheckReport struct {
 	Rows     []Unresolved  `json:"rows"`
 	Tabs     []TabProblem  `json:"tabs"`
 	// FactsFrom is the switch to Hub's facts (settings.payroll_facts_from); "" — the sheets accrue everything. From it
-	// the sheet is a mirror: Mirror are its days that differ from the books, Unaccrued the facts no tab takes. Both are
-	// information, not failures.
+	// the sheet is a mirror: Mirror are its unpaid days that differ from the books, Unaccrued the facts no tab takes. Both
+	// are information, not failures.
 	FactsFrom string `json:"facts_from,omitempty"`
 	// ReportsFrom is the switch to the shift reports (settings.payroll_reports_from), the same way; only one of the two.
 	ReportsFrom string      `json:"reports_from,omitempty"`
@@ -164,8 +166,12 @@ func Check(ctx context.Context, q ledger.Querier) (CheckReport, error) {
 		rep.FactsFrom = after
 	}
 	var mir map[string]*mirrorSums
+	var paid map[string]map[string]bool
 	if after != "" {
 		if mir, err = mirror(ctx, q, after); err != nil {
+			return rep, err
+		}
+		if paid, err = paidDaysFrom(ctx, q, after); err != nil {
 			return rep, err
 		}
 		plan, err := planAfter(ctx, q, ts.Now())
@@ -192,6 +198,7 @@ func Check(ctx context.Context, q ledger.Querier) (CheckReport, error) {
 		}
 		c.Diff = c.Payable - money.FromFloat(c.ToPay)
 		if m := mir[p.Person]; m != nil {
+			m = m.unpaid(paid[p.Person])
 			c.Facts, c.Sheet = m.total()
 			c.Diff += c.Sheet - c.Facts
 			rep.Mirror = append(rep.Mirror, m.days(p.Person, p.Name)...)

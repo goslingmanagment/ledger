@@ -105,7 +105,10 @@ type PrepareBlock struct {
 	Week  string `json:"week"`
 	From  string `json:"from"` // the block's days in this payout
 	To    string `json:"to"`
-	// WeekOver is false while days may still come into the block: mark «оплатил по <to> включительно», not «да».
+	// WeekOver is false while days may still come into the block. The tab's mark is «да» all the same: the tab's header
+	// counts only «да» and «нет», and any other word breaks the tab (paid + to pay no longer equal the blocks). A day that
+	// comes into a paid week stays the books' debt, accrued from its source and in the next payout; the mirror never
+	// writes into a paid week.
 	WeekOver bool `json:"weekOver"`
 }
 
