@@ -725,8 +725,8 @@ func TestASheetDayPaidBeforeTheSwitchWaitsForTheOwner(t *testing.T) {
 }
 
 // A payout of the reports' days, and the week marked «да» in the tab: «К выплате» is 0 and the books owe nothing, so the
-// check passes, though the mirror still has 25 for the paid 10th where the report says 35 (Максим, 14.11: −9.14 of the
-// pots' shares, which only the reports carry).
+// check passes, though the mirror still has 25 for the paid 10th where the report says 35 (as with the pots' shares,
+// which only the reports carry).
 func TestAPaidReportDayLeavesTheMirrorOutOfTheCheck(t *testing.T) {
 	s, ctx := reportWeek(t)
 	setReports(t, s, ctx, "2026-11-10")
