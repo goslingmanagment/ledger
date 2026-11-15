@@ -45,8 +45,9 @@ var Keys = map[string]string{
 	"изменения за выплаченные дни ждут решения": "pending_changes",
 	weekColumnsCheck:                            "week_columns",
 	"ставки вкладок как в карточках":            "tab_rates",
-	payTermsCheck: "pay_terms",
-	checksRunning: "checks_running",
+	payTermsCheck:      "pay_terms",
+	checksRunning:      "checks_running",
+	secondReportsCheck: "second_reports",
 }
 
 // KeyOf is the key of a check; a name without one keys as itself.

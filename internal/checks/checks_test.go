@@ -11,12 +11,14 @@ import (
 
 	"github.com/goslingmanagment/ledger/internal/bybit"
 	"github.com/goslingmanagment/ledger/internal/db"
+	"github.com/goslingmanagment/ledger/internal/events"
 	"github.com/goslingmanagment/ledger/internal/free"
 	"github.com/goslingmanagment/ledger/internal/hub"
 	"github.com/goslingmanagment/ledger/internal/journal"
 	"github.com/goslingmanagment/ledger/internal/ledger"
 	"github.com/goslingmanagment/ledger/internal/money"
 	"github.com/goslingmanagment/ledger/internal/month"
+	"github.com/goslingmanagment/ledger/internal/reports"
 	"github.com/goslingmanagment/ledger/internal/ts"
 )
 
@@ -656,5 +658,53 @@ func TestReportPosts(t *testing.T) {
 	r = ReportPosts(ctx, Env{Q: s.RO, Now: now})
 	if r.OK || r.Severity != "warn" || !strings.Contains(r.Summary, "someone #nobody, 2026-11-08") || !strings.Contains(r.Summary, "автор не узнан") {
 		t.Fatalf("%+v", r)
+	}
+}
+
+// A message with two pasted posts is a matter for the owner until the post is edited or the second one is sent on its
+// own: the check reads the flag the real parser sets.
+func TestSecondReports(t *testing.T) {
+	s, ctx := openDB(t)
+	now := at("2026-11-10T12:00:00+03:00")
+	exec(t, s, `INSERT INTO settings(key, value, note, updated_at) VALUES ('report_topics', '[{"peer": "-1", "topic": 4, "model": "m", "pages": {}}]', '', ?),
+		('report_authors', '{"tg:501": "anna"}', '', ?)`, ts.Format(now), ts.Format(now))
+	post := func(msg int64, at, text string) {
+		t.Helper()
+		e := reports.PostEvent{Peer: "-1", Topic: 4, MsgID: msg, Date: at, Sender: "tg user", SenderID: "501", Text: text}
+		payload, _ := json.Marshal(e)
+		ans, err := events.Accept(ctx, s, []events.Event{{Source: reports.PostSource, SourceID: reports.PostSourceID("-1", 4, msg, text),
+			Kind: "post", OccurredAt: at, Payload: payload}}, now)
+		if err != nil || len(ans.Settle) > 0 {
+			t.Fatalf("accept: %v %v", err, ans.Settle)
+		}
+	}
+	one := func(date, page, sum string) string {
+		return "🗓 Дата: " + date + "\n👤 Чаттер: #anna\n\n📌 Аккаунты:\n• " + page + " - " + sum + "\n\n💰Общий доход: " + sum +
+			"\n\n📝 Комментарий:\n-"
+	}
+	check := func() Result { return SecondReports(ctx, Env{Q: s.RO, Now: now}) }
+	if r := check(); !r.OK {
+		t.Fatalf("no posts: %+v", r)
+	}
+	// A clean post of the day before the glued one does not clear it.
+	post(6, "2026-11-08T19:00:00Z", one("08.11.2026", "Page-9", "$10,00"))
+	post(7, "2026-11-08T20:00:00Z", one("08.11.2026", "Page-1", "$40,00")+"\n\n"+one("08.11.2026", "Page-2", "$80,00"))
+	r := check()
+	if r.OK || r.Severity != "warn" || !strings.Contains(r.Summary, "anna, 2026-11-08 (сообщение 7)") || strings.Contains(r.Summary, "сообщение 6") {
+		t.Fatalf("glued posts: %+v", r)
+	}
+	// The second report sent on its own, later, clears it.
+	post(8, "2026-11-08T20:10:00Z", one("08.11.2026", "Page-2", "$80,00"))
+	if r := check(); !r.OK {
+		t.Fatalf("the second report re-sent: %+v", r)
+	}
+	// Another day: an edit of the message to one report clears it too.
+	post(9, "2026-11-09T20:00:00Z", one("09.11.2026", "Page-1", "$40,00")+"\n"+one("09.11.2026", "Page-2", "$80,00"))
+	if r := check(); r.OK || !strings.Contains(r.Summary, "anna, 2026-11-09 (сообщение 9)") {
+		t.Fatalf("glued posts of another day: %+v", r)
+	}
+	post(9, "2026-11-09T20:00:00Z", one("09.11.2026", "Page-1", "$40,00"))
+	if r := check(); !r.OK {
+		t.Fatalf("the message edited to one report: %+v", r)
 	}
 }

@@ -787,6 +787,63 @@ func ReportPosts(ctx context.Context, e Env) Result {
 	return pass(name, "посты «Отчётности» за 14 дней разобраны без блокирующих пометок")
 }
 
+// secondReportsCheck is the name of SecondReports.
+const secondReportsCheck = "в сообщении «Отчётности» один отчёт"
+
+// SecondReports: a current post of the last 14 days that holds two reports in one message (reports.FlagSecondReport):
+// the parser reads only the first, so the second report's pages are in no pay base until it is sent as its own message.
+// The flag moves no money; this check is how the owner hears of it. It stays red until the post is edited (the edit
+// replaces the post) or the same person posts later a report of the same day without the flag (the second one re-sent).
+func SecondReports(ctx context.Context, e Env) Result {
+	const name = secondReportsCheck
+	from := ts.Date(e.Now.Add(-13 * 24 * time.Hour))
+	list, err := reports.Posts(ctx, e.Q, from, ts.Date(e.Now), false)
+	if err != nil {
+		return fail(name, "warn", err.Error(), nil)
+	}
+	has := func(p reports.Post) bool {
+		for _, f := range p.Flags {
+			if f == reports.FlagSecondReport {
+				return true
+			}
+		}
+		return false
+	}
+	var bad []string
+	for _, p := range list {
+		if !has(p) {
+			continue
+		}
+		resent := false
+		for _, o := range list {
+			if o.ID != p.ID && !has(o) && p.Person != nil && o.Person != nil && *o.Person == *p.Person &&
+				p.ReportDate != nil && o.ReportDate != nil && *o.ReportDate == *p.ReportDate && o.PostedAt > p.PostedAt {
+				resent = true
+				break
+			}
+		}
+		if resent {
+			continue
+		}
+		who, date := p.Sender, "без даты"
+		if p.Tag != "" {
+			who += " " + p.Tag
+		}
+		if p.Person != nil {
+			who = *p.Person
+		}
+		if p.ReportDate != nil {
+			date = *p.ReportDate
+		}
+		bad = append(bad, fmt.Sprintf("%s, %s (сообщение %d)", who, date, p.MsgID))
+	}
+	if len(bad) > 0 {
+		return fail(name, "warn", fmt.Sprintf("в «Отчётности» %d сообщений с двумя отчётами: прочитан только первый, второй нужно отправить отдельным сообщением: %s",
+			len(bad), strings.Join(bad, " | ")), bad)
+	}
+	return pass(name, "посты «Отчётности» за 14 дней: в каждом сообщении один отчёт")
+}
+
 // ShiftReports: every shift of Hub's team facts of the last 14 days that ended more than a day ago has the person's
 // posted report for its report date (payroll.ReportDate). A warning once the reports accrue (reportsOn): from the
 // switch day such a day is not accrued at all. Before that, information.
@@ -1020,7 +1077,7 @@ func WeekColumns(ctx context.Context, e Env) Result {
 
 // Run executes every check. A coverage that cannot be built fails its own checks, not the rest.
 func Run(ctx context.Context, e Env) []Result {
-	out := []Result{Balanced(ctx, e), BybitBalance(ctx, e), Coins(ctx, e), CoinsAtCost(ctx, e), CardAnchors(ctx, e), CardCover(ctx, e), Unlinked(ctx, e), Payables(ctx, e), Copies(ctx, e), Sources(ctx, e), ReportPosts(ctx, e),
+	out := []Result{Balanced(ctx, e), BybitBalance(ctx, e), Coins(ctx, e), CoinsAtCost(ctx, e), CardAnchors(ctx, e), CardCover(ctx, e), Unlinked(ctx, e), Payables(ctx, e), Copies(ctx, e), Sources(ctx, e), ReportPosts(ctx, e), SecondReports(ctx, e),
 		ShiftReports(ctx, e), HubReports(ctx, e), HubDecisions(ctx, e), PayTerms(ctx, e), PendingChanges(ctx, e), WeekColumns(ctx, e)}
 	cv, tabs, _, err := month.PrepareCover(ctx, e.Q, month.Inputs{})
 	if err != nil {

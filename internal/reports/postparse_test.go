@@ -130,6 +130,68 @@ func TestParsePost(t *testing.T) {
 			if p.TotalMicros/10_000 != c.total {
 				t.Errorf("total %d, want %d cents", p.TotalMicros/10_000, c.total)
 			}
+			if p.SecondReport {
+				t.Error("one report read as two")
+			}
+		})
+	}
+}
+
+// postHub is a post as Hub's board «Отчёт» copies it: one per model, a sales list, a comment and the report number.
+const postHub = `🗓 Дата: 08.11.2026
+👤 Чаттер: #Anna
+
+📌 Аккаунты:
+Fansly
+• Page-5 - не в смене
+• Page-6 - $50,00
+OF
+• Page-7 - $30,00
+
+💰 Общий доход: $80,00
+
+📈 Основные продажи:
+https://example.com/fan2 - name, ппв $50,00
+
+📝 Комментарий:
+-
+
+Отчёт № 12`
+
+// Two posts pasted into one message: only the first report is read, as before, and the message says it holds a second.
+func TestSecondReport(t *testing.T) {
+	cases := []struct {
+		name, first, text string
+		second            bool
+	}{
+		{"one post", postAnna, postAnna, false},
+		{"one Hub post", postHub, postHub, false},
+		{"glued after the first one's comment, empty line", postAnna, postAnna + "\n\n" + postHub, true},
+		{"glued after the first one's comment, no empty line", postAnna, postAnna + "\n" + postHub, true},
+		{"two Hub posts", postHub, postHub + "\n\n" + postHub, true},
+		{"no sales or comment in the first", postBoris, postBoris + "\n" + postDenis, true},
+		{"comment names a date and a sum", postAnna, postAnna + "\nДата: 07.11.2026 доплатили $50,00\nвчера было $40", false},
+		{"comment with a date line and «общий доход» without an amount", postAnna,
+			postAnna + "\n🗓 Дата: 07.11.2026\nобщий доход вчера был меньше", false},
+		{"a second date line with no total after it", postDenis, postDenis + "\n\n🗓 Дата: 05.11.2026\n👤 Чаттер: #Denis", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			alone, ok := ParsePost(c.first)
+			if !ok {
+				t.Fatal("the first post alone is not a report")
+			}
+			p, ok := ParsePost(c.text)
+			if !ok {
+				t.Fatal("not a report")
+			}
+			if p.SecondReport != c.second {
+				t.Errorf("second report %v, want %v", p.SecondReport, c.second)
+			}
+			p.SecondReport = false
+			if fmt.Sprintf("%+v", p) != fmt.Sprintf("%+v", alone) {
+				t.Errorf("the first report changed:\n%+v\nalone:\n%+v", p, alone)
+			}
 		})
 	}
 }

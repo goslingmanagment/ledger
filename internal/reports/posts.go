@@ -34,10 +34,13 @@ const (
 	FlagDateMismatch  = "date_mismatch"
 	FlagNoDate        = "no_date"
 	FlagDuplicate     = "duplicate"
+	// FlagSecondReport: the message holds two reports (two posts pasted into one); only the first is read. It moves no
+	// money: the first report counts as before, the second is not in the pay base until it is sent as its own message.
+	FlagSecondReport = "second_report"
 )
 
 // flagOrder is the order flags are stored and shown in.
-var flagOrder = []string{FlagUnknownAuthor, FlagTagMismatch, FlagNoDate, FlagDateMismatch, FlagSumMismatch, FlagUnknownPage, FlagDuplicate}
+var flagOrder = []string{FlagUnknownAuthor, FlagTagMismatch, FlagNoDate, FlagDateMismatch, FlagSumMismatch, FlagUnknownPage, FlagDuplicate, FlagSecondReport}
 
 // FlagText says a flag in Russian.
 var FlagText = map[string]string{
@@ -48,6 +51,7 @@ var FlagText = map[string]string{
 	FlagDateMismatch:  "дата отчёта дальше суток от дня отправки",
 	FlagNoDate:        "дату отчёта не прочитать",
 	FlagDuplicate:     "та же страница того же дня в другом сообщении: считается последнее",
+	FlagSecondReport:  "в сообщении два отчёта: прочитан только первый, второй нужно отправить отдельным сообщением",
 }
 
 // Blocking says whether a flag keeps the whole post out of the pay base (unknown_page keeps out only its page).
@@ -317,6 +321,9 @@ func (m mapping) build(eventID int64, e PostEvent) *post {
 	}
 	if p.PagesMicros != p.TotalMicros {
 		p.flag(FlagSumMismatch)
+	}
+	if parsed.SecondReport {
+		p.flag(FlagSecondReport)
 	}
 	for _, pg := range parsed.Pages {
 		row := postPage{Name: pg.Name, InShift: pg.InShift, Micros: pg.Micros}
