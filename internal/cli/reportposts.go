@@ -29,7 +29,8 @@ func init() {
 	Command(Cmd{Name: "report days", Run: reportDays,
 		Summary: "база оплаты по отчётам: пост и черновик по страницам (GET /v1/report-days): [--from] [--to] [--person код] [--json]; ничего не начисляет"})
 	Command(Cmd{Name: "report posts", Run: reportPosts,
-		Summary: "разобранные посты «Отчётности» с пометками (GET /v1/report-posts): [--from] [--to] [--flagged] [--json]"})
+		Summary: "разобранные посты «Отчётности» с пометками (GET /v1/report-posts): [--from] [--to] [--flagged] [--json]; " +
+			"--second-report — только чтение: текст постов заново этой сборкой, где в сообщении два отчёта (окно любой длины, ключ read)"})
 	Command(Cmd{Name: "report parse", Run: reportParse,
 		Summary: "разобрать посты «Отчётности» сейчас, как джоб: рядом с базой или через API (ключ collect)"})
 }
@@ -135,8 +136,12 @@ func reportPosts(ctx context.Context, args []string) error {
 	fs, from, to := windowFlags("report posts")
 	flagged := fs.Bool("flagged", false, "только посты с пометками")
 	asJSON := fs.Bool("json", false, "ответ API как есть")
+	second := fs.Bool("second-report", false, "прочитать текст постов этой сборкой и показать сообщения с двумя отчётами; ничего не пишет")
 	if _, err := ParseArgs(fs, args); err != nil {
 		return err
+	}
+	if *second {
+		return secondReports(ctx, *from, *to, *asJSON)
 	}
 	if _, _, err := payroll.PayoutWindow(*from, *to); err != nil {
 		return Exit{Code: 2, Msg: err.Error()}
@@ -182,6 +187,78 @@ func reportPosts(ctx context.Context, args []string) error {
 	}
 	writeTable(out, []string{"id", "дата", "человек", "итог", "страницы", "пометки"}, rows,
 		[]bool{true, false, false, true, false, false})
+	return out.Flush()
+}
+
+// secondReports reads the current posts of from…to through GET /v1/report-posts (windows of at most 62 days, the
+// text needs a key with read), parses each text with this build's parser and lists the messages that hold two reports
+// (reports.FlagSecondReport): before a release it counts the posts the next parse will flag. Read-only: it writes
+// nothing and calls nothing but that GET.
+func secondReports(ctx context.Context, from, to string, asJSON bool) error {
+	f, err1 := time.ParseInLocation(ts.DateLayout, from, ts.MSK)
+	t, err2 := time.ParseInLocation(ts.DateLayout, to, ts.MSK)
+	if err1 != nil || err2 != nil || t.Before(f) {
+		return Exit{Code: 2, Msg: fmt.Sprintf("окно %s — %s: нужны даты ГГГГ-ММ-ДД, from не позже to", from, to)}
+	}
+	type hit struct {
+		ID          int64   `json:"id"`
+		MsgID       int64   `json:"msg_id"`
+		PostedAt    string  `json:"posted_at"`
+		Person      *string `json:"person"`
+		Sender      string  `json:"sender"`
+		ReportDate  *string `json:"report_date"`
+		TotalMicros int64   `json:"total_micros"`
+		Flagged     bool    `json:"flagged"` // the stored post already carries the flag
+	}
+	read, hits := 0, []hit{}
+	for start := f; !start.After(t); start = start.AddDate(0, 0, payroll.MaxPayoutDays) {
+		end := start.AddDate(0, 0, payroll.MaxPayoutDays-1)
+		if end.After(t) {
+			end = t
+		}
+		q := url.Values{"from": {start.Format(ts.DateLayout)}, "to": {end.Format(ts.DateLayout)}}
+		var ans reports.PostsAnswer
+		if err := call(ctx, http.MethodGet, "/v1/report-posts?"+q.Encode(), nil, &ans); err != nil {
+			return err
+		}
+		for _, p := range ans.Posts {
+			read++
+			if p.Text == "" {
+				return Exit{Code: 1, Msg: "текст постов не пришёл: нужен ключ с правом read"}
+			}
+			parsed, ok := reports.ParsePost(p.Text)
+			if !ok || !parsed.SecondReport {
+				continue
+			}
+			h := hit{ID: p.ID, MsgID: p.MsgID, PostedAt: p.PostedAt, Person: p.Person, Sender: p.Sender, ReportDate: p.ReportDate,
+				TotalMicros: p.TotalMicros}
+			for _, fl := range p.Flags {
+				h.Flagged = h.Flagged || fl == reports.FlagSecondReport
+			}
+			hits = append(hits, h)
+		}
+	}
+	if asJSON {
+		return printJSON(map[string]any{"from": from, "to": to, "posts_read": read, "second_report": hits})
+	}
+	out := bufio.NewWriter(os.Stdout)
+	fmt.Fprintf(out, "посты «Отчётности» %s — %s: прочитано %d, с двумя отчётами в сообщении %d\n\n", from, to, read, len(hits))
+	rows := make([][]string, 0, len(hits))
+	for _, h := range hits {
+		date, who, flagged := "—", h.Sender+" (не узнан)", "нет"
+		if h.ReportDate != nil {
+			date = *h.ReportDate
+		}
+		if h.Person != nil {
+			who = *h.Person
+		}
+		if h.Flagged {
+			flagged = "уже"
+		}
+		rows = append(rows, []string{strconv.FormatInt(h.ID, 10), strconv.FormatInt(h.MsgID, 10), date, who, usd(h.TotalMicros), flagged})
+	}
+	writeTable(out, []string{"id", "сообщение", "дата", "человек", "итог первого", "пометка"}, rows,
+		[]bool{true, true, false, false, true, false})
 	return out.Flush()
 }
 

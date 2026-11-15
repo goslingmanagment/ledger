@@ -455,3 +455,20 @@ func TestAPostToTheCentEqualsADraftInMills(t *testing.T) {
 		t.Errorf("the draft after a changed post: %s", st)
 	}
 }
+
+// Two posts pasted into one message: the post carries second_report, and the pay base is the first report's, exactly as
+// if the first had been sent alone (the flag blocks nothing and moves no money).
+func TestSecondReportMovesNoMoney(t *testing.T) {
+	s := postBook(t)
+	const at = "2026-11-08T20:30:00Z"
+	first := report("08.11.2026", "#Anna", "$31,52", "Fansly", "• Page-A - $31,52")
+	second := report("08.11.2026", "#Anna", "$181,60", "OF", "• VIP - $181,60")
+	send(t, s, 10, "501", at, first)
+	alone := days(t, s)
+	want(t, alone, "anna 2026-11-08 page-a 3152/- post_only")
+	send(t, s, 10, "501", at, first+"\n\n"+second) // the same message edited: now two posts in it
+	if f := flagsOf(t, s, 10); f != `["second_report"]` {
+		t.Errorf("flags: %s", f)
+	}
+	want(t, days(t, s), alone...)
+}

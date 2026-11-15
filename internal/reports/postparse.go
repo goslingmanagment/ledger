@@ -30,6 +30,9 @@ type ParsedPost struct {
 	Tag              string // the #tag of the chatter line, with «#», as written; "" — none
 	Pages            []PostPage
 	TotalMicros      int64
+	// SecondReport: after this report's total the same message holds another report, a date line and then a total
+	// with an amount (two posts pasted into one message). Only the first is read; the flag moves no money.
+	SecondReport bool
 }
 
 var (
@@ -69,6 +72,7 @@ func NormName(s string) string {
 func ParsePost(text string) (ParsedPost, bool) {
 	var p ParsedPost
 	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	all := lines
 	// Everything from «Основные продажи» on is not money.
 	for i, l := range lines {
 		if low := strings.ToLower(l); strings.Contains(low, salesWord) || strings.Contains(low, commentWord) {
@@ -83,8 +87,10 @@ func ParsePost(text string) (ParsedPost, bool) {
 			break
 		}
 	}
-	for _, l := range lines {
+	dateAt := -1
+	for i, l := range lines {
 		if dateLineRe.MatchString(l) {
+			dateAt = i
 			p.DateLine = true
 			p.Day, p.Month, p.Year, p.DateOK = readDate(l[dateLineRe.FindStringIndex(l)[1]:])
 			break
@@ -93,20 +99,8 @@ func ParsePost(text string) (ParsedPost, bool) {
 	if !p.DateLine || total < 0 {
 		return ParsedPost{}, false
 	}
-	// The total: on its line, or on the next line that holds an amount.
-	for i := total; i < len(lines); i++ {
-		l := clean(lines[i])
-		if i == total {
-			l = l[totalRe.FindStringIndex(l)[1]:]
-		}
-		if v, _, ok := findAmount(l); ok {
-			p.TotalMicros = v
-			break
-		}
-		if i > total && strings.TrimSpace(l) != "" {
-			break
-		}
-	}
+	p.TotalMicros, _ = totalAmount(lines, total)
+	p.SecondReport = secondReport(all, max(total, dateAt)+1)
 	start := 0
 	for i := 0; i < total; i++ {
 		if strings.Contains(strings.ToLower(lines[i]), accountsWord) {
@@ -145,6 +139,43 @@ func ParsePost(text string) (ParsedPost, bool) {
 		}
 	}
 	return p, true
+}
+
+// totalAmount is the amount of the total line at: on its line, or on the next line that holds an amount.
+func totalAmount(lines []string, at int) (int64, bool) {
+	for i := at; i < len(lines); i++ {
+		l := clean(lines[i])
+		if i == at {
+			l = l[totalRe.FindStringIndex(l)[1]:]
+		}
+		if v, _, ok := findAmount(l); ok {
+			return v, true
+		}
+		if i > at && strings.TrimSpace(l) != "" {
+			break
+		}
+	}
+	return 0, false
+}
+
+// secondReport says whether the lines from `from` on (of the whole message, sales and comment included: a second
+// post pasted after the first one's «Комментарий» lands there) hold another report: a date line, then a total line
+// with an amount. A comment that names a date or a sum without both never counts.
+func secondReport(lines []string, from int) bool {
+	for i := from; i < len(lines); i++ {
+		if !dateLineRe.MatchString(lines[i]) {
+			continue
+		}
+		for j := i + 1; j < len(lines); j++ {
+			if totalRe.MatchString(lines[j]) {
+				if _, ok := totalAmount(lines, j); ok {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return false
 }
 
 // clean drops markdown bold and odd spaces.
