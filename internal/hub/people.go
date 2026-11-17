@@ -37,7 +37,20 @@ type RegistryPerson struct {
 	} `json:"logins"`
 	// PayTerms are the person's terms, every model, oldest first; nil — not served (the key lacks read:pay_terms).
 	PayTerms []PayTerm `json:"payTerms"`
+	// RightGrants are the person's rights with when each was granted (hub#1395); nil — an older Hub that does not serve
+	// them, and then nothing is known of the rights (not «none»).
+	RightGrants *[]RightGrant `json:"rightGrants"`
 }
+
+// RightGrant is a right of the person and when it was granted; submits_shift — the person hands in on the board «Отчёт»
+// for the shifts begun at or after GrantedAt.
+type RightGrant struct {
+	Right     string `json:"right"`
+	GrantedAt string `json:"grantedAt"`
+}
+
+// RightSubmitsShift is the right «сдаёт смену доской».
+const RightSubmitsShift = "submits_shift"
 
 // PayTerm is a person's term on a model from a day on: a share of the model's money and a fixed sum per day with a shift.
 type PayTerm struct {
@@ -94,6 +107,13 @@ func (c *Client) People(ctx context.Context, since time.Time) (*PeopleAnswer, er
 		}
 		if _, err := time.Parse(time.RFC3339Nano, p.UpdatedAt); err != nil {
 			return nil, refusef("хаб %s: у %s updatedAt %q — не время", what, p.Code, p.UpdatedAt)
+		}
+		if p.RightGrants != nil {
+			for _, g := range *p.RightGrants {
+				if _, err := time.Parse(time.RFC3339Nano, g.GrantedAt); g.Right == "" || err != nil {
+					return nil, refusef("хаб %s: право %q у %s без названия или времени (grantedAt %q)", what, g.Right, p.Code, g.GrantedAt)
+				}
+			}
 		}
 		if !a.PayTermsIncluded {
 			continue
