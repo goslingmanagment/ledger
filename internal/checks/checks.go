@@ -610,40 +610,31 @@ func DriftOf(ctx context.Context, q ledger.Querier, cv *month.Cover, tabs []mont
 	return pass(name, fmt.Sprintf("%d закрытых месяцев без дрейфа ≥ $100%s", len(rows), skipped))
 }
 
-// Copies: the age of the Litestream replica and of the last copy on the Mac.
-func Copies(ctx context.Context, e Env) Result {
+// Copies: the age of the Litestream replica. The Mac's copies every 6 hours are off since
+// 2026-11-17 (the owner's call): only release.sh copies before and after a release, so the age
+// of the last copy on the Mac (cursor backup:mac) says nothing and is not checked.
+func Copies(_ context.Context, e Env) Result {
 	const name = "копии базы"
-	var problems []string
-	if e.DataDir != "" {
-		var newest time.Time
-		_ = filepath.WalkDir(filepath.Join(e.DataDir, "replica"), func(_ string, d os.DirEntry, err error) error {
-			if err != nil || d.IsDir() {
-				return nil
-			}
-			if info, err := d.Info(); err == nil && info.ModTime().After(newest) {
-				newest = info.ModTime()
-			}
+	if e.DataDir == "" {
+		return pass(name, "реплику Litestream видно только на сервере")
+	}
+	var newest time.Time
+	_ = filepath.WalkDir(filepath.Join(e.DataDir, "replica"), func(_ string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
 			return nil
-		})
-		if newest.IsZero() {
-			problems = append(problems, "реплики Litestream нет")
-		} else if e.Now.Sub(newest) > 3*time.Hour {
-			problems = append(problems, fmt.Sprintf("реплика Litestream старше 3 часов: %s", ts.Format(newest)))
 		}
+		if info, err := d.Info(); err == nil && info.ModTime().After(newest) {
+			newest = info.ModTime()
+		}
+		return nil
+	})
+	if newest.IsZero() {
+		return fail(name, "warn", "реплики Litestream нет", nil)
 	}
-	var at string
-	err := e.Q.QueryRowContext(ctx, `SELECT value FROM cursors WHERE name = 'backup:mac'`).Scan(&at)
-	if err == sql.ErrNoRows {
-		problems = append(problems, "копий на маке ещё не было")
-	} else if err != nil {
-		problems = append(problems, err.Error())
-	} else if t, perr := ts.Parse(at); perr == nil && e.Now.Sub(t) > 24*time.Hour {
-		problems = append(problems, fmt.Sprintf("копия на маке старше суток: %s", at))
+	if e.Now.Sub(newest) > 3*time.Hour {
+		return fail(name, "warn", fmt.Sprintf("реплика Litestream старше 3 часов: %s", ts.Format(newest)), nil)
 	}
-	if len(problems) > 0 {
-		return fail(name, "warn", strings.Join(problems, "; "), nil)
-	}
-	return pass(name, "реплика и копия на маке свежие")
+	return pass(name, "реплика Litestream свежая")
 }
 
 // Sources: collectors are alive. The Mac may sleep, so its sources only warn.
