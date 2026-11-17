@@ -31,7 +31,7 @@ func init() {
 	Command(Cmd{Name: "payroll reports-from", Run: payrollReportsFrom,
 		Summary: "начисления из отчётов смен с дня (рядом с базой): [ГГГГ-ММ-ДД | --off]; без аргумента — показать; затем пересборка"})
 	Command(Cmd{Name: "payroll hub-from", Run: payrollHubFrom,
-		Summary: "день отчётов — по отчёту, сданному в хабе, когда он есть, иначе по посту, с дня (рядом с базой): [ГГГГ-ММ-ДД | --off]; без аргумента — показать; затем пересборка"})
+		Summary: "день отчётов — по отчёту, сданному в хабе, когда он есть, иначе по посту (у сдающих доской — только по отчёту хаба), с дня (рядом с базой): [ГГГГ-ММ-ДД | --off]; без аргумента — показать и кто на доске; затем пересборка"})
 	Command(Cmd{Name: "payroll change", Run: payrollChange,
 		Summary: `изменение выплаченного дня: apply <id> — сторно и новая проводка по отчёту, dismiss <id> — книги как были; [--note "…"] (ключ decide или рядом с базой)`})
 }
@@ -104,12 +104,17 @@ func payrollHubFrom(ctx context.Context, args []string) error {
 		return err
 	}
 	defer store.Close()
+	// Who hands in on the board «Отчёт» and from which day, as Hub's registry says: their days answer only to Hub's report.
+	board, err := payroll.BoardSpans(ctx, store.RO)
+	if err != nil {
+		return err
+	}
 	if len(pos) == 0 && !*off {
 		from, err := payroll.HubFrom(ctx, store.RO)
 		if err != nil {
 			return err
 		}
-		return printJSON(map[string]any{"ok": true, "hubFrom": from})
+		return printJSON(map[string]any{"ok": true, "hubFrom": from, "board": board})
 	}
 	day := ""
 	if !*off {
@@ -134,7 +139,7 @@ func payrollHubFrom(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return printJSON(map[string]any{"ok": true, "hubFrom": day, "reports": shadow, "report": rep})
+	return printJSON(map[string]any{"ok": true, "hubFrom": day, "board": board, "reports": shadow, "report": rep})
 }
 
 // payrollChange applies or dismisses a pending change of a paid day, next to the database or through the API (decide).

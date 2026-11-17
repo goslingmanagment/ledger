@@ -164,6 +164,8 @@ type TermsStatus struct {
 	// people projection and the authors of the posts.
 	PeopleWritten int `json:"peopleWritten"`
 	Gone          int `json:"gone"` // terms Hub no longer serves
+	// Rights are the people's rights new or gone (hub_person_rights): submits_shift tells the days of the board «Отчёт».
+	Rights int `json:"rights"`
 	// LastOKAt is the last pass that read the terms; with NoTerms it stays as it was.
 	LastOKAt string `json:"lastOkAt,omitempty"`
 }
@@ -276,14 +278,19 @@ func SyncHubTerms(ctx context.Context, store *db.Store, c *hub.Client, now time.
 	if err := save(); err != nil {
 		return st, err
 	}
-	if st.Written+st.Gone+st.PeopleWritten == 0 {
+	if st.Written+st.Gone+st.PeopleWritten+st.Rights == 0 {
 		return st, nil
 	}
 	from, err := TermsHubFrom(ctx, store.RO)
 	if err != nil {
 		return st, err
 	}
-	if from != "" {
+	hubFrom, err := HubFrom(ctx, store.RO)
+	if err != nil {
+		return st, err
+	}
+	// The terms move the books from their day; a right moves the days of the board, which count from Hub's report day.
+	if from != "" || (st.Rights > 0 && hubFrom != "") {
 		if _, err := Rebuild(ctx, store, now); err != nil {
 			return st, fmt.Errorf("долги после условий реестра: %w", err)
 		}
@@ -381,6 +388,107 @@ func storeRegistry(ctx context.Context, tx *sql.Tx, ans *hub.PeopleAnswer, now t
 			}
 			st.Gone++
 		}
+		n, err := storeRights(ctx, tx, p, now)
+		if err != nil {
+			return "", err
+		}
+		st.Rights += n
 	}
 	return next, nil
+}
+
+// storeRights keeps the person's rights as Hub serves them, each with when it was granted (hub_person_rights): a right
+// granted again is a new row, a right Hub no longer serves is marked gone and kept — the board's days before it stay
+// the board's. A Hub that does not serve the rights (nil) changes nothing. It returns how many rows are new or gone.
+func storeRights(ctx context.Context, tx *sql.Tx, p hub.RegistryPerson, now time.Time) (int, error) {
+	if p.RightGrants == nil {
+		return 0, nil
+	}
+	at := ts.Format(now)
+	changed := 0
+	served := map[[2]string]bool{}
+	for _, g := range *p.RightGrants {
+		t, err := time.Parse(time.RFC3339Nano, g.GrantedAt)
+		if err != nil {
+			return 0, err
+		}
+		served[[2]string{g.Right, g.GrantedAt}] = true
+		res, err := tx.ExecContext(ctx, `INSERT INTO hub_person_rights(hub_person_id, person, right_name, granted_at, granted_day, stored_at)
+			VALUES (?, ?, ?, ?, ?, ?)
+			ON CONFLICT(hub_person_id, right_name, granted_at) DO UPDATE SET person = excluded.person, gone_at = NULL, gone_day = NULL,
+			  stored_at = excluded.stored_at
+			WHERE hub_person_rights.person IS NOT excluded.person OR hub_person_rights.gone_at IS NOT NULL`,
+			p.ID, p.Code, g.Right, g.GrantedAt, ts.Date(t), at)
+		if err != nil {
+			return 0, err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			changed++
+		}
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT right_name, granted_at FROM hub_person_rights WHERE hub_person_id = ? AND gone_at IS NULL
+		ORDER BY right_name, granted_at`, p.ID)
+	if err != nil {
+		return 0, err
+	}
+	var gone [][2]string
+	for rows.Next() {
+		var k [2]string
+		if err := rows.Scan(&k[0], &k[1]); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		if !served[k] {
+			gone = append(gone, k)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	for _, k := range gone {
+		if _, err := tx.ExecContext(ctx, `UPDATE hub_person_rights SET gone_at = ?, gone_day = ? WHERE hub_person_id = ? AND right_name = ?
+			AND granted_at = ?`, at, ts.Date(now), p.ID, k[0], k[1]); err != nil {
+			return 0, err
+		}
+		changed++
+	}
+	return changed, nil
+}
+
+// BoardSpan is a stretch of days a person hands in on the board «Отчёт» (v_board_spans): from the day after the right
+// submits_shift was granted to the day before it was taken off ("" — it holds).
+type BoardSpan struct {
+	Person    string `json:"person"`
+	From      string `json:"from"`
+	To        string `json:"to,omitempty"`
+	GrantedAt string `json:"grantedAt"`
+}
+
+// BoardSpans reads every person's days of the board.
+func BoardSpans(ctx context.Context, q ledger.Querier) ([]BoardSpan, error) {
+	rows, err := q.QueryContext(ctx, `SELECT person, from_day, COALESCE(to_day, ''), granted_at FROM v_board_spans ORDER BY person, from_day`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []BoardSpan{}
+	for rows.Next() {
+		var b BoardSpan
+		if err := rows.Scan(&b.Person, &b.From, &b.To, &b.GrantedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// onBoard says whether the person hands in on the board on the day.
+func onBoard(spans []BoardSpan, person, day string) bool {
+	for _, b := range spans {
+		if b.Person == person && b.From <= day && (b.To == "" || day <= b.To) {
+			return true
+		}
+	}
+	return false
 }

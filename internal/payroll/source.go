@@ -42,6 +42,8 @@ const (
 	reasonReportPending = "по отчёту не начислено"
 	// reasonShiftNoReport opens the reason of a worked shift without a posted report.
 	reasonShiftNoReport = "смена без отчёта"
+	// reasonBoardWaits is why a day of the board «Отчёт» without a counted Hub report is not accrued.
+	reasonBoardWaits = "сдаёт смену доской: учтённого отчёта хаба за день нет — пост и таблица его не заменяют, день ждёт «Подтверждаю» на доске"
 )
 
 // afterPlan is what a source after the sheets says about every tab's day from its switch day on.
@@ -201,9 +203,12 @@ type reportBasis struct {
 
 // reportPlan is what the shift reports say about every tab's day from the switch on.
 type reportPlan struct {
-	from      string
-	want      map[string]factDay
-	held      map[string]string // "<model>/<name>:<date>" → why the reports cannot answer for it
+	from string
+	want map[string]factDay
+	held map[string]string // "<model>/<name>:<date>" → why the reports cannot answer for it
+	// waiting are the days of the board «Отчёт» with no counted Hub report: nothing accrues (not held as posted), each
+	// stands in «не занесено» as unknown with why.
+	waiting   map[string]string
 	markers   []unenteredRow
 	unaccrued []Unaccrued
 	// paid is what the payouts cleared of each day as posted, by "<model>/<name>:<date>" (loadGuard).
@@ -233,7 +238,7 @@ var blockingFlags = map[string]string{
 // day: a post of the day blocked by a flag or with a page not mapped to Hub, no rate to price it, or money of the day
 // (in the sheet or posted) with no posted report.
 func planReports(ctx context.Context, q ledger.Querier, from string, now time.Time) (*reportPlan, error) {
-	p := &reportPlan{from: from, want: map[string]factDay{}, held: map[string]string{}}
+	p := &reportPlan{from: from, want: map[string]factDay{}, held: map[string]string{}, waiting: map[string]string{}}
 	tabs, tabOf, err := planTabs(ctx, q)
 	if err != nil {
 		return nil, err
@@ -352,6 +357,76 @@ func planReports(ctx context.Context, q ledger.Querier, from string, now time.Ti
 		}
 	}
 
+	// From Hub's report day on, a day of a person on the board «Отчёт» (v_board_spans) answers only to their counted Hub
+	// report: the post and the sheet neither accrue it nor hold it as posted, and without the report it waits. A day whose
+	// Hub report moved to another date with the shift's newer version (a night shift) answers to nothing: its report is
+	// the other day's, so it is released — not held, not waiting.
+	var spans []BoardSpan
+	moved := map[string]bool{}
+	if hubFrom != "" {
+		if spans, err = BoardSpans(ctx, q); err != nil {
+			return nil, err
+		}
+		rows, err = q.QueryContext(ctx, `SELECT DISTINCT o.person, o.report_date FROM hub_shift_reports o
+			JOIN hub_shift_reports c ON c.shift_id = o.shift_id AND c.current = 1 AND c.report_date <> o.report_date
+			WHERE o.current = 0 AND o.person IS NOT NULL AND o.report_date >= ? AND o.report_date >= ?
+			  AND NOT EXISTS (SELECT 1 FROM hub_shift_reports x WHERE x.person = o.person AND x.report_date = o.report_date AND x.current = 1)`,
+			from, hubFrom)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var person, date string
+			if err := rows.Scan(&person, &date); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			moved[person+"\x00"+date] = true
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+	// hubOnly says the person's day answers only to Hub's report; it adds the day to the waiting ones unless it moved.
+	hubOnly := func(key, person, date string) bool {
+		if hubFrom == "" || date < hubFrom {
+			return false
+		}
+		if moved[person+"\x00"+date] {
+			return true
+		}
+		if !onBoard(spans, person, date) {
+			return false
+		}
+		if _, ok := p.held[key]; !ok {
+			p.waiting[key] = reasonBoardWaits
+		}
+		return true
+	}
+	// The board's days with a post (or a draft) and no Hub report.
+	rows, err = q.QueryContext(ctx, `SELECT DISTINCT person, report_date, model FROM v_report_pages
+		WHERE board = 1 AND basis = 'hub' AND hub_state IS NULL AND report_date >= ?`, from)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var person, date, model string
+		if err := rows.Scan(&person, &date, &model); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if t, ok := tabOf[person+"\x00"+ledger.Slug(model)]; ok && model != "" {
+			if key := t.model + "/" + t.name + ":" + date; !reported[key] {
+				hubOnly(key, person, date)
+			}
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
 	// The current posts of the days that cannot be read whole: blocked by a flag, or with a page in shift not mapped.
 	models, err := HubPageModels(ctx, q)
 	if err != nil {
@@ -429,18 +504,19 @@ func planReports(ctx context.Context, q ledger.Querier, from string, now time.Ti
 		return nil, err
 	}
 
-	// Money of a day with no posted report: in the sheet, or posted already.
-	rows, err = q.QueryContext(ctx, `SELECT model, name, date FROM payroll_days WHERE person IS NOT NULL AND amount <> 0 AND date >= ?`, from)
+	// Money of a day with no posted report: in the sheet, or posted already. A day that answers only to Hub's report is not
+	// held by them.
+	rows, err = q.QueryContext(ctx, `SELECT model, name, person, date FROM payroll_days WHERE person IS NOT NULL AND amount <> 0 AND date >= ?`, from)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
-		var model, name, date string
-		if err := rows.Scan(&model, &name, &date); err != nil {
+		var model, name, person, date string
+		if err := rows.Scan(&model, &name, &person, &date); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		if key := model + "/" + name + ":" + date; !reported[key] {
+		if key := model + "/" + name + ":" + date; !reported[key] && !hubOnly(key, person, date) {
 			hold(key, "отчёта нет: в таблице день есть, опубликованного отчёта за него нет")
 		}
 	}
@@ -452,9 +528,22 @@ func planReports(ctx context.Context, q ledger.Querier, from string, now time.Ti
 	if err != nil {
 		return nil, err
 	}
+	personOf := map[string]string{}
+	for _, t := range tabs {
+		personOf[t.model+"/"+t.name] = t.person
+	}
 	for key := range posted {
-		if !reported[key] {
-			hold(key, "отчёта нет: день проведён, опубликованного отчёта за него нет")
+		if reported[key] {
+			continue
+		}
+		if model, name, date, ok := splitDayKey(key); ok && hubOnly(key, personOf[model+"/"+name], date) {
+			continue
+		}
+		hold(key, "отчёта нет: день проведён, опубликованного отчёта за него нет")
+	}
+	for key := range p.waiting {
+		if _, ok := p.held[key]; ok {
+			delete(p.waiting, key)
 		}
 	}
 	return p, p.mark(ctx, q, tabs, now)
@@ -473,8 +562,15 @@ func (p *reportPlan) mark(ctx context.Context, q ledger.Querier, tabs []planTab,
 	for _, t := range tabs {
 		personOf[t.model+"/"+t.name] = t.person
 	}
-	keys := make([]string, 0, len(p.held))
-	for k := range p.held {
+	why := map[string]string{}
+	for k, w := range p.waiting {
+		why[k] = w
+	}
+	for k, w := range p.held {
+		why[k] = w
+	}
+	keys := make([]string, 0, len(why))
+	for k := range why {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
@@ -484,7 +580,7 @@ func (p *reportPlan) mark(ctx context.Context, q ledger.Querier, tabs []planTab,
 			continue
 		}
 		p.markers = append(p.markers, unenteredRow{model: model, name: name, person: personOf[model+"/"+name], date: date, page: "—",
-			status: "unknown", reason: reasonReportPending + ": " + p.held[k]})
+			status: "unknown", reason: reasonReportPending + ": " + why[k]})
 	}
 	gaps, err := ShiftsWithoutReport(ctx, q, first, last, now)
 	if err != nil {
