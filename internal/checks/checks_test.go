@@ -218,7 +218,7 @@ func TestCopies(t *testing.T) {
 	dir := t.TempDir()
 	e := Env{Q: s.RO, Now: now, DataDir: dir}
 	if r := Copies(ctx, e); r.OK {
-		t.Fatal("no replica and no Mac copy passed")
+		t.Fatal("no replica passed")
 	}
 	if err := os.MkdirAll(filepath.Join(dir, "replica"), 0o700); err != nil {
 		t.Fatal(err)
@@ -230,12 +230,12 @@ func TestCopies(t *testing.T) {
 	if err := os.Chtimes(f, now, now); err != nil {
 		t.Fatal(err)
 	}
-	exec(t, s, `INSERT INTO cursors(name, value, updated_at) VALUES ('backup:mac', ?, 'x')`, ts.Format(now.Add(-2*time.Hour)))
+	// No copy on the Mac is marked: since 2026-11-17 there are none between releases.
 	if r := Copies(ctx, e); !r.OK {
-		t.Fatalf("fresh copies: %+v", r)
+		t.Fatalf("fresh replica, no Mac copy: %+v", r)
 	}
 	if r := Copies(ctx, Env{Q: s.RO, Now: now.Add(48 * time.Hour), DataDir: dir}); r.OK {
-		t.Fatal("two-day-old copies passed")
+		t.Fatal("two-day-old replica passed")
 	}
 }
 
