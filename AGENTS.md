@@ -241,7 +241,8 @@
   зелёный CI проверяется, образ собирается на VPS.
   Первая установка: `--bootstrap`. Откат: `deploy/rollback.sh` на VPS. Подробно — `deploy/README.md`.
 - Прод: `agency-de`, checkout `/opt/ledger`, том `ledger_data`, порт `127.0.0.1:3300`, сайт
-  `ledger.gosling-agency.ru`. Копии базы — `~/Backups/ledger/` на маке каждые 6 часов.
+  `ledger.gosling-agency.ru`. Копии базы на мак каждые 6 часов владелец выключил 17.11.2026, прежние удалены. Остались
+  реплика Litestream на том же томе и копии `release.sh` до и после выпуска (`~/Backups/ledger/`).
 
 ## Опасно
 
