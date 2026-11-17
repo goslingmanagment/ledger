@@ -17,10 +17,12 @@ import (
 	"github.com/goslingmanagment/ledger/internal/config"
 	"github.com/goslingmanagment/ledger/internal/db"
 	"github.com/goslingmanagment/ledger/internal/events"
+	"github.com/goslingmanagment/ledger/internal/hub"
 	"github.com/goslingmanagment/ledger/internal/journal"
 	"github.com/goslingmanagment/ledger/internal/payroll"
 	"github.com/goslingmanagment/ledger/internal/reports"
 	"github.com/goslingmanagment/ledger/internal/server"
+	"github.com/goslingmanagment/ledger/internal/split"
 	"github.com/goslingmanagment/ledger/internal/ts"
 )
 
@@ -651,6 +653,38 @@ func TestAShiftWithoutAReport(t *testing.T) {
 	}
 	if !kinds["no_report"] || !kinds["reports_pending"] {
 		t.Fatalf("brief flags %+v", b.Flags)
+	}
+}
+
+// The team facts can carry the part of a night shift after midnight under a ref of its own (started at 00:00, ended with
+// the shift). It is a piece of the shift, not a shift without a report on the next day: the whole shift's report answers it.
+func TestTheNightShiftsPieceAfterMidnightIsNoShiftOfItsOwn(t *testing.T) {
+	s, ctx := reportBook(t)
+	night := work(102, split.Shift, "2026-11-12 17:00", "2026-11-13 02:30", "page-a")
+	piece := work(102, split.Shift, "2026-11-13 00:00", "2026-11-13 02:30", "page-a")
+	alone := work(102, split.Shift, "2026-11-14 00:00", "2026-11-14 06:00", "page-a")
+	putWindow(t, s, "2026-11-09", []hub.TeamWork{night, piece, alone}, nil)
+	gaps, err := payroll.ShiftsWithoutReport(ctx, s.RO, "2026-11-03", "2026-11-17", reportNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, g := range gaps {
+		got = append(got, g.Person+" "+g.ReportDate+" "+g.Ref)
+	}
+	// The night shift is asked about on its own date, its piece is not; a shift that really starts at midnight still is.
+	want := "bravo 2026-11-12 " + night.Ref + "|bravo 2026-11-14 " + alone.Ref
+	if strings.Join(got, "|") != want {
+		t.Fatalf("gaps %v, want %s", got, want)
+	}
+	// The night shift's report answers the piece too.
+	post(t, s, 2, "502", "2026-11-12", postText("2026-11-12", "", "A - $50"))
+	gaps, err = payroll.ShiftsWithoutReport(ctx, s.RO, "2026-11-03", "2026-11-17", reportNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gaps) != 1 || gaps[0].Ref != alone.Ref {
+		t.Fatalf("after the night's report: %+v", gaps)
 	}
 }
 
