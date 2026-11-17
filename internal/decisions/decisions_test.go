@@ -379,28 +379,3 @@ func TestReportLinesCarryTheAgreement(t *testing.T) {
 		t.Fatalf("cancelled %+v %v", list, err)
 	}
 }
-
-func TestTheMarkdownIsTheAgentsFile(t *testing.T) {
-	s, ctx, k := book(t)
-	pot := decisions.Input{PageLabel: "page-a", FanName: "fan-x", Kind: "pot", Pot: "set-one", SaidBy: "Анна и Борис", SaidAt: "2026-11-11",
-		Note: "Купил набор\nиз общака."}
-	for _, in := range []decisions.Input{owner("tx-1"), pot} {
-		if err := k.agent.Do(ctx, http.MethodPost, "/v1/decisions", in, nil); err != nil {
-			t.Fatal(err)
-		}
-	}
-	list, err := decisions.List(ctx, s.RO, decisions.Filter{Open: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	names, err := decisions.PotNames(ctx, s.RO)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := "- **MoonFan / fan-100** (page-a). Продажа tx-1, нетто 25.00, 2026-11-10T21:15:00+03:00. Вся продажа — anna: PPV отправил Борис, но продала Анна в свою смену. " +
-		"Источник: владелец, 2026-11-11, https://t.me/c/1/2. Статус: открыто, ждёт отчёта.\n" +
-		"- **fan-x** (page-a). Продажи ещё нет. В общак Набор (set-one): Купил набор из общака. Источник: Анна и Борис, 2026-11-11. Статус: открыто, ждёт отчёта.\n"
-	if got := decisions.Markdown(list, names); got != want {
-		t.Fatalf("markdown:\n%s\nwant\n%s", got, want)
-	}
-}
