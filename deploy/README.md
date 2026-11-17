@@ -13,7 +13,7 @@
 | База и реплика | том `ledger_data`: `/data/ledger.db`, реплика Litestream `/data/replica/ledger` |
 | Состояние релизов | `/opt/ledger/deploy/.runtime/current.json`, снимки `releases/<deployment>/` |
 | Порт | `127.0.0.1:3300` → контейнер `:8080`, nginx `deploy/nginx/ledger.conf` |
-| Копии на маке | `~/Backups/ledger/<UTC>/ledger.db`, launchd `ru.gosling-agency.ledger-backup`, каждые 6 часов |
+| Копии на маке | `~/Backups/ledger/<UTC>/ledger.db`, только до и после выпуска (`release.sh`); копии каждые 6 часов (launchd `ru.gosling-agency.ledger-backup`) владелец выключил 17.11.2026, прежние копии удалены |
 
 ## Выпуск
 
@@ -29,13 +29,15 @@ bash deploy/release.sh --build-here  # пока CI на маке (CI_POOL=pc): �
 
 ## Копии и восстановление
 
-- `bash deploy/install-backup-launchd.sh` — поставить копирование на мак (раз в 6 часов и при входе).
-- `bash deploy/restore-drill.sh` — восстановить свежую копию локально и поднять на ней сервис.
+- Копирование на мак раз в 6 часов выключено владельцем 17.11.2026, прежние копии удалены. Копии снимает только
+  `release.sh`, до и после выпуска (ротация — последние 120). Включить снова: `bash deploy/install-backup-launchd.sh`
+  (раз в 6 часов и при входе).
+- `bash deploy/restore-drill.sh` — восстановить свежую копию (от последнего выпуска) локально и поднять на ней сервис.
 - `bash deploy/replica-drill.sh` на VPS — восстановить базу из реплики Litestream и проверить её.
 
 ## Если сервер потерян
 
-Копии на маке — полная база (`~/Backups/ledger/<UTC>/ledger.db`). На новом VPS: перенести `/etc/ledger/ledger.env`; `LEDGER_HOST=root@<адрес> bash deploy/release.sh --bootstrap --build-here`;
+Копии на маке — полная база на момент последнего выпуска (`~/Backups/ledger/<UTC>/ledger.db`): записанного после него в копии нет. На новом VPS: перенести `/etc/ledger/ledger.env`; `LEDGER_HOST=root@<адрес> bash deploy/release.sh --bootstrap --build-here`;
 остановить сервис: `bash deploy/compose.sh stop app litestream`; положить копию в том:
 `docker run --rm -i -v ledger_data:/data alpine sh -c 'rm -f /data/ledger.db* && cat > /data/ledger.db && chown 1000:1000 /data/ledger.db' < ledger.db`; запустить: `bash deploy/compose.sh up -d`;
 проверить: `ledger verify /data/ledger.db`, `ledger health --now`; перевести DNS и получить сертификат. Сбор Bybit и хаба догонит пропущенное сам, сборщики мака досылают очередь.
