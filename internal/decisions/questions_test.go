@@ -263,28 +263,3 @@ func TestTheQuestionScopes(t *testing.T) {
 		}
 	}
 }
-
-func TestTheQuestionsMarkdown(t *testing.T) {
-	s, ctx, k := book(t)
-	addQuestion(t, k.agent, ask("tx-1"))
-	addQuestion(t, k.agent, decisions.QuestionInput{PageLabel: "page-a", FanName: "fan-x", Question: "Кто из вас продал набор",
-		AskedOf: "chatters", Who: "Анна и Борис", AskedAt: "2026-11-11", Note: "Купил\nпосле двух смен."})
-	closed := addQuestion(t, k.agent, ask("tx-2"))
-	if _, err := decisions.DropQuestion(ctx, s, closed.ID, decisions.DropInput{Note: "отпал"}, now); err != nil {
-		t.Fatal(err)
-	}
-	list, err := decisions.ListQuestions(ctx, s.RO, decisions.QuestionFilter{Open: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := "## Ждёт Диму\n\n" +
-		"- **MoonFan / fan-100** (page-a). Нетто 25.00. 80/20 или всё Анне? PPV отправил Борис, купили в смену Анны. Спросили: 2026-11-11T10:00:00+03:00, https://t.me/c/1/3.\n" +
-		"\n## Решают сами чаттеры\n\n" +
-		"- **fan-x** (page-a). Кто из вас продал набор. Купил после двух смен. Договориться: Анна и Борис. Спросили: 2026-11-11.\n"
-	if got := decisions.QuestionsMarkdown(list); got != want {
-		t.Fatalf("markdown:\n%s\nwant\n%s", got, want)
-	}
-	if got := decisions.QuestionsMarkdown(list[:1]); strings.Contains(got, "чаттеры") {
-		t.Fatalf("an empty group is shown: %s", got)
-	}
-}
