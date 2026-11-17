@@ -538,7 +538,9 @@ type ShiftGap struct {
 // ShiftsWithoutReport lists the shifts of ledger's mirror of Hub's team facts (hub_works, kind shift) whose report date
 // is in [from, to], that ended more than 24 hours before now and whose person resolves, with no report page that accrues
 // (v_report_pages.accrue_micros: the post, or Hub's handed-in report from payroll_basis_hub_from) of that person on that
-// date. One row per shift and model of its pages.
+// date. One row per shift and model of its pages. A shift that lies inside an earlier-started shift of the same user is a
+// piece of that shift, not a shift of its own: the team facts can carry a night shift's part after midnight under its own
+// ref (started at 00:00, ended with the whole shift), and its report is the whole shift's, dated by ReportDate.
 func ShiftsWithoutReport(ctx context.Context, q ledger.Querier, from, to string, now time.Time) ([]ShiftGap, error) {
 	res, err := NewResolver(ctx, q)
 	if err != nil {
@@ -598,7 +600,7 @@ func ShiftsWithoutReport(ctx context.Context, q ledger.Querier, from, to string,
 	seen := map[string]bool{}
 	for _, ref := range refs {
 		w := works[ref]
-		if w.Ongoing || now.Sub(w.EndedAt) < 24*time.Hour {
+		if w.Ongoing || now.Sub(w.EndedAt) < 24*time.Hour || pieceOfAnother(w, ref, works) {
 			continue
 		}
 		date := ReportDate(w.StartedAt, w.EndedAt)
@@ -642,4 +644,15 @@ func ShiftsWithoutReport(ctx context.Context, q ledger.Querier, from, to string,
 		return a.StartedAt.Before(b.StartedAt)
 	})
 	return out, nil
+}
+
+// pieceOfAnother: another shift of the same user started earlier and ended no earlier than w. One person cannot work two
+// shifts at once, so such a w is a piece of the other one.
+func pieceOfAnother(w hub.TeamWork, ref string, works map[string]hub.TeamWork) bool {
+	for r, o := range works {
+		if r != ref && o.UserID == w.UserID && o.StartedAt.Before(w.StartedAt) && !o.EndedAt.Before(w.EndedAt) {
+			return true
+		}
+	}
+	return false
 }
