@@ -79,6 +79,9 @@ type Cover struct {
 	Transfers map[string][]*Transfer
 	Notes     []string
 	Src       Source
+	// Newest is the newest payout request Hub shows on each page, in any status (nil: none in the window read):
+	// how far Hub's request data of the page reaches.
+	Newest map[string]*Request
 }
 
 func sum(xs []float64) float64 { return money.PySum(xs) }
@@ -265,7 +268,14 @@ func BuildCover(c Config, src Source, rows []journal.Row, asOf time.Time) (*Cove
 		return nil, failf("hub_exceptions: страницы не из гранта ключа хаба: %v", stray)
 	}
 	cv := &Cover{Cfg: c, AsOf: asOf, Anchors: map[string]time.Time{}, Ledger: ledger, Rows: map[string][]*Payment{},
-		Transfers: trs, Src: src}
+		Transfers: trs, Src: src, Newest: map[string]*Request{}}
+	seen := func(p string, qs []*Request) {
+		for _, q := range qs {
+			if n := cv.Newest[p]; n == nil || q.T.After(n.T) {
+				cv.Newest[p] = q
+			}
+		}
+	}
 	nextTransfer := func(chain []*Transfer, q *Request) *Transfer {
 		for _, t := range chain {
 			if !q.T.After(t.Cut) {
@@ -304,6 +314,7 @@ func BuildCover(c Config, src Source, rows []journal.Row, asOf time.Time) (*Cove
 				return nil, err
 			}
 			po := requests(ps)
+			seen(p, po)
 			var ok []*Request
 			for _, q := range po {
 				if q.Status == "Processed" && !q.Updated.After(asOf) {
@@ -379,7 +390,9 @@ func BuildCover(c Config, src Source, rows []journal.Row, asOf time.Time) (*Cove
 					return nil, err
 				}
 				var ok []*Request
-				for _, q := range requests(ps) {
+				all := requests(ps)
+				seen(p, all)
+				for _, q := range all {
 					if q.Status == "approved" {
 						ok = append(ok, q)
 					} else if q.T.After(lim) {

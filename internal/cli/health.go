@@ -38,7 +38,7 @@ func health(ctx context.Context, args []string) error {
 			if err != nil {
 				return err
 			}
-			if rs, err = checks.Urgent(ctx, store.RW, latest, time.Now(), 6*time.Hour); err != nil {
+			if rs, err = checks.Urgent(ctx, store.RW, latest, time.Now(), checks.UrgentEvery); err != nil {
 				return err
 			}
 		} else if *now {
