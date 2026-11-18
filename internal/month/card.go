@@ -512,12 +512,39 @@ type Check struct {
 }
 
 // Checks are plan §6: 1, 2, 3, 5, 6 of the script.
-func (c *Card) Checks(tabsErr string) []Check {
+func (c *Card) Checks(tabsErr string) []Check { return c.checks(tabsErr, false) }
+
+// ownMoney is the least of a month's money a transfer carries to be the month's: less cannot move its figure past
+// rounding, whatever the transfer's k.
+const ownMoney = 1.0
+
+// OwnChecks are the same checks over the month's own material: its payments, the transfers dated in it or carrying at
+// least ownMoney of its money (ByMonth, before k), the requests those transfers cover and, without a transfer, the
+// requests dated in it. A check failing on another month's transfer says nothing of this month's figure: the drift of
+// a closed month reads these.
+func (c *Card) OwnChecks() []Check { return c.checks("", true) }
+
+func (c *Card) checks(tabsErr string, own bool) []Check {
 	cv := c.Cover
 	cfg := cv.Cfg
+	ownT := func(t *Transfer) bool {
+		return !own || strings.HasPrefix(t.Date, c.Month) || math.Abs(t.ByMonth[c.Month]) >= ownMoney
+	}
+	ownQ := func(q *Request) bool {
+		if !own {
+			return true
+		}
+		if q.Transfer != nil {
+			return ownT(q.Transfer)
+		}
+		return ts.Month(q.T) == c.Month
+	}
 	var bad []string
 	for _, p := range cv.PageOrder {
 		for _, r := range cv.Rows[p] {
+			if own && ts.Month(r.T) != c.Month {
+				continue
+			}
 			var amts []float64
 			for _, part := range r.Parts {
 				amts = append(amts, part.Amt)
@@ -538,6 +565,9 @@ func (c *Card) Checks(tabsErr string) []Check {
 	byModel := map[string]*cnt{}
 	var modelOrder []string
 	for _, q := range cv.Reqs {
+		if !ownQ(q) {
+			continue
+		}
 		m := cfg.Routes[q.Page].Model
 		if byModel[m] == nil {
 			byModel[m] = &cnt{}
@@ -572,7 +602,7 @@ func (c *Card) Checks(tabsErr string) []Check {
 	var trs []mt
 	for _, m := range sortedTransferModels(cv) {
 		for _, t := range cv.Transfers[m] {
-			if t.HasK {
+			if t.HasK && ownT(t) {
 				trs = append(trs, mt{m, t})
 			}
 		}

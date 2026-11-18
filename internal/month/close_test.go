@@ -78,6 +78,74 @@ func TestCompareAndOverlay(t *testing.T) {
 	}
 }
 
+// A closed month is flagged by its own failed checks only: a transfer of a later month that carries none of its money
+// failing its k says nothing of the month's figure.
+func TestDriftReadsTheMonthsOwnChecks(t *testing.T) {
+	g, rows := loadGolden(t)
+	ctx := context.Background()
+	s, err := db.Open(filepath.Join(t.TempDir(), "l.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cv, err := BuildCover(goldenConfig(g), fakeSource{g}, rows, parseT(g.AsOf))
+	if err != nil {
+		t.Fatal(err)
+	}
+	byN := map[int]*Transfer{}
+	for _, chain := range cv.Transfers {
+		for _, tr := range chain {
+			tr.Bad = nil
+			byN[tr.N] = tr
+		}
+	}
+	card, _ := BuildCard(cv, "2026-09", g.Tabs)
+	snap, _ := json.Marshal(map[string]any{"month": "2026-09", "closed_at": "2026-10-14T19:00:00+03:00", "as_of": "2026-10-14T19:00:00+03:00",
+		"decision": *card.Totals().Decision, "verdict": "проходит", "source": "test"})
+	tx, _ := s.RW.BeginTx(ctx, nil)
+	if _, err := ImportClose(ctx, tx, snap); err != nil {
+		t.Fatal(err)
+	}
+	tx.Commit()
+	drift := func() DriftRow {
+		t.Helper()
+		out, err := Drift(ctx, s.RO, cv, g.Tabs)
+		if err != nil || len(out) != 1 {
+			t.Fatalf("%v %v", out, err)
+		}
+		return out[0]
+	}
+	if err := Accept(ctx, s.RW, []DriftRow{drift()}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if r := drift(); r.Flag {
+		t.Fatalf("an accepted month with clean checks is flagged: %+v", r)
+	}
+	// #34 is dated in October and carries only October money.
+	late := byN[34]
+	if late.Date[:7] != "2026-10" || late.ByMonth["2026-09"] != 0 {
+		t.Fatalf("the golden transfer moved: %+v", late)
+	}
+	late.Bad = []string{"k 1.8000 вне 0.985–1.015"}
+	if r := drift(); r.Flag || len(r.Failed) != 0 {
+		t.Fatalf("a later month's transfer flags September: %+v", r)
+	}
+	if all := card.Checks(""); all[2].OK {
+		t.Fatalf("the card's own checks still see every transfer: %+v", all[2])
+	}
+	late.ByMonth["2026-09"] = 0.5 // cents of September cannot move its figure
+	if r := drift(); r.Flag {
+		t.Fatalf("cents of September make a later transfer September's: %+v", r)
+	}
+	late.ByMonth["2026-09"] = 1.5
+	if r := drift(); !r.Flag || len(r.Failed) != 1 || r.Failed[0] != "проверка 3" {
+		t.Fatalf("a transfer carrying September money flags it: %+v", r)
+	}
+}
+
 func TestDriftFlagsAndAccept(t *testing.T) {
 	g, rows := loadGolden(t)
 	ctx := context.Background()

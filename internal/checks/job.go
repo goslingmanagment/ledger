@@ -13,8 +13,9 @@ import (
 	"github.com/goslingmanagment/ledger/internal/ts"
 )
 
-// urgentEvery repeats a failure that holds.
-const urgentEvery = 6 * time.Hour
+// UrgentEvery repeats an urgent failure that holds: once a day, not every few hours (owner, 2026-11-18). A new urgent
+// check, or one back after passing, goes at once.
+const UrgentEvery = 24 * time.Hour
 
 func envOf(s *server.Server, now time.Time) Env {
 	dir := filepath.Dir(config.LoadServer().DB)
@@ -51,7 +52,7 @@ func init() {
 				server.WriteError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
-			out, err := Urgent(r.Context(), s.Store.RW, rs, time.Now(), urgentEvery)
+			out, err := Urgent(r.Context(), s.Store.RW, rs, time.Now(), UrgentEvery)
 			if err != nil {
 				server.WriteError(w, http.StatusInternalServerError, err.Error())
 				return

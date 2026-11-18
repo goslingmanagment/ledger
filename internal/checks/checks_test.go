@@ -165,7 +165,7 @@ func cover() *month.Cover {
 
 func TestCoverageChecks(t *testing.T) {
 	cv := cover()
-	for name, r := range map[string]Result{"requests": Requests(cv), "k": KNorm(cv), "overdue": Overdue(cv, now), "deposits": Deposits(cv)} {
+	for name, r := range map[string]Result{"requests": Requests(cv), "k": KNorm(cv, now), "overdue": Overdue(cv, now), "deposits": Deposits(cv)} {
 		if !r.OK {
 			t.Errorf("clean %s failed: %+v", name, r)
 		}
@@ -177,7 +177,7 @@ func TestCoverageChecks(t *testing.T) {
 	}
 	bad = cover()
 	bad.Transfers["Alfa"][0].K = 0.9
-	if r := KNorm(bad); r.OK || r.Severity != "urgent" {
+	if r := KNorm(bad, now); r.OK || r.Severity != "urgent" {
 		t.Errorf("k out of norm: %+v", r)
 	}
 	bad = cover()
@@ -286,19 +286,22 @@ func TestPayablesWithoutSheets(t *testing.T) {
 func TestUrgentOnceThenRepeatThenRecover(t *testing.T) {
 	s, ctx := openDB(t)
 	rs := []Result{{Name: "касса", Severity: "urgent", Summary: "не сходится"}, {Name: "мелочь", Severity: "warn", Summary: "x"}, {Name: "ок", OK: true, Severity: "info"}}
-	first, err := Urgent(ctx, s.RW, rs, now, 6*time.Hour)
+	first, err := Urgent(ctx, s.RW, rs, now, UrgentEvery)
 	if err != nil || len(first) != 1 || first[0].Name != "касса" {
 		t.Fatalf("first %v %v", first, err)
 	}
-	second, _ := Urgent(ctx, s.RW, rs, now.Add(time.Hour), 6*time.Hour)
+	second, _ := Urgent(ctx, s.RW, rs, now.Add(time.Hour), UrgentEvery)
 	if len(second) != 0 {
 		t.Fatalf("repeated within the hour: %v", second)
 	}
-	third, _ := Urgent(ctx, s.RW, rs, now.Add(7*time.Hour), 6*time.Hour)
-	if len(third) != 1 {
-		t.Fatalf("not repeated after 7 hours: %v", third)
+	if held, _ := Urgent(ctx, s.RW, rs, now.Add(7*time.Hour), UrgentEvery); len(held) != 0 {
+		t.Fatalf("the same urgent failure repeats once a day, not after 7 hours: %v", held)
 	}
-	if _, err := Urgent(ctx, s.RW, nil, now.Add(8*time.Hour), 6*time.Hour); err != nil {
+	third, _ := Urgent(ctx, s.RW, rs, now.Add(25*time.Hour), UrgentEvery)
+	if len(third) != 1 {
+		t.Fatalf("not repeated after a day: %v", third)
+	}
+	if _, err := Urgent(ctx, s.RW, nil, now.Add(26*time.Hour), UrgentEvery); err != nil {
 		t.Fatal(err)
 	}
 	var n int
@@ -306,7 +309,7 @@ func TestUrgentOnceThenRepeatThenRecover(t *testing.T) {
 	if n != 0 {
 		t.Fatalf("recovered failure stays in alerts: %d", n)
 	}
-	again, _ := Urgent(ctx, s.RW, rs, now.Add(9*time.Hour), 6*time.Hour)
+	again, _ := Urgent(ctx, s.RW, rs, now.Add(27*time.Hour), UrgentEvery)
 	if len(again) != 1 {
 		t.Fatalf("a new failure after recovery is new: %v", again)
 	}

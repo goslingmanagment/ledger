@@ -407,27 +407,92 @@ func Requests(cv *month.Cover) Result {
 	return pass(name, fmt.Sprintf("%d заявок покрыты net ±$1", len(cv.Reqs)))
 }
 
-// KNorm: k of each transfer within the norm.
-func KNorm(cv *month.Cover) Result {
+// kOut says a transfer's k is out of the norm.
+func kOut(cv *month.Cover, t *month.Transfer) bool {
+	return t.HasK && (t.K < cv.Cfg.KLow || t.K > cv.Cfg.KHigh)
+}
+
+// KNorm: k of each transfer within the norm. A transfer that waits for Hub to show the request it pays
+// (month.Cover.Lags, younger than month.HubLagLimit) is not urgent: HubLag says it once. Past the limit it is urgent
+// again. The line of a transfer carries its deposits against the requests Hub shows: the deposits check does not
+// repeat a transfer this one reports.
+func KNorm(cv *month.Cover, now time.Time) Result {
 	const name = "k переводов в норме"
+	lags := cv.Lags()
 	var bad []string
-	n := 0
+	n, waiting := 0, 0
 	for _, chain := range cv.Transfers {
 		for _, t := range chain {
 			if !t.HasK {
 				continue
 			}
 			n++
-			if t.K < cv.Cfg.KLow || t.K > cv.Cfg.KHigh {
-				bad = append(bad, fmt.Sprintf("#%d k %.4f", t.N, t.K))
+			if !kOut(cv, t) {
+				continue
 			}
+			l := lags[t]
+			if l != nil && l.Waits(now) {
+				waiting++
+				continue
+			}
+			line := fmt.Sprintf("#%d k %.4f", t.N, t.K)
+			var about []string
+			if len(t.Deps) > 0 {
+				dep := 0.0
+				for _, d := range t.Deps {
+					dep += d
+				}
+				about = append(about, fmt.Sprintf("депозиты %.2f, по заявкам хаба с учётом маршрута %.2f", dep, cv.Requested(t)))
+			}
+			if l != nil {
+				about = append(about, fmt.Sprintf("заявки %s в хабе нет %d дн. после среза, ждать дольше %d дн. нельзя",
+					strings.Join(l.Channels, "/"), int(now.Sub(t.Cut).Hours()/24), int(month.HubLagLimit.Hours()/24)))
+			}
+			if len(about) > 0 {
+				line += " (" + strings.Join(about, "; ") + ")"
+			}
+			bad = append(bad, line)
 		}
 	}
 	sort.Strings(bad)
 	if len(bad) > 0 {
 		return fail(name, "urgent", strings.Join(bad, "; ")+fmt.Sprintf(" вне %v–%v", cv.Cfg.KLow, cv.Cfg.KHigh), nil)
 	}
+	if waiting > 0 {
+		return pass(name, fmt.Sprintf("k %d переводов в %v–%v; %d ждут заявок хаба", n-waiting, cv.Cfg.KLow, cv.Cfg.KHigh, waiting))
+	}
 	return pass(name, fmt.Sprintf("k %d переводов в %v–%v", n, cv.Cfg.KLow, cv.Cfg.KHigh))
+}
+
+// hubLagCheck is the name of HubLag.
+const hubLagCheck = "переводы ждут заявок хаба"
+
+// HubLag: the transfers whose k is out of the norm only because Hub does not show yet the request they pay
+// (month.Cover.Lags), while they are younger than month.HubLagLimit. A warning, one line a transfer: the k and
+// deposits checks leave such a transfer to this one. Past the limit the transfer leaves this check for KNorm, urgent.
+func HubLag(cv *month.Cover, now time.Time) Result {
+	const name = hubLagCheck
+	var list []*month.Lag
+	for _, l := range cv.Lags() {
+		if l.Waits(now) {
+			list = append(list, l)
+		}
+	}
+	if len(list) == 0 {
+		return pass(name, "переводов, которые ждут заявок хаба, нет")
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].T.N < list[j].T.N })
+	parts := make([]string, 0, len(list))
+	for _, l := range list {
+		model := l.T.Model
+		if n, ok := cv.Cfg.Names[model]; ok && n != "" {
+			model = n
+		}
+		parts = append(parts, fmt.Sprintf("#%d ждёт заявку %s, модель %s: депозиты %.2f, хаб видит заявки на %.2f, на %s к выводу %.2f; станет срочным %s, если заявка не появится",
+			l.T.N, strings.Join(l.Channels, "/"), model, l.Deposits, l.Seen, strings.Join(l.Pages, ", "), l.Net,
+			l.Until.In(ts.MSK).Format("02.01 15:04")))
+	}
+	return fail(name, "warn", strings.Join(parts, " | "), nil)
 }
 
 // Overdue: a request whose transfer has not come for more than 11 days.
@@ -461,7 +526,8 @@ func Overdue(cv *month.Cover, now time.Time) Result {
 }
 
 // Deposits: the deposits in a transfer's tag agree with the requests it covers, by route; the recorded
-// sum follows from them; the credited sum is on Bybit that date.
+// sum follows from them; the credited sum is on Bybit that date. The deposits against the requests of a transfer
+// whose k is out of the norm are KNorm's line (urgent) or HubLag's (it waits for Hub), not a second line here.
 func Deposits(cv *month.Cover) Result {
 	const name = "депозиты сходятся с заявками"
 	covered := map[*month.Transfer]float64{}
@@ -485,7 +551,7 @@ func Deposits(cv *month.Cover) Result {
 				dep += d
 			}
 			want := covered[t]
-			if want > 0 {
+			if want > 0 && !kOut(cv, t) {
 				// On a route paying the agency 100% the deposits are the payout before the route's fee.
 				r := (dep - t.Fee) / want
 				if r < cv.Cfg.KLow || r > cv.Cfg.KHigh {
@@ -597,7 +663,11 @@ func DriftOf(ctx context.Context, q ledger.Querier, cv *month.Cover, tabs []mont
 	var bad []string
 	for _, r := range rows {
 		if r.Flag {
-			bad = append(bad, fmt.Sprintf("%s: сообщено %.2f, сейчас %.2f (Δ %+.2f): %s", r.Month, r.Reported, r.Now, r.Delta, r.Reason))
+			line := fmt.Sprintf("%s: сообщено %.2f, сейчас %.2f (Δ %+.2f): %s", r.Month, r.Reported, r.Now, r.Delta, r.Reason)
+			if len(r.Failed) > 0 {
+				line += "; по своим данным месяца не прошли: " + strings.Join(r.Failed, ", ")
+			}
+			bad = append(bad, line)
 		}
 	}
 	skipped := ""
@@ -1072,13 +1142,13 @@ func Run(ctx context.Context, e Env) []Result {
 		ShiftReports(ctx, e), HubReports(ctx, e), HubDecisions(ctx, e), PayTerms(ctx, e), PendingChanges(ctx, e), WeekColumns(ctx, e)}
 	cv, tabs, _, err := month.PrepareCover(ctx, e.Q, month.Inputs{})
 	if err != nil {
-		for _, n := range []string{"заявки равны покрытому net", "k переводов в норме", "переводы не просрочены", "депозиты сходятся с заявками", "дрейф закрытых месяцев"} {
+		for _, n := range []string{"заявки равны покрытому net", "k переводов в норме", hubLagCheck, "переводы не просрочены", "депозиты сходятся с заявками", "дрейф закрытых месяцев"} {
 			out = append(out, fail(n, "warn", "неизвестно: "+err.Error(), nil))
 		}
 		return out
 	}
 	out = append(out, Rates(ctx, e))
-	return append(out, Requests(cv), KNorm(cv), Overdue(cv, e.Now), Deposits(cv), DriftOf(ctx, e.Q, cv, tabs))
+	return append(out, Requests(cv), KNorm(cv, e.Now), HubLag(cv, e.Now), Overdue(cv, e.Now), Deposits(cv), DriftOf(ctx, e.Q, cv, tabs))
 }
 
 var percentRe = regexp.MustCompile(`(\d+(?:[.,]\d+)?)\s*%`)

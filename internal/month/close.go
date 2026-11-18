@@ -282,7 +282,8 @@ type DriftRow struct {
 }
 
 // Drift compares every closed month now with the figure the owner knows: a signal at |Δ| ≥ $100, a
-// changed side of the verdict or a failed check 1–3.
+// changed side of the verdict or a failed check 1–3 over the month's own material (Card.OwnChecks): a transfer
+// of another month failing its k does not flag this one.
 func Drift(ctx context.Context, q ledger.Querier, cv *Cover, tabs []Tab) ([]DriftRow, error) {
 	rows, err := q.QueryContext(ctx, `SELECT month, snapshot, COALESCE(decision, 0), COALESCE(verdict, '') FROM periods ORDER BY month`)
 	if err != nil {
@@ -330,7 +331,7 @@ func Drift(ctx context.Context, q ledger.Querier, cv *Cover, tabs []Tab) ([]Drif
 		d := money.Round2(money.Round2(dec) - rep)
 		r := DriftRow{Month: c.month, AtClose: atClose, VerdictClose: c.verdict, Reported: rep, VerdictTold: rv, Now: money.Round2(dec), VerdictNow: v, Delta: d,
 			Same: (v == "не проходит") == (rv == "не проходит")}
-		for _, ch := range card.Checks("") {
+		for _, ch := range card.OwnChecks() {
 			if !ch.OK && ch.N <= 3 {
 				r.Failed = append(r.Failed, fmt.Sprintf("проверка %d", ch.N))
 			}

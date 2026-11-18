@@ -48,6 +48,7 @@ var Keys = map[string]string{
 	payTermsCheck:      "pay_terms",
 	checksRunning:      "checks_running",
 	secondReportsCheck: "second_reports",
+	hubLagCheck:        "transfers_waiting",
 }
 
 // KeyOf is the key of a check; a name without one keys as itself.
