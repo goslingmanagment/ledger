@@ -78,7 +78,7 @@ func printPayouts(out *bufio.Writer, ans payroll.PayoutsAnswer, detail bool) {
 		if p.OldestUnpaidDate != nil {
 			oldest = *p.OldestUnpaidDate
 		}
-		rows = append(rows, []string{p.Name + " (" + p.Slug + ")", fmt.Sprint(len(p.Days)), usd(p.AccruedMicros), usd(p.PaidMicros),
+		rows = append(rows, []string{nameWithSlug(p.Name, p.Slug), fmt.Sprint(len(p.Days)), usd(p.AccruedMicros), usd(p.PaidMicros),
 			usd(p.BalanceMicros), toPay, oldest})
 	}
 	writeTable(out, []string{"человек", "дней", "начислено", "выплачено", "долг сейчас", "к выплате", "старый день"}, rows,
@@ -182,13 +182,13 @@ func printBrief(out *bufio.Writer, b payroll.PayoutBrief) {
 		toPay = usd(*b.ToPayMicros)
 	}
 	if b.Nothing != "" {
-		fmt.Fprintf(out, "%s (%s): %s; «К выплате» вкладок %s\n", b.Name, b.Slug, b.Nothing, toPay)
+		fmt.Fprintf(out, "%s: %s; «К выплате» вкладок %s\n", nameWithSlug(b.Name, b.Slug), b.Nothing, toPay)
 	} else {
 		period := "—"
 		if b.Period != nil {
 			period = b.Period.From + " — " + b.Period.To
 		}
-		fmt.Fprintf(out, "%s (%s): к выплате %s, «К выплате» вкладок %s, период %s\n", b.Name, b.Slug, usd(b.AmountMicros), toPay, period)
+		fmt.Fprintf(out, "%s: к выплате %s, «К выплате» вкладок %s, период %s\n", nameWithSlug(b.Name, b.Slug), usd(b.AmountMicros), toPay, period)
 		if b.Suggestion != nil {
 			fmt.Fprintf(out, "ориентир перевода %s (%s)\n", usd(b.Suggestion.TransferMicros), b.Suggestion.Note)
 		}

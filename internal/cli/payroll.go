@@ -415,7 +415,7 @@ func payrollOpen(ctx context.Context, args []string) error {
 		if o.Skip != "" {
 			note = o.Skip
 		}
-		rows = append(rows, []string{o.Name + " (" + o.Person + ")", fmt.Sprintf("%.2f", o.KV), amount(o.Accrued), amount(o.Paid), amount(o.Amount), state, note})
+		rows = append(rows, []string{nameWithSlug(o.Name, o.Person), fmt.Sprintf("%.2f", o.KV), amount(o.Accrued), amount(o.Paid), amount(o.Amount), state, note})
 		if o.Skip == "" {
 			total += o.Amount
 		}
@@ -551,7 +551,7 @@ func printPayables(out *bufio.Writer, ans payroll.Answer) {
 		if fetched == "" {
 			fetched = "—"
 		}
-		rows = append(rows, []string{p.Name + " (" + p.Person + ")", fmt.Sprintf("%.2f", p.Balance), dash(p.ToPay), dash(p.Difference), oldest, blank, tabs, fetched})
+		rows = append(rows, []string{nameWithSlug(p.Name, p.Person), fmt.Sprintf("%.2f", p.Balance), dash(p.ToPay), dash(p.Difference), oldest, blank, tabs, fetched})
 	}
 	writeTable(out, []string{"человек", "долг", "к выплате", "разница", "старый день", "не занесено", "вкладки", "прочитаны"}, rows,
 		[]bool{false, true, true, true, false, false, false, false})

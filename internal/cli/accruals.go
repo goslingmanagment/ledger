@@ -206,7 +206,7 @@ func printDiff(out *bufio.Writer, d accruals.Diff) {
 		if n := p.ReportsUnpricedMicros + orZero(p.UnpricedMicros); n != 0 {
 			unpriced = usd(n)
 		}
-		rows = append(rows, []string{p.Name + " (" + p.Person + ")", usd(p.SheetMicros), usd(p.ReportsMicros), orUnknown(p.FactsMicros, usd),
+		rows = append(rows, []string{nameWithSlug(p.Name, p.Person), usd(p.SheetMicros), usd(p.ReportsMicros), orUnknown(p.FactsMicros, usd),
 			signed(p.SheetReportsCountedMicros), orUnknown(p.ReportsFactsDiffMicros, signed), orUnknown(p.DiffMicros, signed), unpriced})
 	}
 	if len(rows) > 0 {
@@ -223,7 +223,7 @@ func printDiff(out *bufio.Writer, d accruals.Diff) {
 		if len(p.Notes) == 0 && len(p.Sales) == 0 && len(p.Claimed) == 0 && !reportsDiffer(p) {
 			continue
 		}
-		fmt.Fprintf(out, "\n%s (%s): таблица %s, отчёты %s, факты %s; отчёты − таблица %s, факты − таблица %s\n", p.Name, p.Person,
+		fmt.Fprintf(out, "\n%s: таблица %s, отчёты %s, факты %s; отчёты − таблица %s, факты − таблица %s\n", nameWithSlug(p.Name, p.Person),
 			usd(p.SheetMicros), usd(p.ReportsMicros), orUnknown(p.FactsMicros, usd), signed(p.SheetReportsCountedMicros), orUnknown(p.DiffMicros, signed))
 		for _, n := range p.Notes {
 			fmt.Fprintf(out, "  ! %s\n", n)
@@ -280,7 +280,7 @@ func printDiff(out *bufio.Writer, d accruals.Diff) {
 			for _, pg := range x.Pages {
 				pages = append(pages, fmt.Sprintf("%s: пост %s, хаб %s — %s", pg.Page, orDash(pg.PostMicros), orDash(pg.HubMicros), hubStates[pg.State]))
 			}
-			rows = append(rows, []string{x.Day, x.Name + " (" + x.Person + ")", orDash(x.PostMicros), orDash(x.HubMicros), basis,
+			rows = append(rows, []string{x.Day, nameWithSlug(x.Name, x.Person), orDash(x.PostMicros), orDash(x.HubMicros), basis,
 				strings.Join(pages, "; ")})
 		}
 		writeTable(indent{out}, []string{"день", "человек", "пост", "хаб", "основа", "страницы"}, rows,
@@ -294,7 +294,7 @@ func printDiff(out *bufio.Writer, d accruals.Diff) {
 			if x.Basis == "hub" {
 				basis = "реестр"
 			}
-			rows = append(rows, []string{x.Day, x.Name + " (" + x.Person + ")", x.Model, usd(x.NetMicros), orDash(x.TabAmountMicros),
+			rows = append(rows, []string{x.Day, nameWithSlug(x.Name, x.Person), x.Model, usd(x.NetMicros), orDash(x.TabAmountMicros),
 				orDash(x.HubAmountMicros), basis, strings.Join(x.Differences, ", ")})
 		}
 		writeTable(indent{out}, []string{"день", "человек", "модель", "выручка", "по вкладке", "по реестру", "основа", "что"}, rows,
