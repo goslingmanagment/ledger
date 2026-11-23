@@ -190,7 +190,9 @@ func TestPrepareOpeningAndUnentered(t *testing.T) {
 	}
 }
 
-// Quarter cents in two weeks: the pays add up to the micro, the shown lines to the shown total.
+// Quarter cents in two weeks: each week rounds honestly to its own cents, and the rounding line carries the
+// positive remainder so the shown lines add up to the shown total without altering week formulas, FIFO, blocks
+// or the message period.
 func TestPrepareLinesAddUpToTheCent(t *testing.T) {
 	s, ctx := openStore(t)
 	f := newSheets("Alpha")
@@ -199,18 +201,131 @@ func TestPrepareLinesAddUpToTheCent(t *testing.T) {
 		week("2026-09-14", map[string][7]any{"page-1": {67.89, nil, nil, nil, nil, nil, nil}}))})
 	f.run(t, s, ctx, "2026-09-21T10:00:00+03:00")
 	b := prepare(t, s, "alfa", "2026-09-21T10:30:00+03:00")
-	if b.AmountMicros != balanceOf(t, s, "alfa") || b.AmountMicros != m("47.835") || len(b.Lines) != 2 {
+	if b.AmountMicros != balanceOf(t, s, "alfa") || b.AmountMicros != m("47.835") || len(b.Lines) != 3 {
 		t.Fatalf("amount %d, lines %+v", b.AmountMicros, b.Lines)
 	}
 	addsUp(t, b)
-	if b.Lines[0].PayMicros != m("30.8625") || b.Lines[1].PayMicros != m("16.9725") {
-		t.Fatalf("pays %+v", b.Lines)
+	if b.Lines[0].PayMicros != m("30.8625") || b.Lines[0].ShownMicros != m("30.86") || b.Lines[0].ExtraMicros != 0 ||
+		b.Lines[0].Text != "07.09: 123.45 × 25% = 30.86" {
+		t.Fatalf("line 0: %+v", b.Lines[0])
 	}
-	if !strings.Contains(b.Message, "итого 47.84 → {перевод}") {
-		t.Fatalf("message\n%s", b.Message)
+	if b.Lines[1].PayMicros != m("16.9725") || b.Lines[1].ShownMicros != m("16.97") || b.Lines[1].ExtraMicros != 0 ||
+		b.Lines[1].Text != "14.09: 67.89 × 25% = 16.97" {
+		t.Fatalf("line 1: %+v", b.Lines[1])
+	}
+	wantRound := PrepareLine{Kind: LineRounding, PayMicros: 0, ShownMicros: m("0.01"), Text: "округление долей цента: +0.01"}
+	if !reflect.DeepEqual(b.Lines[2], wantRound) {
+		t.Fatalf("rounding line\n got %+v\nwant %+v", b.Lines[2], wantRound)
+	}
+	if b.Period == nil || *b.Period != (PreparePeriod{From: "2026-09-07", To: "2026-09-14"}) {
+		t.Fatalf("period %+v", b.Period)
+	}
+	wantBlocks := []PrepareBlock{
+		{Model: "Alpha", Tab: "Альфа", Week: "2026-09-07", From: "2026-09-07", To: "2026-09-07", WeekOver: true},
+		{Model: "Alpha", Tab: "Альфа", Week: "2026-09-14", From: "2026-09-14", To: "2026-09-14", WeekOver: true},
+	}
+	if !reflect.DeepEqual(b.Blocks, wantBlocks) {
+		t.Fatalf("blocks %+v", b.Blocks)
+	}
+	wantMsg := "закинул зп, {перевод} usdt\nпериод 07–14.09\n\nalpha\n07.09: 123.45 × 25% = 30.86\n14.09: 67.89 × 25% = 16.97\n" +
+		"округление долей цента: +0.01\nитого 47.84 → {перевод}\n\nчекни что дошло"
+	if b.Message != wantMsg {
+		t.Fatalf("message\n%s\nwant\n%s", b.Message, wantMsg)
 	}
 	if b.Suggestion == nil || b.Suggestion.TransferMicros != m("48") || b.Suggestion.AboveTableMicros != m("0.165") {
 		t.Fatalf("suggestion %+v", b.Suggestion)
+	}
+	var fifoRows int
+	if err := s.RO.QueryRowContext(ctx, `SELECT count(*) FROM payable_days WHERE person = 'alfa' AND unpaid > 0`).Scan(&fifoRows); err != nil {
+		t.Fatal(err)
+	}
+	if fifoRows != 2 {
+		t.Fatalf("payable_days rows %d, want 2", fifoRows)
+	}
+}
+
+// Three weeks each rounding up by a quarter cent: their shown sum exceeds the rounded total by a cent,
+// so the rounding line is negative (-0.01) while each week keeps its exact formula.
+func TestPrepareNegativeRoundingRemainder(t *testing.T) {
+	s, ctx := openStore(t)
+	f := newSheets("Alpha")
+	f.set("Alpha", []string{"Альфа"}, map[string][][]Cell{"Альфа": sheet(17.5225, 0,
+		week("2026-09-07", map[string][7]any{"page-1": {40.03, nil, nil, nil, nil, nil, nil}}),
+		week("2026-09-14", map[string][7]any{"page-1": {20.03, nil, nil, nil, nil, nil, nil}}),
+		week("2026-09-21", map[string][7]any{"page-1": {10.03, nil, nil, nil, nil, nil, nil}}))})
+	f.run(t, s, ctx, "2026-09-28T10:00:00+03:00")
+	b := prepare(t, s, "alfa", "2026-09-28T10:30:00+03:00")
+	if b.AmountMicros != balanceOf(t, s, "alfa") || b.AmountMicros != m("17.5225") || len(b.Lines) != 4 {
+		t.Fatalf("amount %d, lines %+v", b.AmountMicros, b.Lines)
+	}
+	addsUp(t, b)
+	if b.Lines[0].ShownMicros != m("10.01") || b.Lines[1].ShownMicros != m("5.01") || b.Lines[2].ShownMicros != m("2.51") {
+		t.Fatalf("week showns %+v", b.Lines[:3])
+	}
+	wantRound := PrepareLine{Kind: LineRounding, PayMicros: 0, ShownMicros: m("-0.01"), Text: "округление долей цента: -0.01"}
+	if !reflect.DeepEqual(b.Lines[3], wantRound) {
+		t.Fatalf("rounding line\n got %+v\nwant %+v", b.Lines[3], wantRound)
+	}
+	if len(b.Blocks) != 3 {
+		t.Fatalf("blocks %+v", b.Blocks)
+	}
+	wantMsg := "закинул зп, {перевод} usdt\nпериод 07–21.09\n\nalpha\n07.09: 40.03 × 25% = 10.01\n14.09: 20.03 × 25% = 5.01\n" +
+		"21.09: 10.03 × 25% = 2.51\nокругление долей цента: -0.01\nитого 17.52 → {перевод}\n\nчекни что дошло"
+	if b.Message != wantMsg {
+		t.Fatalf("message\n%s\nwant\n%s", b.Message, wantMsg)
+	}
+}
+
+// Fractional cents that cancel out across weeks: shown lines already equal the rounded total, so no rounding line appears.
+func TestPrepareNoRoundingLineWhenLinesMatchTotal(t *testing.T) {
+	s, ctx := openStore(t)
+	f := newSheets("Alpha")
+	f.set("Alpha", []string{"Альфа"}, map[string][][]Cell{"Альфа": sheet(5.01, 0,
+		week("2026-09-07", map[string][7]any{"page-1": {10.01, nil, nil, nil, nil, nil, nil}}),   // 2.5025 -> 2.50
+		week("2026-09-14", map[string][7]any{"page-1": {10.03, nil, nil, nil, nil, nil, nil}}))}) // 2.5075 -> 2.51
+	f.run(t, s, ctx, "2026-09-21T10:00:00+03:00")
+	b := prepare(t, s, "alfa", "2026-09-21T10:30:00+03:00")
+	if b.AmountMicros != m("5.01") || len(b.Lines) != 2 {
+		t.Fatalf("amount %d, lines %+v", b.AmountMicros, b.Lines)
+	}
+	for _, l := range b.Lines {
+		if l.Kind == LineRounding {
+			t.Fatalf("unexpected rounding line: %+v", l)
+		}
+	}
+	addsUp(t, b)
+	if strings.Contains(b.Message, "округление") || !strings.Contains(b.Message, "период 07–14.09\n") {
+		t.Fatalf("message:\n%s", b.Message)
+	}
+}
+
+// prepareMessage keeps the period intact when a rounding line has empty From/To, and prepareBlocks ignores rounding lines.
+func TestPrepareMessageAndBlocksIgnoreRoundingLine(t *testing.T) {
+	lines := []PrepareLine{
+		{Kind: LineWeek, Model: "Alpha", Tab: "Альфа", Week: "2026-09-07", From: "2026-09-07", To: "2026-09-08",
+			PayMicros: m("30.8625"), ShownMicros: m("30.86"), Text: "07–08.09: 123.45 × 25% = 30.86"},
+		{Kind: LineWeek, Model: "Beta", Tab: "Альфа", Week: "2026-09-14", From: "2026-09-14", To: "2026-09-14",
+			PayMicros: m("16.9725"), ShownMicros: m("16.97"), Text: "14.09: 67.89 × 25% = 16.97"},
+		{Kind: LineRounding, PayMicros: 0, ShownMicros: m("0.01"), Text: "округление долей цента: +0.01"},
+	}
+	msg := prepareMessage(lines, m("47.835"))
+	wantMsg := "закинул зп, {перевод} usdt\nпериод 07–14.09\n\nalpha\n07–08.09: 123.45 × 25% = 30.86\n\nbeta\n14.09: 67.89 × 25% = 16.97\n\n" +
+		"округление долей цента: +0.01\nитого 47.84 → {перевод}\n\nчекни что дошло"
+	if msg != wantMsg {
+		t.Fatalf("message\n%s\nwant\n%s", msg, wantMsg)
+	}
+
+	// Even if a rounding line carries a Week value, prepareBlocks must ignore it.
+	withWeek := append(append([]PrepareLine{}, lines[:2]...), PrepareLine{
+		Kind: LineRounding, Model: "Alpha", Tab: "Альфа", Week: "2026-09-21", From: "2026-09-21", To: "2026-09-21",
+		ShownMicros: m("0.01"), Text: "округление долей цента: +0.01",
+	})
+	wantBlocks := []PrepareBlock{
+		{Model: "Alpha", Tab: "Альфа", Week: "2026-09-07", From: "2026-09-07", To: "2026-09-08", WeekOver: true},
+		{Model: "Beta", Tab: "Альфа", Week: "2026-09-14", From: "2026-09-14", To: "2026-09-14", WeekOver: true},
+	}
+	if got := prepareBlocks(withWeek, "2026-09-28"); !reflect.DeepEqual(got, wantBlocks) {
+		t.Fatalf("blocks\n got %+v\nwant %+v", got, wantBlocks)
 	}
 }
 

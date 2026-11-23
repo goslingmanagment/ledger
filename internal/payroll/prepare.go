@@ -61,6 +61,9 @@ const (
 	LineOpening   = "opening"   // the frozen debt from before accrualFrom
 	LineOther     = "other"     // a manual posting on the debt
 	LineUnsplit   = "unsplit"   // the part of the debt the days do not explain (payable_days behind the books)
+	// LineRounding pays nothing: it shows what the lines' own cents leave of the total in cents, so the shown
+	// lines add up to it. It is no day, no week block and no part of the FIFO.
+	LineRounding = "rounding"
 )
 
 // PrepareDay is one unpaid day of a line.
@@ -77,7 +80,7 @@ type PrepareDay struct {
 	Pots []PayoutPot `json:"pots,omitempty"`
 }
 
-// PrepareLine is one line of the brief and of the message. The lines add up to amountMicros.
+// PrepareLine is one line of the brief and of the message. The lines' pays add up to amountMicros.
 type PrepareLine struct {
 	Kind       string       `json:"kind"`
 	Model      string       `json:"model,omitempty"`
@@ -93,7 +96,8 @@ type PrepareLine struct {
 	// or the sheet's own rounding.
 	ExtraMicros int64 `json:"extraMicros,omitempty"`
 	PayMicros   int64 `json:"payMicros"`
-	// ShownMicros is the pay as the message prints it, in whole cents; the shown lines add up to the shown total.
+	// ShownMicros is the line's own pay rounded to whole cents, as the message prints it. Where these cents miss the
+	// total in cents, the rounding line at the end shows the difference: the shown lines add up to the shown total.
 	ShownMicros int64  `json:"shownMicros"`
 	Text        string `json:"text"`
 }
@@ -515,7 +519,8 @@ func prepareMemos(ctx context.Context, q ledger.Querier, slug string) ([]*memo, 
 
 // prepareLines turns the unpaid days into lines: per tab, the fully unpaid days of each week block as one
 // line, a partly paid day as its own remainder; then the opening, manual postings and what the days do not
-// explain. The pays add up to amount; the shown cents add up to the shown amount.
+// explain. The pays add up to amount. Each line shows its own pay in cents, so a formula agrees with a
+// calculator; when these cents miss the amount in cents, a rounding line at the end shows by how much.
 func prepareLines(unpaid []prepUnpaid, cells map[string]prepCells, tabs map[string]*prepTab, amount int64, accrualFrom string,
 	memos []*memo, f *flagger) []PrepareLine {
 	byTab := map[string][]*PrepareLine{}
@@ -606,14 +611,11 @@ func prepareLines(unpaid []prepUnpaid, cells map[string]prepCells, tabs map[stri
 	})
 	lines = append(lines, tail...)
 
-	pays := make([]int64, len(lines))
-	for i, l := range lines {
-		pays[i] = l.PayMicros
-	}
-	shown := splitCents(pays, amount)
-	out := make([]PrepareLine, len(lines))
-	for i, l := range lines {
-		l.ShownMicros = shown[i]
+	var shown int64
+	out := make([]PrepareLine, 0, len(lines)+1)
+	for _, l := range lines {
+		l.ShownMicros = int64(money.RoundCents(money.Micros(l.PayMicros)))
+		shown += l.ShownMicros
 		switch l.Kind {
 		case LineWeek:
 			weekText(l, tabs[tabKey(l.Model, l.Tab)], f)
@@ -632,7 +634,10 @@ func prepareLines(unpaid []prepUnpaid, cells map[string]prepCells, tabs map[stri
 		case LineUnsplit:
 			l.Text = fmt.Sprintf("прочее: %s — {за что}", signedAmt(l.ShownMicros))
 		}
-		out[i] = *l
+		out = append(out, *l)
+	}
+	if d := int64(money.RoundCents(money.Micros(amount))) - shown; d != 0 {
+		out = append(out, PrepareLine{Kind: LineRounding, ShownMicros: d, Text: "округление долей цента: " + signedAmt(d)})
 	}
 	return out
 }
@@ -679,8 +684,7 @@ func weekText(l *PrepareLine, tab *prepTab, f *flagger) {
 	}
 	pct := int64(money.RoundCents(money.FromFloat(float64(base) / money.Scale * *l.Rate)))
 	rate := strconv.FormatFloat(money.RoundN(*l.Rate*100, 6), 'f', -1, 64) + "%"
-	// Against the line's own cents: a cent splitCents moved to make the total is no difference of the sheet.
-	l.ExtraMicros = int64(money.RoundCents(money.Micros(l.PayMicros))) - pct
+	l.ExtraMicros = l.ShownMicros - pct
 	switch {
 	case l.ExtraMicros == 0:
 		l.Text = fmt.Sprintf("%s: %s × %s = %s", when, sum, rate, amt(l.ShownMicros))
@@ -697,43 +701,12 @@ func weekText(l *PrepareLine, tab *prepTab, f *flagger) {
 	}
 }
 
-// splitCents rounds each pay to cents so that the rounded pays add up to the rounded amount: the cents
-// left over go to the lines rounded the farthest the other way.
-func splitCents(pays []int64, amount int64) []int64 {
-	out := make([]int64, len(pays))
-	var sum int64
-	for i, p := range pays {
-		out[i] = int64(money.RoundCents(money.Micros(p)))
-		sum += out[i]
-	}
-	target := int64(money.RoundCents(money.Micros(amount)))
-	for len(pays) > 0 && sum != target {
-		step := int64(10_000)
-		if sum > target {
-			step = -step
-		}
-		best, bestGap := 0, int64(0)
-		for i, p := range pays {
-			gap := p - out[i]
-			if step < 0 {
-				gap = -gap
-			}
-			if i == 0 || gap > bestGap {
-				best, bestGap = i, gap
-			}
-		}
-		out[best] += step
-		sum += step
-	}
-	return out
-}
-
 // prepareBlocks lists the week blocks the lines pay to the end.
 func prepareBlocks(lines []PrepareLine, today string) []PrepareBlock {
 	byKey := map[string]*PrepareBlock{}
 	var keys []string
 	for _, l := range lines {
-		if l.Week == "" {
+		if l.Kind == LineRounding || l.Week == "" {
 			continue
 		}
 		k := tabKey(l.Model, l.Tab) + ":" + l.Week
@@ -766,7 +739,7 @@ func prepareMessage(lines []PrepareLine, amount int64) string {
 		switch l.Kind {
 		case LineOpening:
 			opening = l.To
-		case LineUnsplit:
+		case LineUnsplit, LineRounding: // no days
 		default:
 			if from == "" || l.From < from {
 				from = l.From
