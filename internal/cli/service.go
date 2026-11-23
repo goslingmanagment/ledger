@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -174,8 +175,10 @@ func probe(ctx context.Context, args []string) error {
 	return nil
 }
 
-func printJSON(v any) error {
-	enc := json.NewEncoder(os.Stdout)
+func printJSON(v any) error { return writeJSON(os.Stdout, v) }
+
+func writeJSON(w io.Writer, v any) error {
+	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
 	enc.SetIndent("", " ")
 	return enc.Encode(v)
