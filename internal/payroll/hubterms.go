@@ -492,3 +492,42 @@ func onBoard(spans []BoardSpan, person, day string) bool {
 	}
 	return false
 }
+
+// HubBasisDays says whether a person's day (from the day `from` on) accrues from Hub's handed-in report and not from the
+// post: the rule of v_report_pages.basis hub — from settings.payroll_basis_hub_from, a day the person has a counted Hub
+// report for or hands in on the board «Отчёт» (v_board_spans). On such a day a post accrues nothing. The view has a row
+// only where a usable post, a draft or a Hub report names a page; a board day with nothing but an unusable post is
+// the board's all the same, so the board's days are read from v_board_spans too.
+func HubBasisDays(ctx context.Context, q ledger.Querier, from string) (func(person, day string) bool, error) {
+	hubFrom, err := HubFrom(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	if hubFrom == "" {
+		return func(string, string) bool { return false }, nil
+	}
+	days := map[string]bool{}
+	rows, err := q.QueryContext(ctx, `SELECT DISTINCT person, report_date FROM v_report_pages WHERE basis = 'hub' AND report_date >= ?`, from)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var person, date string
+		if err := rows.Scan(&person, &date); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		days[person+"\x00"+date] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	spans, err := BoardSpans(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	return func(person, day string) bool {
+		return day >= hubFrom && (days[person+"\x00"+day] || onBoard(spans, person, day))
+	}, nil
+}

@@ -711,3 +711,127 @@ func TestSecondReports(t *testing.T) {
 		t.Fatalf("the message edited to one report: %+v", r)
 	}
 }
+
+// reportPost sends a message of «Отчётности» through the real parser; reportText is one report of a person, a date and
+// one page.
+func reportPost(t *testing.T, s *db.Store, ctx context.Context, sender string, msg int64, at, text string) {
+	t.Helper()
+	const peer = "-1001000000001"
+	e := reports.PostEvent{Peer: peer, Topic: 4, MsgID: msg, Date: at, Sender: "tg user", SenderID: sender, Text: text}
+	payload, _ := json.Marshal(e)
+	ans, err := events.Accept(ctx, s, []events.Event{{Source: reports.PostSource, SourceID: reports.PostSourceID(peer, 4, msg, text),
+		Kind: "post", OccurredAt: at, Payload: payload}}, now)
+	if err != nil || len(ans.Settle) > 0 {
+		t.Fatalf("accept: %v %v", err, ans.Settle)
+	}
+}
+
+func reportText(tag, date, page, sum, total string) string {
+	return "🗓 Дата: " + date + "\n👤 Чаттер: #" + tag + "\n\n📌 Аккаунты:\n• " + page + " - " + sum + "\n\n💰Общий доход: " + total +
+		"\n\n📝 Комментарий:\n-"
+}
+
+func setting(t *testing.T, s *db.Store, key, value string) {
+	t.Helper()
+	exec(t, s, `INSERT INTO settings(key, value, note, updated_at) VALUES (?, ?, '', ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value, ts.Format(now))
+}
+
+func reportSettings(t *testing.T, s *db.Store) {
+	t.Helper()
+	setting(t, s, "report_topics", `[{"peer": "-1001000000001", "topic": 4, "model": "m", "pages": {"page-1": "page-a", "page-2": "page-b"}}]`)
+	setting(t, s, "report_authors", `{"tg:501": "anna", "tg:502": "boris", "tg:503": "vera"}`)
+}
+
+// From payroll_basis_hub_from a day of a person on the board «Отчёт», or one with a counted Hub report, accrues from Hub's
+// report: its posts accrue nothing, and neither post check goes red on them (the bug: two such posts kept «отчёты
+// разобраны» red). A post without a person is asked about all the same.
+func TestPostChecksSkipDaysPaidByHub(t *testing.T) {
+	s, ctx := openDB(t)
+	now := at("2026-11-10T12:00:00+03:00")
+	reportSettings(t, s)
+	setting(t, s, "payroll_reports_from", "2026-11-01")
+	// boris, 08.11: a total that does not add up — only the board says the day is Hub's (no row of the pay base).
+	reportPost(t, s, ctx, "502", 30, "2026-11-08T20:00:00+03:00", reportText("boris", "08.11.2026", "Page-1", "$40,00", "$50,00"))
+	// boris, 09.11: two reports in one message, a board day with a Hub report.
+	reportPost(t, s, ctx, "502", 31, "2026-11-09T20:00:00+03:00",
+		reportText("boris", "09.11.2026", "Page-1", "$40,00", "$40,00")+"\n\n"+reportText("boris", "09.11.2026", "Page-2", "$80,00", "$80,00"))
+	// vera, 09.11: not on the board, but with a counted Hub report of the day.
+	reportPost(t, s, ctx, "503", 40, "2026-11-09T21:00:00+03:00", reportText("vera", "09.11.2026", "Page-2", "$10,00", "$20,00"))
+	e := Env{Q: s.RO, Now: now}
+	r := ReportPosts(ctx, e)
+	if r.OK || !strings.Contains(r.Summary, "boris, 2026-11-08") || !strings.Contains(r.Summary, "vera, 2026-11-09") {
+		t.Fatalf("days of the posts: %+v", r)
+	}
+	if r := SecondReports(ctx, e); r.OK || !strings.Contains(r.Summary, "boris, 2026-11-09") {
+		t.Fatalf("days of the posts: %+v", r)
+	}
+
+	setting(t, s, "payroll_basis_hub_from", "2026-11-05")
+	exec(t, s, `INSERT INTO hub_person_rights(hub_person_id, person, right_name, granted_at, granted_day, stored_at)
+		VALUES (2, 'boris', 'submits_shift', '2026-11-07T09:00:00Z', '2026-11-07', ?)`, ts.Format(now))
+	for i, who := range []string{"boris", "vera"} {
+		id := 100 + i
+		exec(t, s, `INSERT INTO hub_shift_reports(id, shift_id, version, person, report_date, submitted_at, total_micros, current, payload, received_at, stored_at)
+			VALUES (?, ?, 1, ?, '2026-11-09', '2026-11-09T22:00:00+03:00', 10000000, 1, '{}', ?, ?)`, id, id, who, ts.Format(now), ts.Format(now))
+		exec(t, s, `INSERT INTO hub_shift_report_pages(report_id, seq, page_label, amount_micros) VALUES (?, 1, 'page-b', 10000000)`, id)
+	}
+	if r := ReportPosts(ctx, e); !r.OK {
+		t.Fatalf("days paid by Hub's report: %+v", r)
+	}
+	if r := SecondReports(ctx, e); !r.OK {
+		t.Fatalf("days paid by Hub's report: %+v", r)
+	}
+
+	reportPost(t, s, ctx, "999", 50, "2026-11-09T22:00:00+03:00", reportText("nobody", "09.11.2026", "Page-1", "$40,00", "$40,00"))
+	if r := ReportPosts(ctx, e); r.OK || !strings.Contains(r.Summary, "#nobody, 2026-11-09") || strings.Contains(r.Summary, "boris") {
+		t.Fatalf("a post without a person: %+v", r)
+	}
+}
+
+// L-003: two posts of one person with one report date and a common page, sent on different Moscow days (one dated a day
+// early by mistake), let the later one replace the page of the day. A warning with both messages on a day the post pays
+// for; an edit of a message and a post re-sent the same day are not such a pair.
+func TestReportPostsCrossDayDuplicate(t *testing.T) {
+	s, ctx := openDB(t)
+	now := at("2026-11-10T12:00:00+03:00")
+	reportSettings(t, s)
+	e := Env{Q: s.RO, Now: now}
+	reportPost(t, s, ctx, "501", 10, "2026-11-07T20:00:00+03:00", reportText("anna", "07.11.2026", "Page-1", "$40,00", "$40,00"))
+	// The next day's report, dated the day before.
+	reportPost(t, s, ctx, "501", 11, "2026-11-08T20:00:00+03:00", reportText("anna", "07.11.2026", "Page-1", "$50,00", "$50,00"))
+	// The sheets still pay: information.
+	if r := ReportPosts(ctx, e); !r.OK || !strings.Contains(r.Summary, "в тени") || !strings.Contains(r.Summary, "один день отчёта в постах разных дней (1)") {
+		t.Fatalf("shadow: %+v", r)
+	}
+	setting(t, s, "payroll_reports_from", "2026-11-01")
+	r := ReportPosts(ctx, e)
+	if r.OK || r.Severity != "warn" || !strings.Contains(r.Summary, "anna, 2026-11-07: page-a в постах от 2026-11-07 и 2026-11-08") ||
+		!strings.Contains(r.Summary, "https://t.me/c/1000000001/4/10") || !strings.Contains(r.Summary, "https://t.me/c/1000000001/4/11") {
+		t.Fatalf("cross-day duplicate: %+v", r)
+	}
+
+	// On a day of the board with Hub's report on, the post pays nothing: no warning.
+	setting(t, s, "payroll_basis_hub_from", "2026-11-01")
+	exec(t, s, `INSERT INTO hub_person_rights(hub_person_id, person, right_name, granted_at, granted_day, stored_at)
+		VALUES (1, 'anna', 'submits_shift', '2026-11-02T09:00:00Z', '2026-11-02', ?)`, ts.Format(now))
+	if r := ReportPosts(ctx, e); !r.OK {
+		t.Fatalf("a board day: %+v", r)
+	}
+	exec(t, s, `DELETE FROM hub_person_rights`)
+	if r := ReportPosts(ctx, e); r.OK {
+		t.Fatalf("a post day again: %+v", r)
+	}
+
+	// The message edited to its true date: one message, one current version — no pair, and 08.11 is another day.
+	reportPost(t, s, ctx, "501", 11, "2026-11-08T20:00:00+03:00", reportText("anna", "08.11.2026", "Page-1", "$50,00", "$50,00"))
+	if r := ReportPosts(ctx, e); !r.OK {
+		t.Fatalf("the message edited: %+v", r)
+	}
+	// An edit that keeps the date, and the same report re-sent the same day: not a cross-day pair.
+	reportPost(t, s, ctx, "501", 10, "2026-11-07T20:00:00+03:00", reportText("anna", "07.11.2026", "Page-1", "$45,00", "$45,00"))
+	reportPost(t, s, ctx, "501", 12, "2026-11-08T21:00:00+03:00", reportText("anna", "08.11.2026", "Page-1", "$55,00", "$55,00"))
+	if r := ReportPosts(ctx, e); !r.OK {
+		t.Fatalf("an edit and a same-day re-send: %+v", r)
+	}
+}

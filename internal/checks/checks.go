@@ -611,7 +611,14 @@ func Payables(ctx context.Context, e Env) Result {
 		bad = append(bad, t.Model+"/"+t.Name+": "+t.Reason)
 	}
 	if len(bad) > 0 {
-		return fail(name, "warn", strings.Join(bad, "; "), nil)
+		// The people out of line with their numbers: debt, «К выплате», what the books and the mirror have, the difference.
+		people := []payroll.PersonCheck{}
+		for _, p := range c.People {
+			if !p.OK {
+				people = append(people, p)
+			}
+		}
+		return fail(name, "warn", strings.Join(bad, "; "), map[string]any{"people": people, "rows": c.Rows, "tabs": c.Tabs})
 	}
 	after, source, short := c.FactsFrom, "факты хаба", "факты"
 	if c.ReportsFrom != "" {
@@ -799,8 +806,10 @@ func reportsOn(ctx context.Context, e Env) (string, error) {
 }
 
 // ReportPosts: the chatters' posts of the last 14 days that the pay base cannot use — an author or a page name not in
-// the settings, a total that does not add up, a date that does not read or lies far from the day of posting. A warning
-// once the reports accrue (reportsOn); before that, information.
+// the settings, a total that does not add up, a date that does not read or lies far from the day of posting — and the
+// days a post probably overwrote (crossDayDuplicates). A warning once the reports accrue (reportsOn); before that,
+// information. A day that accrues from Hub's handed-in report (payroll.HubBasisDays) is not asked about: its post
+// accrues nothing, it is information. A post without a person is asked about always.
 func ReportPosts(ctx context.Context, e Env) Result {
 	const name = "отчёты разобраны"
 	on, err := reportsOn(ctx, e)
@@ -812,8 +821,24 @@ func ReportPosts(ctx context.Context, e Env) Result {
 	if err != nil {
 		return fail(name, "warn", err.Error(), nil)
 	}
+	hubDay, err := payroll.HubBasisDays(ctx, e.Q, from)
+	if err != nil {
+		return fail(name, "warn", err.Error(), nil)
+	}
+	// postDay says the post's day accrues from the post: not a day the sheets paid for, not one Hub's report pays for.
+	postDay := func(p reports.Post) bool {
+		if on != "" && p.ReportDate != nil && *p.ReportDate < on {
+			return false
+		}
+		return p.Person == nil || p.ReportDate == nil || !hubDay(*p.Person, *p.ReportDate)
+	}
 	var bad []string
+	var kept []reports.Post
 	for _, p := range list {
+		if !postDay(p) {
+			continue
+		}
+		kept = append(kept, p)
 		var why []string
 		for i, f := range p.Flags {
 			if reports.Blocking(f) || f == reports.FlagUnknownPage {
@@ -833,19 +858,123 @@ func ReportPosts(ctx context.Context, e Env) Result {
 		if p.ReportDate != nil {
 			date = *p.ReportDate
 		}
-		if on != "" && p.ReportDate != nil && *p.ReportDate < on {
-			continue // a day the sheets paid for
-		}
 		bad = append(bad, fmt.Sprintf("%s, %s (сообщение %d): %s", who, date, p.MsgID, strings.Join(why, "; ")))
 	}
-	if len(bad) > 0 && on == "" {
-		return Result{Name: name, OK: true, Severity: "info", Details: bad,
-			Summary: fmt.Sprintf("в тени, отчёты ещё не начисляют: %d постов «Отчётности» не идут в базу оплаты целиком — ledger report posts --flagged", len(bad))}
+	dups := crossDayDuplicates(kept)
+	if len(bad)+len(dups) > 0 && on == "" {
+		var parts []string
+		if len(bad) > 0 {
+			parts = append(parts, fmt.Sprintf("%d постов «Отчётности» не идут в базу оплаты целиком — ledger report posts --flagged", len(bad)))
+		}
+		if len(dups) > 0 {
+			parts = append(parts, fmt.Sprintf("один день отчёта в постах разных дней (%d)", len(dups)))
+		}
+		return Result{Name: name, OK: true, Severity: "info", Details: append(bad, dups...),
+			Summary: "в тени, отчёты ещё не начисляют: " + strings.Join(parts, "; ")}
 	}
-	if len(bad) > 0 {
-		return fail(name, "warn", fmt.Sprintf("%d постов «Отчётности» не идут в базу оплаты целиком: %s", len(bad), strings.Join(bad, " | ")), bad)
+	if len(bad)+len(dups) > 0 {
+		var parts []string
+		if len(bad) > 0 {
+			parts = append(parts, fmt.Sprintf("%d постов «Отчётности» не идут в базу оплаты целиком: %s", len(bad), strings.Join(bad, " | ")))
+		}
+		if len(dups) > 0 {
+			parts = append(parts, fmt.Sprintf("один день отчёта в постах разных дней (%d): %s", len(dups), strings.Join(dups, " | ")))
+		}
+		return fail(name, "warn", strings.Join(parts, "; "), append(bad, dups...))
 	}
 	return pass(name, "посты «Отчётности» за 14 дней разобраны без блокирующих пометок")
+}
+
+// crossDayDuplicates names the pairs of current posts of one person and report date that list a common page and went
+// out on different Moscow days (both carry reports.FlagDuplicate): most likely one of them carries the date of the day
+// before by mistake, and the later one replaces that page of the day in the pay base. Nothing is held; the owner
+// checks the date by both messages. An edit is the same message, and a post of another report date is no pair.
+func crossDayDuplicates(list []reports.Post) []string {
+	type day struct{ person, date string }
+	var order []day
+	byDay := map[day][]reports.Post{}
+	for _, p := range list {
+		if p.Person == nil || p.ReportDate == nil || !hasFlag(p, reports.FlagDuplicate) {
+			continue
+		}
+		k := day{*p.Person, *p.ReportDate}
+		if byDay[k] == nil {
+			order = append(order, k)
+		}
+		byDay[k] = append(byDay[k], p)
+	}
+	var out []string
+	for _, k := range order {
+		ps := byDay[k] // in the order of posting (reports.Posts)
+		for i := range ps {
+			for j := i + 1; j < len(ps); j++ {
+				a, b := ps[i], ps[j]
+				if a.Peer == b.Peer && a.Topic == b.Topic && a.MsgID == b.MsgID {
+					continue
+				}
+				dayA, dayB := postedDay(a), postedDay(b)
+				if dayA == dayB {
+					continue
+				}
+				common := commonPages(a, b)
+				if len(common) == 0 {
+					continue
+				}
+				out = append(out, fmt.Sprintf("%s, %s: %s в постах от %s и %s — считается последний, проверить дату отчёта: %s, %s",
+					k.person, k.date, strings.Join(common, ", "), dayA, dayB, postLink(a), postLink(b)))
+			}
+		}
+	}
+	return out
+}
+
+func hasFlag(p reports.Post, flag string) bool {
+	for _, f := range p.Flags {
+		if f == flag {
+			return true
+		}
+	}
+	return false
+}
+
+// postedDay is the Moscow day a post went out.
+func postedDay(p reports.Post) string {
+	if t, err := ts.Parse(p.PostedAt); err == nil {
+		return ts.Date(t)
+	}
+	if len(p.PostedAt) >= 10 {
+		return p.PostedAt[:10]
+	}
+	return p.PostedAt
+}
+
+// commonPages are the Hub pages in shift that both posts list.
+func commonPages(a, b reports.Post) []string {
+	in := map[string]bool{}
+	for _, pg := range a.Pages {
+		if pg.Page != nil && pg.InShift {
+			in[*pg.Page] = true
+		}
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, pg := range b.Pages {
+		if pg.Page != nil && pg.InShift && in[*pg.Page] && !seen[*pg.Page] {
+			seen[*pg.Page] = true
+			out = append(out, *pg.Page)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// postLink is the Telegram link of a post's message in its topic: https://t.me/c/<chat>/<topic>/<message> for a
+// supergroup id (-100…); any other chat as chat/topic/message.
+func postLink(p reports.Post) string {
+	if c, ok := strings.CutPrefix(p.Peer, "-100"); ok && c != "" {
+		return fmt.Sprintf("https://t.me/c/%s/%d/%d", c, p.Topic, p.MsgID)
+	}
+	return fmt.Sprintf("%s/%d/%d", p.Peer, p.Topic, p.MsgID)
 }
 
 // secondReportsCheck is the name of SecondReports.
@@ -855,10 +984,15 @@ const secondReportsCheck = "в сообщении «Отчётности» од�
 // the parser reads only the first, so the second report's pages are in no pay base until it is sent as its own message.
 // The flag moves no money; this check is how the owner hears of it. It stays red until the post is edited (the edit
 // replaces the post) or the same person posts later a report of the same day without the flag (the second one re-sent).
+// A day that accrues from Hub's handed-in report (payroll.HubBasisDays) is not asked about: its posts accrue nothing.
 func SecondReports(ctx context.Context, e Env) Result {
 	const name = secondReportsCheck
 	from := ts.Date(e.Now.Add(-13 * 24 * time.Hour))
 	list, err := reports.Posts(ctx, e.Q, from, ts.Date(e.Now), false)
+	if err != nil {
+		return fail(name, "warn", err.Error(), nil)
+	}
+	hubDay, err := payroll.HubBasisDays(ctx, e.Q, from)
 	if err != nil {
 		return fail(name, "warn", err.Error(), nil)
 	}
@@ -872,7 +1006,7 @@ func SecondReports(ctx context.Context, e Env) Result {
 	}
 	var bad []string
 	for _, p := range list {
-		if !has(p) {
+		if !has(p) || p.Person != nil && p.ReportDate != nil && hubDay(*p.Person, *p.ReportDate) {
 			continue
 		}
 		resent := false
