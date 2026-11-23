@@ -196,6 +196,18 @@ func plural(n int, one, few, many string) string {
 	return fmt.Sprintf("%d %s", n, word)
 }
 
+// nameWithSlug is a person's heading: the name, then the card's code in brackets — unless the name is empty, is the
+// code itself, or already ends with "(code)", as cards named «Name (code)» do.
+func nameWithSlug(name, slug string) string {
+	switch {
+	case name == "":
+		return slug
+	case slug == "" || name == slug || strings.HasSuffix(strings.TrimSpace(name), "("+slug+")"):
+		return name
+	}
+	return name + " (" + slug + ")"
+}
+
 func schemaCmd(ctx context.Context, args []string) error {
 	fs := Flags("schema")
 	asJSON := fs.Bool("json", false, "ответ API как есть")
