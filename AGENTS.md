@@ -67,9 +67,10 @@
 - Отчёты смен (R1, план `docs/plans/2026-11-10-shift-reports.md`): `ledger report save <файл|->` — агент команды сохраняет
   расклад отчёта (`POST /v1/reports`, ключ с правом `reports`: только эта запись, сочетается с другими правами); суммы в mills,
   страницы сходятся с итогом, включённые строки и добавки — со страницей, до тысячной. Тот же JSON новой версии не создаёт,
-  иной — версия N+1, прежняя `superseded`. `ledger report list [--from] [--to] [--person] [--json]` (по умолчанию 14 дней),
-  `ledger report show <id> [--json]`; хаб читает `GET /v1/reports?from&to[&hub_user_id][&hub_username]` ключом `payouts`
-  (только отчёты этого пользователя или его карточки). Таблицы `shift_reports*`, вид `v_shift_reports`. Этап ничего не проводит и не начисляет.
+  иной — версия N+1, прежняя `superseded`. `ledger report list [--from] [--to] [--person] [--source agent|hub|all] [--json]` (по умолчанию 14 дней,
+  источник `agent`), `ledger report show <id|hub:id> [--json]`; хаб читает `GET /v1/reports?from&to[&hub_user_id][&hub_username]` ключом `payouts`
+  (только отчёты этого пользователя или его карточки; без `source` — только черновики агента, как прежде; `?source=hub|all` включает сданные в хабе
+  версии из `hub_shift_reports*`; одна версия хаба — `GET /v1/reports/hub/{id}`, те же права `read`/`payouts`). Таблицы `shift_reports*`, вид `v_shift_reports`. Этап ничего не проводит и не начисляет.
   Добавка (`adds`: `page`, `amount_mills`, `what`) может назвать свою продажу — `transaction_ref` (строка до 200 знаков, пусто — нет):
   «долёт», продажа хаба, оплаченная после отчёта или зачтённая по слову владельца. Ссылка — любая из двух ссылок продажи: площадки,
   как у строк, или id хаба; хранится в `shift_report_lines.transaction_ref` строки добавки, `GET /v1/reports` отдаёт её у строки с

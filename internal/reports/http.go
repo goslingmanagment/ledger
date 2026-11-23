@@ -53,8 +53,13 @@ func init() {
 				server.WriteError(w, http.StatusBadRequest, err.Error())
 				return
 			}
+			source := strings.TrimSpace(q.Get("source"))
+			if !ValidSource(source) {
+				server.WriteError(w, http.StatusBadRequest, "source: бывает agent, hub или all, а не "+strconv.Quote(source))
+				return
+			}
 			f := Filter{From: from, To: to, Person: strings.TrimSpace(q.Get("person")),
-				HubUsername: strings.TrimSpace(q.Get("hub_username")), AllVersions: q.Get("all_versions") == "1"}
+				HubUsername: strings.TrimSpace(q.Get("hub_username")), Source: source, AllVersions: q.Get("all_versions") == "1"}
 			if v := strings.TrimSpace(q.Get("hub_user_id")); v != "" {
 				id, err := strconv.ParseInt(v, 10, 64)
 				if err != nil || id <= 0 {
@@ -98,6 +103,30 @@ func init() {
 			case err != nil:
 				s.Log.Error("reports get", "key", auth.KeyName(r.Context()), "err", err)
 				server.WriteError(w, http.StatusInternalServerError, "отчёт не прочитан: сбой сервиса, подробности в журнале")
+			default:
+				server.WriteJSON(w, http.StatusOK, rep)
+			}
+		})))
+		s.Mux.Handle("GET /v1/reports/hub/{id}", auth.RequireAny(s, readers, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+			if err != nil || id <= 0 {
+				server.WriteError(w, http.StatusBadRequest, "нужен номер версии отчёта хаба: /v1/reports/hub/<id>")
+				return
+			}
+			tx, err := s.Store.RO.BeginTx(r.Context(), &sql.TxOptions{ReadOnly: true})
+			if err != nil {
+				s.Log.Error("reports get hub", "err", err)
+				server.WriteError(w, http.StatusInternalServerError, "отчёт хаба не прочитан: сбой сервиса, подробности в журнале")
+				return
+			}
+			defer tx.Rollback()
+			rep, err := GetHub(r.Context(), tx, id)
+			switch {
+			case errors.Is(err, ErrNotFound):
+				server.WriteError(w, http.StatusNotFound, "нет отчёта хаба "+strconv.FormatInt(id, 10))
+			case err != nil:
+				s.Log.Error("reports get hub", "key", auth.KeyName(r.Context()), "err", err)
+				server.WriteError(w, http.StatusInternalServerError, "отчёт хаба не прочитан: сбой сервиса, подробности в журнале")
 			default:
 				server.WriteJSON(w, http.StatusOK, rep)
 			}

@@ -30,6 +30,8 @@ import (
 const (
 	StatusDraft      = "draft"
 	StatusPosted     = "posted"
+	StatusSubmitted  = "submitted"
+	StatusProblem    = "problem"
 	StatusSuperseded = "superseded"
 )
 
