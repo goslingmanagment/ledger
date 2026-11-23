@@ -276,6 +276,9 @@ func PreparePayout(ctx context.Context, db *sql.DB, slug string, now time.Time) 
 	if err := unenteredFlags(ctx, tx, slug, oldest, f); err != nil {
 		return b, err
 	}
+	if err := hubFlags(ctx, tx, &b, card, today, f); err != nil {
+		return b, err
+	}
 	if err := unresolvedFlags(ctx, tx, b.AccrualFrom, res, card, f); err != nil {
 		return b, err
 	}
