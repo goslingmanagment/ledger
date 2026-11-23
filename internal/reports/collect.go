@@ -131,6 +131,7 @@ func TgTopicReader(dir string) TopicReader {
 type tgMessage struct {
 	ID       int64        `json:"id"`
 	Date     string       `json:"date"`
+	Edited   *string      `json:"edited"`
 	Sender   *string      `json:"sender"`
 	SenderID *json.Number `json:"sender_id"`
 	Text     *string      `json:"text"`
@@ -184,10 +185,26 @@ func CollectPosts(ctx context.Context, cfg CollectConfig, read TopicReader, sinc
 				if at.After(last) {
 					last = at
 				}
-				if m.Text == nil || !LooksLikeReport(*m.Text) {
-					continue
+				editedAt := ""
+				if m.Edited != nil && strings.TrimSpace(*m.Edited) != "" {
+					if et, err := ts.Parse(*m.Edited); err == nil {
+						editedAt = formatPostTime(et)
+					}
 				}
-				e := PostEvent{Peer: peer, Topic: t.Topic, MsgID: m.ID, Date: ts.Format(at), Text: *m.Text}
+				text := ""
+				if m.Text != nil {
+					text = *m.Text
+				}
+				kind := PostKindPost
+				if !LooksLikeReport(text) {
+					if editedAt == "" {
+						continue
+					}
+					// An edited message that no longer looks like a report may be a retracted post: emit a
+					// content-free retraction event so non-report chat text never enters events.
+					kind, text = PostKindRetract, ""
+				}
+				e := PostEvent{Peer: peer, Topic: t.Topic, MsgID: m.ID, Date: ts.Format(at), EditedAt: editedAt, Text: text}
 				if m.Sender != nil {
 					e.Sender = *m.Sender
 				}
@@ -198,8 +215,8 @@ func CollectPosts(ctx context.Context, cfg CollectConfig, read TopicReader, sinc
 				if err != nil {
 					return got, err
 				}
-				got.Events = append(got.Events, events.Event{Source: PostSource, SourceID: PostSourceID(peer, t.Topic, m.ID, *m.Text),
-					Kind: "post", OccurredAt: e.Date, Payload: payload})
+				got.Events = append(got.Events, events.Event{Source: PostSource, SourceID: PostSourceID(peer, t.Topic, m.ID, text, editedAt),
+					Kind: kind, OccurredAt: e.Date, Payload: payload})
 			}
 			switch {
 			case len(h.Messages) < lim:

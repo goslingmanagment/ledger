@@ -675,7 +675,7 @@ func TestSecondReports(t *testing.T) {
 		t.Helper()
 		e := reports.PostEvent{Peer: "-1", Topic: 4, MsgID: msg, Date: at, Sender: "tg user", SenderID: "501", Text: text}
 		payload, _ := json.Marshal(e)
-		ans, err := events.Accept(ctx, s, []events.Event{{Source: reports.PostSource, SourceID: reports.PostSourceID("-1", 4, msg, text),
+		ans, err := events.Accept(ctx, s, []events.Event{{Source: reports.PostSource, SourceID: reports.PostSourceID("-1", 4, msg, text, ""),
 			Kind: "post", OccurredAt: at, Payload: payload}}, now)
 		if err != nil || len(ans.Settle) > 0 {
 			t.Fatalf("accept: %v %v", err, ans.Settle)
@@ -719,7 +719,7 @@ func reportPost(t *testing.T, s *db.Store, ctx context.Context, sender string, m
 	const peer = "-1001000000001"
 	e := reports.PostEvent{Peer: peer, Topic: 4, MsgID: msg, Date: at, Sender: "tg user", SenderID: sender, Text: text}
 	payload, _ := json.Marshal(e)
-	ans, err := events.Accept(ctx, s, []events.Event{{Source: reports.PostSource, SourceID: reports.PostSourceID(peer, 4, msg, text),
+	ans, err := events.Accept(ctx, s, []events.Event{{Source: reports.PostSource, SourceID: reports.PostSourceID(peer, 4, msg, text, ""),
 		Kind: "post", OccurredAt: at, Payload: payload}}, now)
 	if err != nil || len(ans.Settle) > 0 {
 		t.Fatalf("accept: %v %v", err, ans.Settle)

@@ -504,8 +504,59 @@ func planReports(ctx context.Context, q ledger.Querier, from string, now time.Ti
 		return nil, err
 	}
 
-	// Money of a day with no posted report: in the sheet, or posted already. A day that answers only to Hub's report is not
-	// held by them.
+	// A post edited so it is no longer a shift report (current = 0 with no current version of that message) retracts its
+	// day: if no other post answers for the tab day, it is released (not held as posted or by the sheet), so an unpaid day
+	// reverses its accrual and a paid day opens payroll_pending_changes.
+	retracted := map[string]bool{}
+	rows, err = q.QueryContext(ctx, `SELECT o.person, o.report_date, o.model,
+		COALESCE((SELECT json_group_array(COALESCE(pp.page_label, '')) FROM shift_report_post_pages pp
+		  WHERE pp.post_id = o.id AND pp.in_shift = 1), '[]')
+		FROM shift_report_posts o
+		WHERE o.current = 0 AND o.person IS NOT NULL AND o.report_date >= ?
+		  AND NOT EXISTS (SELECT 1 FROM shift_report_posts c
+		                   WHERE c.peer = o.peer AND c.topic = o.topic AND c.msg_id = o.msg_id AND c.current = 1)`, from)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var person, date, topicModel, pagesText string
+		if err := rows.Scan(&person, &date, &topicModel, &pagesText); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if hubDays[person+"\x00"+date] || (hubFrom != "" && date >= hubFrom && onBoard(spans, person, date)) {
+			continue
+		}
+		var labels []string
+		_ = json.Unmarshal([]byte(pagesText), &labels)
+		pageModels := map[string]bool{}
+		for _, label := range labels {
+			m := topicModel
+			if label != "" {
+				if hm, ok := models[label]; ok {
+					m = hm
+				}
+			}
+			if m != "" {
+				pageModels[m] = true
+			}
+		}
+		if len(pageModels) == 0 && topicModel != "" {
+			pageModels[topicModel] = true
+		}
+		for m := range pageModels {
+			if t, ok := tabOf[person+"\x00"+ledger.Slug(m)]; ok {
+				retracted[t.model+"/"+t.name+":"+date] = true
+			}
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Money of a day with no posted report: in the sheet, or posted already. A day that answers only to Hub's report or
+	// whose post was retracted is not held by them.
 	rows, err = q.QueryContext(ctx, `SELECT model, name, person, date FROM payroll_days WHERE person IS NOT NULL AND amount <> 0 AND date >= ?`, from)
 	if err != nil {
 		return nil, err
@@ -516,7 +567,7 @@ func planReports(ctx context.Context, q ledger.Querier, from string, now time.Ti
 			rows.Close()
 			return nil, err
 		}
-		if key := model + "/" + name + ":" + date; !reported[key] && !hubOnly(key, person, date) {
+		if key := model + "/" + name + ":" + date; !reported[key] && !hubOnly(key, person, date) && !retracted[key] {
 			hold(key, "отчёта нет: в таблице день есть, опубликованного отчёта за него нет")
 		}
 	}
@@ -537,6 +588,9 @@ func planReports(ctx context.Context, q ledger.Querier, from string, now time.Ti
 			continue
 		}
 		if model, name, date, ok := splitDayKey(key); ok && hubOnly(key, personOf[model+"/"+name], date) {
+			continue
+		}
+		if retracted[key] {
 			continue
 		}
 		hold(key, "отчёта нет: день проведён, опубликованного отчёта за него нет")

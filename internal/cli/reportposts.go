@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/goslingmanagment/ledger/internal/brief"
+	"github.com/goslingmanagment/ledger/internal/client"
 	"github.com/goslingmanagment/ledger/internal/db"
 	"github.com/goslingmanagment/ledger/internal/events"
 	"github.com/goslingmanagment/ledger/internal/payroll"
@@ -276,7 +277,7 @@ func collectReports(ctx context.Context, args []string) error {
 	configPath := fs.String("config", filepath.Join(dir, "reports.json"), `конфиг: {"topics": [{"peer", "topic"}], "since_days", "tg_dir"}`)
 	spoolDir := fs.String("spool", filepath.Join(dir, "spool-reports"), "очередь событий")
 	sentPath := fs.String("state", filepath.Join(dir, "reports-sent.json"), "что сервер уже принял")
-	since := fs.String("since", "", "читать с даты ГГГГ-ММ-ДД; по умолчанию since_days дней назад")
+	since := fs.String("since", "", "читать с даты ГГГГ-ММ-ДД; по умолчанию min(since_days, самый ранний неоплаченный или недавно выплаченный день поста)")
 	limit := fs.Int("limit", reports.DefaultLimit, "сообщений за одно чтение топика")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -286,8 +287,40 @@ func collectReports(ctx context.Context, args []string) error {
 		return err
 	}
 	from := *since
+	var store *db.Store
+	var api *client.Client
+	if *localDB && (from == "" || !*dry) {
+		store, err = OpenStore(ctx)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+	}
 	if from == "" {
-		from = ts.Date(ts.Now().Add(-time.Duration(cfg.SinceDays) * 24 * time.Hour))
+		from = ts.Date(ts.Now().In(ts.MSK).AddDate(0, 0, -cfg.SinceDays))
+		var serverSince string
+		if *localDB {
+			serverSince, err = reports.PostsSince(ctx, store.RO, ts.Now())
+			if err != nil {
+				return err
+			}
+		} else {
+			api, err = apiClient()
+			if err != nil && !*dry {
+				return err
+			}
+			if api != nil {
+				serverSince, err = reportPostsSince(ctx, api)
+				if err != nil {
+					return err
+				}
+			}
+		}
+		if serverSince != "" {
+			if t, perr := time.Parse(ts.DateLayout, serverSince); perr == nil && t.Format(ts.DateLayout) == serverSince && serverSince < from {
+				from = serverSince
+			}
+		}
 	}
 	got, readErr := reports.CollectPosts(ctx, cfg, tgTopicReader(cfg.TgDir), from, *limit)
 	if readErr != nil && *dry {
@@ -307,22 +340,19 @@ func collectReports(ctx context.Context, args []string) error {
 	}
 	var send events.Sender
 	if *localDB {
-		store, err := OpenStore(ctx)
-		if err != nil {
-			return err
-		}
-		defer store.Close()
 		send = func(ctx context.Context, batch []events.Event) (events.Answer, error) {
 			return events.Accept(ctx, store, batch, ts.Now())
 		}
 	} else {
-		c, err := apiClient()
-		if err != nil {
-			return err
+		if api == nil {
+			api, err = apiClient()
+			if err != nil {
+				return err
+			}
 		}
 		send = func(ctx context.Context, batch []events.Event) (events.Answer, error) {
 			var ans events.Answer
-			err := c.Do(ctx, http.MethodPost, "/v1/events", map[string]any{"events": batch}, &ans)
+			err := api.Do(ctx, http.MethodPost, "/v1/events", map[string]any{"events": batch}, &ans)
 			return ans, err
 		}
 	}
@@ -356,6 +386,26 @@ func collectReports(ctx context.Context, args []string) error {
 		return Exit{Code: 2, Msg: "события приняты, разбор не прошёл:\n  " + strings.Join(rep.Settle, "\n  ")}
 	}
 	return readErr
+}
+
+// reportPostsSince asks the server for the earliest post-basis day that still needs re-reading. An older server without
+// the route (404) or a network failure falls back to since_days; HTTP 4xx/5xx other than 404 is returned as apiError.
+func reportPostsSince(ctx context.Context, c *client.Client) (string, error) {
+	qctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	var ans reports.PostsSinceAnswer
+	err := c.Do(qctx, http.MethodGet, "/v1/report-posts/since", nil, &ans)
+	if err == nil {
+		return ans.Since, nil
+	}
+	var ce *client.Error
+	if errors.As(err, &ce) {
+		if ce.Status == http.StatusNotFound {
+			return "", nil
+		}
+		return "", apiError(err)
+	}
+	return "", nil
 }
 
 // tgTopicReader is the reader `collect reports` uses; tests put a fake tg in its place.

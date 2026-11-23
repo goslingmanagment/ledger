@@ -115,12 +115,30 @@ func postText(date, total string, lines ...string) string {
 // post sends a message of the topic as the collector would; the same msgID with another text is an edit.
 func post(t *testing.T, s *db.Store, msgID int64, sender, date, text string) {
 	t.Helper()
-	e := reports.PostEvent{Peer: reportPeer, Topic: 4, MsgID: msgID, Date: date + "T23:30:00+03:00", Sender: "tg user", SenderID: sender, Text: text}
+	postEdited(t, s, msgID, sender, date, "", text)
+}
+
+func postEdited(t *testing.T, s *db.Store, msgID int64, sender, date, editedAt, text string) {
+	t.Helper()
+	e := reports.PostEvent{Peer: reportPeer, Topic: 4, MsgID: msgID, Date: date + "T23:30:00+03:00", EditedAt: editedAt,
+		Sender: "tg user", SenderID: sender, Text: text}
 	payload, _ := json.Marshal(e)
 	ans, err := events.Accept(context.Background(), s, []events.Event{{Source: reports.PostSource,
-		SourceID: reports.PostSourceID(reportPeer, 4, msgID, text), Kind: "post", OccurredAt: e.Date, Payload: payload}}, reportNow)
+		SourceID: reports.PostSourceID(reportPeer, 4, msgID, text, editedAt), Kind: reports.PostKindPost, OccurredAt: e.Date, Payload: payload}}, reportNow)
 	if err != nil || len(ans.Settle) > 0 {
 		t.Fatalf("accept: %v %v", err, ans.Settle)
+	}
+}
+
+func retractPost(t *testing.T, s *db.Store, msgID int64, sender, date, editedAt string) {
+	t.Helper()
+	e := reports.PostEvent{Peer: reportPeer, Topic: 4, MsgID: msgID, Date: date + "T23:30:00+03:00", EditedAt: editedAt,
+		Sender: "tg user", SenderID: sender}
+	payload, _ := json.Marshal(e)
+	ans, err := events.Accept(context.Background(), s, []events.Event{{Source: reports.PostSource,
+		SourceID: reports.PostSourceID(reportPeer, 4, msgID, "", editedAt), Kind: reports.PostKindRetract, OccurredAt: e.Date, Payload: payload}}, reportNow)
+	if err != nil || len(ans.Settle) > 0 {
+		t.Fatalf("accept retract: %v %v", err, ans.Settle)
 	}
 }
 
@@ -846,5 +864,143 @@ func TestThePayoutBriefLeavesPaidDaysOutOfTheMirror(t *testing.T) {
 		if p.Person == "alfa" && (!p.OK || p.Diff != 0) {
 			t.Fatalf("Альфа's check %+v", p)
 		}
+	}
+}
+
+func TestPostsSinceLowerBound(t *testing.T) {
+	s, ctx := reportWeek(t)
+	// Before payroll_reports_from is set, reports do not accrue: no lower bound.
+	if got, err := reports.PostsSince(ctx, s.RO, at("2026-11-24T12:00:00+03:00")); err != nil || got != "" {
+		t.Fatalf("reports off: got %q err %v", got, err)
+	}
+
+	// Switch on reports from 2026-11-10: Альфа has unpaid sheet 09.11 (ignored: before switch) and unpaid post 10.11;
+	// Браво has unpaid post 10.11 and held 12.11.
+	setReports(t, s, ctx, "2026-11-10")
+	if got, err := reports.PostsSince(ctx, s.RO, at("2026-11-24T12:00:00+03:00")); err != nil || got != "2026-11-10" {
+		t.Fatalf("unpaid post-basis day: got %q err %v", got, err)
+	}
+
+	// Put Альфа on the board from 2026-11-10 (grant on 09.11) and give Браво a Hub report on 2026-11-10, switch on hub-from:
+	// now 10.11 is Hub-basis for both people, so only Браво's post-basis 12.11 counts.
+	r := loadRegistry(t)
+	grant(r, "alfa", "2026-11-09T09:00:00.000Z")
+	r.read(t, s)
+	setHub(t, s, ctx, "2026-11-10")
+	handIn(t, s, hubVersion(1, 1, 1, "bravo", "2026-11-10", hubPage{"page-a", 50}))
+	if got, err := reports.PostsSince(ctx, s.RO, at("2026-11-24T12:00:00+03:00")); err != nil || got != "2026-11-12" {
+		t.Fatalf("board/hub days ignored: got %q err %v", got, err)
+	}
+
+	// Pay Браво in full on 2026-11-13 (10.11 = $20 + 12.11 = $20 = $40).
+	importPayouts(t, s, ctx, payoutRow(1, "2026-11-13", "Браво", "Alpha", "40.00"))
+	if _, err := payroll.Rebuild(ctx, s, reportNow); err != nil {
+		t.Fatal(err)
+	}
+	if got := dayOf(t, s, "bravo", "2026-11-12"); got != "20000000 20000000 0 sheet" {
+		t.Fatalf("Браво's 12th paid: %s", got)
+	}
+	// On 2026-11-27 (14 days after payout on 13.11): still within 14 days → 2026-11-12!
+	if got, err := reports.PostsSince(ctx, s.RO, at("2026-11-27T12:00:00+03:00")); err != nil || got != "2026-11-12" {
+		t.Fatalf("paid exactly 14 days ago: got %q err %v", got, err)
+	}
+	// On 2026-11-28 (15 days after payout on 13.11): paid >14 days ago → ignored!
+	if got, err := reports.PostsSince(ctx, s.RO, at("2026-11-28T12:00:00+03:00")); err != nil || got != "" {
+		t.Fatalf("paid >14 days ago must be ignored: got %q err %v", got, err)
+	}
+
+	// A post-basis day >14 days old (12.11) paid RECENTLY (within 14 days) is still included.
+	post(t, s, 5, "502", "2026-11-11", postText("2026-11-11", "", "A - $50"))
+	importPayouts(t, s, ctx,
+		payoutRow(1, "2026-11-13", "Браво", "Alpha", "40.00"),
+		payoutRow(2, "2026-11-25", "Браво", "Alpha", "20.00"),
+	)
+	if _, err := payroll.Rebuild(ctx, s, at("2026-11-25T12:00:00+03:00")); err != nil {
+		t.Fatal(err)
+	}
+	// 12.11 was paid by doc #2 on 25.11 (3 days before 28.11), 11.11 by doc #1 on 13.11 (15 days before 28.11):
+	// so on 28.11 only 12.11 is within 14 days of its payout.
+	if got, err := reports.PostsSince(ctx, s.RO, at("2026-11-28T12:00:00+03:00")); err != nil || got != "2026-11-12" {
+		t.Fatalf("old day paid recently: got %q err %v", got, err)
+	}
+}
+
+func TestFiveDayOldPostEditABAAndRetract(t *testing.T) {
+	s, ctx := reportWeek(t)
+	setReports(t, s, ctx, "2026-11-10")
+
+	// 1. Five days later (2026-11-15), an edit to an UNPAID post-basis day (2026-11-10) updates its accrual directly.
+	// Альфа's 10.11 was $140 × 25% = $35; edit to $160 → $40.
+	origA := postText("2026-11-10", "", "A - $100", "B - $40")
+	editB := postText("2026-11-10", "", "A - $120", "B - $40")
+	postEdited(t, s, 1, "501", "2026-11-10", "2026-11-15T10:00:00+03:00", editB)
+	if got := dayOf(t, s, "alfa", "2026-11-10"); got != "40000000 0 40000000 reports" {
+		t.Fatalf("unpaid 5-day-old edit: %s", got)
+	}
+	if n := count(t, s, `SELECT count(*) FROM payroll_pending_changes`); n != 0 {
+		t.Fatalf("unpaid edit opened pending change: %s", pendingRows(t, s))
+	}
+
+	// A → B → A revert with a newer edit timestamp restores $35; an out-of-order older edit (09:00) does not override it.
+	postEdited(t, s, 1, "501", "2026-11-10", "2026-11-15T11:00:00+03:00", origA)
+	if got := dayOf(t, s, "alfa", "2026-11-10"); got != "35000000 0 35000000 reports" {
+		t.Fatalf("A -> B -> A on unpaid day: %s", got)
+	}
+	postEdited(t, s, 1, "501", "2026-11-10", "2026-11-15T09:00:00+03:00", postText("2026-11-10", "", "A - $200", "B - $40"))
+	if got := dayOf(t, s, "alfa", "2026-11-10"); got != "35000000 0 35000000 reports" {
+		t.Fatalf("stale out-of-order edit overrode newer version: %s", got)
+	}
+
+	// 2. Retracting an UNPAID post (edited so "Общий доход" is removed) reverses its accrual completely.
+	// Браво's 10.11 is unpaid ($20); retract msg 2.
+	if got := dayOf(t, s, "bravo", "2026-11-10"); got != "20000000 0 20000000 reports" {
+		t.Fatalf("Браво's 10th before retract: %s", got)
+	}
+	retractPost(t, s, 2, "502", "2026-11-10", "2026-11-15T12:00:00+03:00")
+	if got := dayOf(t, s, "bravo", "2026-11-10"); got != "" {
+		t.Fatalf("retracted unpaid post kept accrual: %s\n%s", got, books(t, s))
+	}
+	if n := count(t, s, `SELECT count(*) FROM shift_report_posts WHERE msg_id = 2 AND current = 1`); n != 0 {
+		t.Fatalf("retracted post still current")
+	}
+
+	// 3. Five days later, an edit to a PAID post-basis day creates payroll_pending_changes without changing the books.
+	// Pay Альфа $55 on 2026-11-12 (covers 09.11 $20 + 10.11 $35).
+	importPayouts(t, s, ctx, payoutRow(1, "2026-11-12", "Альфа", "Alpha", "55.00"))
+	if _, err := payroll.Rebuild(ctx, s, reportNow); err != nil {
+		t.Fatal(err)
+	}
+	if got := dayOf(t, s, "alfa", "2026-11-10"); got != "35000000 35000000 0 reports" {
+		t.Fatalf("Альфа's paid 10th: %s", got)
+	}
+	postEdited(t, s, 1, "501", "2026-11-10", "2026-11-15T13:00:00+03:00", editB)
+	if got := pendingRows(t, s); got != "1 alfa 2026-11-10 35000000 40000000 post_edited open  " {
+		t.Fatalf("paid 5-day-old edit pending:\n%s", got)
+	}
+	if got := dayOf(t, s, "alfa", "2026-11-10"); got != "35000000 35000000 0 reports" {
+		t.Fatalf("paid day changed by itself: %s", got)
+	}
+
+	// Reverting back to original A at a newer edit time dismisses the open pending change automatically.
+	postEdited(t, s, 1, "501", "2026-11-10", "2026-11-15T14:00:00+03:00", origA)
+	if n := count(t, s, `SELECT count(*) FROM payroll_pending_changes WHERE state = 'open'`); n != 0 {
+		t.Fatalf("revert to posted sum left pending change open:\n%s", pendingRows(t, s))
+	}
+
+	// 4. Retracting a PAID post opens payroll_pending_changes with new_micros = 0, and applying it reverses the day.
+	retractPost(t, s, 1, "501", "2026-11-10", "2026-11-15T15:00:00+03:00")
+	if got := cols(t, s, `SELECT person, date, posted_micros, new_micros, reason, state FROM payroll_pending_changes WHERE state = 'open'`); got != "alfa 2026-11-10 35000000 0 post_edited open" {
+		t.Fatalf("retract paid day pending:\n%s", got)
+	}
+	if got := dayOf(t, s, "alfa", "2026-11-10"); got != "35000000 35000000 0 reports" {
+		t.Fatalf("retracted paid day changed before decision: %s", got)
+	}
+	id := count(t, s, `SELECT id FROM payroll_pending_changes WHERE state = 'open'`)
+	out, err := payroll.DecideChange(ctx, s, id, payroll.DecisionApply, "owner", "пост снят", reportNow)
+	if err != nil || out.Change.State != "applied" {
+		t.Fatalf("apply retract pending: %+v %v", out, err)
+	}
+	if got := dayOf(t, s, "alfa", "2026-11-10"); got != "" {
+		t.Fatalf("applied retract did not reverse day: %s\n%s", got, books(t, s))
 	}
 }
