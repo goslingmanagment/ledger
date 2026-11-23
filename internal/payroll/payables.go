@@ -166,12 +166,8 @@ func Check(ctx context.Context, q ledger.Querier) (CheckReport, error) {
 		rep.FactsFrom = after
 	}
 	var mir map[string]*mirrorSums
-	var paid map[string]map[string]bool
 	if after != "" {
-		if mir, err = mirror(ctx, q, after); err != nil {
-			return rep, err
-		}
-		if paid, err = paidDaysFrom(ctx, q, after); err != nil {
+		if mir, err = unpaidMirror(ctx, q, after); err != nil {
 			return rep, err
 		}
 		plan, err := planAfter(ctx, q, ts.Now())
@@ -198,7 +194,6 @@ func Check(ctx context.Context, q ledger.Querier) (CheckReport, error) {
 		}
 		c.Diff = c.Payable - money.FromFloat(c.ToPay)
 		if m := mir[p.Person]; m != nil {
-			m = m.unpaid(paid[p.Person])
 			c.Facts, c.Sheet = m.total()
 			c.Diff += c.Sheet - c.Facts
 			rep.Mirror = append(rep.Mirror, m.days(p.Person, p.Name)...)

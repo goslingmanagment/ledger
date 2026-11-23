@@ -534,6 +534,23 @@ func paidDaysFrom(ctx context.Context, q ledger.Querier, from string) (map[strin
 	return out, rows.Err()
 }
 
+// unpaidMirror is every person's days from the switch on that the payouts have not paid in full, books and sheet: what
+// the sheet still governs beside the debt. The check of the debts and the payout brief both compare with «К выплате» so.
+func unpaidMirror(ctx context.Context, q ledger.Querier, after string) (map[string]*mirrorSums, error) {
+	m, err := mirror(ctx, q, after)
+	if err != nil {
+		return nil, err
+	}
+	paid, err := paidDaysFrom(ctx, q, after)
+	if err != nil {
+		return nil, err
+	}
+	for slug, ms := range m {
+		m[slug] = ms.unpaid(paid[slug])
+	}
+	return m, nil
+}
+
 // mirror reads every person's days from the switch on, books and sheet.
 func mirror(ctx context.Context, q ledger.Querier, from string) (map[string]*mirrorSums, error) {
 	out := map[string]*mirrorSums{}
