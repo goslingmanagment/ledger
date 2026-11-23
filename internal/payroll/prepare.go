@@ -293,17 +293,18 @@ func PreparePayout(ctx context.Context, db *sql.DB, slug string, now time.Time) 
 }
 
 // toPayFlags compare the debt with «К выплате» of the tabs. From the switch to a source after the sheets on the sheet
-// is a mirror: what it governs — the debt with the switch's days as the sheet has them — must equal «К выплате»; the
-// days where the mirror and the source differ are a note, not a blocker.
+// is a mirror: what it governs — the debt with the switch's days the payouts have not paid in full as the sheet has
+// them (unpaidMirror, as the check of the debts) — must equal «К выплате»; the days where the mirror and the source
+// differ are a note, not a blocker.
 func toPayFlags(ctx context.Context, q ledger.Querier, b *PayoutBrief, f *flagger) error {
 	governed, what := b.AmountMicros, "долг"
-	factsFrom, source, err := AfterFrom(ctx, q)
+	after, source, err := AfterFrom(ctx, q)
 	if err != nil {
 		return err
 	}
 	var differ []MirrorDay
-	if factsFrom != "" {
-		m, err := mirror(ctx, q, factsFrom)
+	if after != "" {
+		m, err := unpaidMirror(ctx, q, after)
 		if err != nil {
 			return err
 		}
@@ -312,7 +313,7 @@ func toPayFlags(ctx context.Context, q ledger.Querier, b *PayoutBrief, f *flagge
 			governed += int64(sheet - books)
 			differ = ms.days(b.Slug, b.Name)
 		}
-		what = "долг с днями с " + ddmm(factsFrom) + " по таблице"
+		what = "долг с днями с " + ddmm(after) + " по таблице"
 	}
 	diff := governed - *b.ToPayMicros
 	switch {
@@ -329,7 +330,7 @@ func toPayFlags(ctx context.Context, q ledger.Querier, b *PayoutBrief, f *flagge
 			parts[i] = fmt.Sprintf("%s таблица %s, %s %s", ddmm(d.Date), money.Micros(d.SheetMicros).Cents(), shortSource(source),
 				money.Micros(d.BooksMicros).Cents())
 		}
-		f.add("mirror", false, "с %s начисляют %s, таблица — зеркало и расходится с ними: %s", ddmm(factsFrom), sourceName(source),
+		f.add("mirror", false, "с %s начисляют %s, таблица — зеркало и расходится с ними: %s", ddmm(after), sourceName(source),
 			strings.Join(parts, "; "))
 	}
 	return nil

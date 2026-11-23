@@ -792,3 +792,59 @@ func TestAPaidReportDayLeavesTheMirrorOutOfTheCheck(t *testing.T) {
 		t.Fatalf("health %+v", r)
 	}
 }
+
+// The payout brief compares the debt with «К выплате» as the check does: a day the payouts paid in full leaves the
+// mirror, a day paid partly stays in it. Альфа has two tabs: Alpha (the 9th and the 10th, the week paid and marked «да»;
+// the sheet has 25 for the 10th, her post 35) and Beta (the 11th, 15 by the sheet, 20 by her post, 5 of it paid). The
+// debt is the books' 15; «К выплате» is Beta's 10, which is the debt with the unpaid 11th as the sheet has it.
+func TestThePayoutBriefLeavesPaidDaysOutOfTheMirror(t *testing.T) {
+	s, ctx := reportWeek(t)
+	post(t, s, 3, "501", "2026-11-11", postText("2026-11-11", "", "C - $80"))
+	setReports(t, s, ctx, "2026-11-10")
+	importPayouts(t, s, ctx, payoutRow(1, "2026-11-12", "Альфа", "Alpha", "60.00"))
+	closed := pageTab("2026-11-09", "Page A", 0.25, 0, [7]any{80, 100, nil, nil, nil, nil, nil})
+	closed[1][0], closed[1][4], closed[4][11] = num(0), num(45), "да"
+	partly := pageTab("2026-11-09", "Page C", 0.25, 0, [7]any{nil, nil, 60, nil, nil, nil, nil})
+	partly[1][0], partly[1][4] = num(10), num(5)
+	tables(t, s, ctx, map[string]map[string][][]payroll.Cell{
+		"Alpha": {"Альфа": closed, "Браво": pageTab("2026-11-09", "Page A", 0.2, 10, [7]any{nil, 50, nil, 50, nil, nil, nil})},
+		"Beta":  {"Альфа": partly},
+	})
+	if _, err := payroll.Rebuild(ctx, s, reportNow); err != nil {
+		t.Fatal(err)
+	}
+	if got := dayOf(t, s, "alfa", "2026-11-10"); got != "35000000 35000000 0 reports" {
+		t.Fatalf("the paid 10th: %s\n%s", got, books(t, s))
+	}
+	if got := dayOf(t, s, "alfa", "2026-11-11"); got != "20000000 5000000 15000000 reports" || balance(t, s, "alfa") != 15_000_000 {
+		t.Fatalf("the partly paid 11th: %s\n%s", got, books(t, s))
+	}
+	b, err := payroll.PreparePayout(ctx, s.RO, "alfa", reportNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.AmountMicros != 15_000_000 || b.ToPayMicros == nil || *b.ToPayMicros != 10_000_000 {
+		t.Fatalf("Альфа's brief: debt %d, «К выплате» %v", b.AmountMicros, b.ToPayMicros)
+	}
+	mirrored := ""
+	for _, f := range b.Flags {
+		if f.Kind == "to_pay" {
+			t.Fatalf("the debt is said to differ from «К выплате»: %+v", f)
+		}
+		if f.Kind == "mirror" {
+			mirrored = f.Text
+		}
+	}
+	if !strings.Contains(mirrored, "11.11 таблица 15.00, отчёт 20.00") || strings.Contains(mirrored, "10.11 таблица") {
+		t.Fatalf("the mirror line %q", mirrored)
+	}
+	c, err := payroll.Check(ctx, s.RO)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range c.People {
+		if p.Person == "alfa" && (!p.OK || p.Diff != 0) {
+			t.Fatalf("Альфа's check %+v", p)
+		}
+	}
+}
