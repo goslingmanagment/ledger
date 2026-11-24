@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -479,9 +480,73 @@ func TestPotProblemsFollowMoscowCutoverAndActiveModels(t *testing.T) {
 		}
 	}
 	exec(t, s, `UPDATE hub_pot_sync SET dirty=0`)
-	exec(t, s, `INSERT INTO hub_pot_distribution_held VALUES(1,21,'["page-a"]','page_outside_key')`)
+	exec(t, s, `INSERT INTO hub_pot_distribution_held(seq,distribution_id,page_labels_json,reason) VALUES(1,21,'["page-a"]','page_outside_key')`)
 	if potFlag(t, s, "alfa", "", after) || !potFlag(t, s, "bravo", "page_outside_key", after) {
 		t.Fatal("held page must block only its model")
+	}
+}
+
+func TestHeldPotOutsideGrantUsesFeedModel(t *testing.T) {
+	for _, tc := range []struct{ name, slug string }{
+		{"direct", "alpha"}, {"mapped", "ALPHA-HUB"}, {"empty", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, ctx := reportBook(t)
+			tables(t, s, ctx, map[string]map[string][][]payroll.Cell{
+				"Alpha": {"Браво": pageTab(cutDay, "Page A", 0.25, 0, [7]any{})},
+				"Beta":  {"Альфа": pageTab(cutDay, "Page C", 0.25, 0, [7]any{})},
+			})
+			enablePots(t, s)
+			held := map[string]any{"seq": 1, "distributionId": 1, "modelSlug": tc.slug,
+				"pageLabels": []string{"alpha-ungranted"}, "reason": "page_outside_key"}
+			st, err := readPots(t, s, potPage{since: "0", next: "1", held: []map[string]any{held}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			holds, err := hub.PotTabHolds(ctx, s.RO, st, "", reportNow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, tab := range []hub.PotTab{{Person: "bravo", Model: "alpha"}, {Person: "alfa", Model: "beta"}} {
+				problems, err := hub.PotProblems(ctx, s.RO, tab.Person, reportNow)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !slices.Equal(holds[tab], problems) {
+					t.Errorf("%v: tab holds %v, person problems %v", tab, holds[tab], problems)
+				}
+				if tab.Model == "alpha" || tc.slug == "" {
+					if len(problems) != 1 || !strings.Contains(problems[0], "alpha-ungranted") {
+						t.Errorf("%v: missing held distribution, got %v", tab, problems)
+					}
+				} else if len(problems) != 0 {
+					t.Errorf("%v: unexpected hold %v", tab, problems)
+				}
+			}
+		})
+	}
+}
+
+func TestHeldPotIncludesUnlistedTabsBookedSinceCutover(t *testing.T) {
+	s, ctx := reportBook(t)
+	tables(t, s, ctx, map[string]map[string][][]payroll.Cell{
+		"Alpha": {"Браво": pageTab(cutDay, "Page A", 0.25, 0, [7]any{4})},
+		"Beta":  {"Альфа": pageTab("2026-11-09", "Page C", 0.25, 0, [7]any{4})},
+	})
+	enablePots(t, s)
+	exec(t, s, `UPDATE payroll_tabs SET listed=0`)
+	// An older Hub can omit the model, so every tab with activity since cutover is at risk.
+	held := map[string]any{"seq": 1, "distributionId": 1, "pageLabels": []string{"alpha-ungranted"}, "reason": "page_outside_key"}
+	st, err := readPots(t, s, potPage{since: "0", next: "1", held: []map[string]any{held}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	holds, err := hub.PotTabHolds(ctx, s.RO, st, "", reportNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(holds) != 1 || len(holds[hub.PotTab{Person: "bravo", Model: "alpha"}]) != 1 {
+		t.Fatalf("expected only the unlisted tab booked on the cutover day, got %v", holds)
 	}
 }
 

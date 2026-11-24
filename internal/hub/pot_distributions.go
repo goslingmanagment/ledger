@@ -52,6 +52,7 @@ type potFeedPage struct {
 		Seq, DistributionID int64
 		PageLabels          []string
 		Reason              string
+		ModelSlug           string `json:"modelSlug"`
 	}
 	Next      string
 	More      *bool
@@ -273,7 +274,7 @@ func savePotPage(ctx context.Context, tx *sql.Tx, p potFeedPage, now time.Time) 
 	}
 	for _, h := range p.Held {
 		labels, _ := json.Marshal(h.PageLabels)
-		if _, err := tx.ExecContext(ctx, `INSERT INTO hub_pot_distribution_held(seq,distribution_id,page_labels_json,reason) VALUES(?,?,?,?)`, h.Seq, h.DistributionID, string(labels), h.Reason); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO hub_pot_distribution_held(seq,distribution_id,page_labels_json,reason,model_slug) VALUES(?,?,?,?,?)`, h.Seq, h.DistributionID, string(labels), h.Reason, h.ModelSlug); err != nil {
 			return err
 		}
 	}
