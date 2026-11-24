@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -91,8 +92,8 @@ type PrepareLine struct {
 	To         string       `json:"to"`
 	Days       []PrepareDay `json:"days,omitempty"`
 	BaseMicros *int64       `json:"baseMicros,omitempty"` // week: the cells summed
-	Rate       *float64     `json:"rate,omitempty"`       // week: «Ставка %» of the tab
-	// ExtraMicros is what the shown pay of a week line stands above base × rate: the tab's fix per shift,
+	Rate       *float64     `json:"rate,omitempty"`       // week: «Ставка %» of the tab, or Hub's term from payroll_terms_hub_from
+	// ExtraMicros is what the shown pay of a week line stands above base × rate: the shift fixes of worked days,
 	// or the sheet's own rounding.
 	ExtraMicros int64 `json:"extraMicros,omitempty"`
 	PayMicros   int64 `json:"payMicros"`
@@ -179,10 +180,50 @@ type prepUnpaid struct {
 }
 
 type prepCells struct {
-	week  string
-	pages []PayoutPage
-	pots  []PayoutPot
-	value int64
+	week     string
+	pages    []PayoutPage
+	pots     []PayoutPot
+	value    int64
+	hasShift bool
+}
+
+type prepTerms struct {
+	slug      string
+	tabs      map[string]*prepTab
+	termsFrom string
+	hub       HubTerms
+}
+
+type dayTerms struct {
+	rate      *float64
+	fixMicros int64
+}
+
+// forDay returns the rate and shift fix that price one day of a tab. For a day accrued after the sheets
+// (reports or facts) on or after settings.payroll_terms_hub_from, Hub's people registry term holding on that
+// day wins over the tab header; otherwise (before termsFrom, when unset, for sheet days, or when the registry
+// has no term for the day) the tab header stands.
+func (pt prepTerms) forDay(model, tabName, date, source string) dayTerms {
+	if source != "" && pt.termsFrom != "" && date >= pt.termsFrom {
+		if h := pt.hub.On(pt.slug, model, date); h != nil {
+			r := h.Rate()
+			return dayTerms{rate: &r, fixMicros: h.FixMicros}
+		}
+	}
+	if t := pt.tabs[tabKey(model, tabName)]; t != nil {
+		return dayTerms{rate: t.rate, fixMicros: int64(money.FromFloat(t.shiftFix))}
+	}
+	return dayTerms{}
+}
+
+func sameDayTerms(a, b dayTerms) bool {
+	if a.fixMicros != b.fixMicros {
+		return false
+	}
+	if a.rate == nil || b.rate == nil {
+		return a.rate == nil && b.rate == nil
+	}
+	return math.Abs(*a.rate-*b.rate) < 1e-9
 }
 
 func tabKey(model, name string) string { return model + "/" + name }
@@ -206,6 +247,16 @@ func PreparePayout(ctx context.Context, db *sql.DB, slug string, now time.Time) 
 	}
 	if b.ReportsFrom, err = ReportsFrom(ctx, tx); err != nil {
 		return b, err
+	}
+	termsFrom, err := TermsHubFrom(ctx, tx)
+	if err != nil {
+		return b, err
+	}
+	var hubTerms HubTerms
+	if termsFrom != "" {
+		if hubTerms, err = LoadHubTerms(ctx, tx); err != nil {
+			return b, err
+		}
 	}
 	people, err := payoutPeople(ctx, tx)
 	if err != nil {
@@ -257,7 +308,8 @@ func PreparePayout(ctx context.Context, db *sql.DB, slug string, now time.Time) 
 	today := ts.Date(now)
 	f := &flagger{b: &b}
 	if b.AmountMicros > 0 {
-		b.Lines = prepareLines(unpaid, cells, tabs, b.AmountMicros, b.AccrualFrom, memos, f)
+		pt := prepTerms{slug: slug, tabs: tabs, termsFrom: termsFrom, hub: hubTerms}
+		b.Lines = prepareLines(unpaid, cells, pt, b.AmountMicros, b.AccrualFrom, memos, f)
 		b.Blocks = prepareBlocks(b.Lines, today)
 		b.Message = prepareMessage(b.Lines, b.AmountMicros)
 		b.Suggestion = suggest(b.AmountMicros)
@@ -452,7 +504,7 @@ func prepareCells(ctx context.Context, q ledger.Querier, slug, from string, unpa
 				continue
 			}
 			f := cells[slug+"\x00"+ledger.Slug(u.model)+"\x00"+u.date]
-			c := prepCells{week: weekOfDate(u.date), pages: f.pages, pots: f.pots, value: f.value}
+			c := prepCells{week: weekOfDate(u.date), pages: f.pages, pots: f.pots, value: f.value, hasShift: f.hasShift}
 			if sh, ok := out[tabKey(u.model, u.name)+":"+u.date]; ok {
 				c.week = sh.week
 			}
@@ -521,13 +573,28 @@ func prepareMemos(ctx context.Context, q ledger.Querier, slug string) ([]*memo, 
 }
 
 // prepareLines turns the unpaid days into lines: per tab, the fully unpaid days of each week block as one
-// line, a partly paid day as its own remainder; then the opening, manual postings and what the days do not
-// explain. The pays add up to amount. Each line shows its own pay in cents, so a formula agrees with a
-// calculator; when these cents miss the amount in cents, a rounding line at the end shows by how much.
-func prepareLines(unpaid []prepUnpaid, cells map[string]prepCells, tabs map[string]*prepTab, amount int64, accrualFrom string,
+// line (split when rate or shift fix changes mid-week), a partly paid day as its own remainder; then the opening,
+// manual postings and what the days do not explain. The pays add up to amount. Each line shows its own pay in cents,
+// so a formula agrees with a calculator; when these cents miss the amount in cents, a rounding line at the end shows
+// by how much.
+func prepareLines(unpaid []prepUnpaid, cells map[string]prepCells, pt prepTerms, amount int64, accrualFrom string,
 	memos []*memo, f *flagger) []PrepareLine {
+	type weekDay struct {
+		day      PrepareDay
+		terms    dayTerms
+		hasShift bool
+	}
+	type weekGroup struct {
+		model, tab, source, week string
+		days                     []weekDay
+	}
+	type weekMeta struct {
+		terms     dayTerms
+		shiftDays int
+	}
 	byTab := map[string][]*PrepareLine{}
-	weeks := map[string]*PrepareLine{} // "<model>/<name>:<week>"
+	weeks := map[string]*weekGroup{} // "<model>/<name>:<week>:<source>"
+	var weekOrder []string
 	var tail []*PrepareLine
 	var total int64
 	for _, u := range unpaid {
@@ -553,19 +620,19 @@ func prepareLines(unpaid []prepUnpaid, cells map[string]prepCells, tabs map[stri
 				byTab[key] = append(byTab[key], &PrepareLine{Kind: LineRemainder, Model: u.model, Tab: u.name, Source: source, Week: c.week,
 					From: u.date, To: u.date, Days: []PrepareDay{day}, PayMicros: u.unpaid})
 			default:
-				// The sheet's days and the facts' of one block are two lines: their cells are not the same numbers.
-				w := weeks[key+":"+c.week+":"+source]
-				if w == nil {
-					w = &PrepareLine{Kind: LineWeek, Model: u.model, Tab: u.name, Source: source, Week: c.week, From: u.date, To: u.date}
-					if t := tabs[key]; t != nil {
-						w.Rate = t.rate
-					}
-					weeks[key+":"+c.week+":"+source] = w
-					byTab[key] = append(byTab[key], w)
+				// The sheet's days and the facts'/reports' of one block are separate lines: their cells are not the same numbers.
+				wk := key + ":" + c.week + ":" + source
+				g := weeks[wk]
+				if g == nil {
+					g = &weekGroup{model: u.model, tab: u.name, source: source, week: c.week}
+					weeks[wk] = g
+					weekOrder = append(weekOrder, wk)
 				}
-				w.Days = append(w.Days, day)
-				w.From, w.To = min(w.From, u.date), max(w.To, u.date)
-				w.PayMicros += u.unpaid
+				hasShift := c.hasShift
+				if source == SourceReports {
+					hasShift = len(day.Pages) > 0
+				}
+				g.days = append(g.days, weekDay{day: day, terms: pt.forDay(u.model, u.name, u.date, source), hasShift: hasShift})
 			}
 		default:
 			l := &PrepareLine{Kind: LineOther, From: u.date, To: u.date, PayMicros: u.unpaid}
@@ -581,6 +648,37 @@ func prepareLines(unpaid []prepUnpaid, cells map[string]prepCells, tabs map[stri
 				text = " («" + text + "»)"
 			}
 			f.add("manual", false, "ручная проводка на долг %s: +%s%s — в сообщении впиши, за что", ddmm(u.date), money.Micros(u.unpaid).Cents(), text)
+		}
+	}
+	meta := map[*PrepareLine]weekMeta{}
+	for _, wk := range weekOrder {
+		g := weeks[wk]
+		sort.SliceStable(g.days, func(i, j int) bool { return g.days[i].day.Date < g.days[j].day.Date })
+		key := tabKey(g.model, g.tab)
+		var cur *PrepareLine
+		var curMeta weekMeta
+		for _, wd := range g.days {
+			if cur == nil || !sameDayTerms(curMeta.terms, wd.terms) {
+				cur = &PrepareLine{
+					Kind:   LineWeek,
+					Model:  g.model,
+					Tab:    g.tab,
+					Source: g.source,
+					Week:   g.week,
+					From:   wd.day.Date,
+					To:     wd.day.Date,
+					Rate:   wd.terms.rate,
+				}
+				curMeta = weekMeta{terms: wd.terms}
+				byTab[key] = append(byTab[key], cur)
+			}
+			cur.Days = append(cur.Days, wd.day)
+			cur.From, cur.To = min(cur.From, wd.day.Date), max(cur.To, wd.day.Date)
+			cur.PayMicros += wd.day.PayMicros
+			if wd.hasShift {
+				curMeta.shiftDays++
+			}
+			meta[cur] = curMeta
 		}
 	}
 	if total != amount {
@@ -621,7 +719,8 @@ func prepareLines(unpaid []prepUnpaid, cells map[string]prepCells, tabs map[stri
 		shown += l.ShownMicros
 		switch l.Kind {
 		case LineWeek:
-			weekText(l, tabs[tabKey(l.Model, l.Tab)], f)
+			m := meta[l]
+			weekText(l, pt.tabs[tabKey(l.Model, l.Tab)], m.terms, m.shiftDays, f)
 		case LineRemainder:
 			l.Text = fmt.Sprintf("остаток за %s: %s", ddmm(l.From), amt(l.ShownMicros))
 		case LineDay:
@@ -664,9 +763,11 @@ func potText(days []PrepareDay) string {
 	return " (в т.ч. " + strings.Join(parts, "; ") + ")"
 }
 
-// weekText writes «дд–дд.мм: a+b+… = база × ставка% = зп». A pay above base × rate is the fix when the tab
-// has «Фикс/см», otherwise the sheet's rounding, and a flag.
-func weekText(l *PrepareLine, tab *prepTab, f *flagger) {
+// weekText writes «дд–дд.мм: a+b+… = база × ставка% = зп». For sheet days a positive pay above base × rate is
+// the fix when the tab has «Фикс/см»; for reports and facts days it is checked against the actual shift fixes of
+// worked days in the line (a pot-only day or non-shift sale gets no fix). Any other difference is shown explicitly
+// and flagged.
+func weekText(l *PrepareLine, tab *prepTab, terms dayTerms, shiftDays int, f *flagger) {
 	sort.Slice(l.Days, func(i, j int) bool { return l.Days[i].Date < l.Days[j].Date })
 	var base int64
 	values := make([]string, len(l.Days))
@@ -682,25 +783,59 @@ func weekText(l *PrepareLine, tab *prepTab, f *flagger) {
 	when := span(l.From, l.To)
 	if l.Rate == nil {
 		l.Text = fmt.Sprintf("%s: %s, зп %s", when, sum, amt(l.ShownMicros))
-		f.once("no_rate:"+tabKey(l.Model, l.Tab), "no_rate", false, "%s: в шапке вкладки нет «Ставка %%» — строки без формулы", l.Model)
+		if tab == nil {
+			f.once("no_rate:"+tabKey(l.Model, l.Tab), "no_rate", false, "%s: нет ставки (ни в реестре хаба, ни в шапке вкладки) — строки без формулы", l.Model)
+		} else {
+			f.once("no_rate:"+tabKey(l.Model, l.Tab), "no_rate", false, "%s: в шапке вкладки нет «Ставка %%» — строки без формулы", l.Model)
+		}
 		return
 	}
-	pct := int64(money.RoundCents(money.FromFloat(float64(base) / money.Scale * *l.Rate)))
+	rawPct := money.FromFloat(float64(base) / money.Scale * *l.Rate)
+	pct := int64(money.RoundCents(rawPct))
 	rate := strconv.FormatFloat(money.RoundN(*l.Rate*100, 6), 'f', -1, 64) + "%"
 	l.ExtraMicros = l.ShownMicros - pct
+	if l.Source == "" {
+		switch {
+		case l.ExtraMicros == 0:
+			l.Text = fmt.Sprintf("%s: %s × %s = %s", when, sum, rate, amt(l.ShownMicros))
+		case terms.fixMicros > 0 && l.ExtraMicros > 0:
+			l.Text = fmt.Sprintf("%s: %s × %s + фикс %s = %s", when, sum, rate, amt(l.ExtraMicros), amt(l.ShownMicros))
+		default:
+			sign := "+"
+			if l.ExtraMicros < 0 {
+				sign = "−"
+			}
+			l.Text = fmt.Sprintf("%s: %s × %s %s %s = %s", when, sum, rate, sign, amt(abs(l.ExtraMicros)), amt(l.ShownMicros))
+			f.add("formula", false, "%s %s: зп по таблице %s, а %s × %s = %s — проверь блок, в строке разница %s", l.Model, when,
+				amt(l.ShownMicros), cellNum(base), rate, amt(pct), signedAmt(l.ExtraMicros))
+		}
+		return
+	}
+	expectedFix := int64(shiftDays) * terms.fixMicros
+	expectedTotal := int64(money.RoundCents(rawPct + money.Micros(expectedFix)))
+	diff := l.ShownMicros - expectedTotal
 	switch {
-	case l.ExtraMicros == 0:
+	case diff == 0 && l.ExtraMicros == 0:
 		l.Text = fmt.Sprintf("%s: %s × %s = %s", when, sum, rate, amt(l.ShownMicros))
-	case tab != nil && tab.shiftFix != 0:
+	case diff == 0 && l.ExtraMicros > 0:
 		l.Text = fmt.Sprintf("%s: %s × %s + фикс %s = %s", when, sum, rate, amt(l.ExtraMicros), amt(l.ShownMicros))
 	default:
-		sign := "+"
-		if l.ExtraMicros < 0 {
-			sign = "−"
+		if l.ExtraMicros == 0 {
+			l.Text = fmt.Sprintf("%s: %s × %s = %s", when, sum, rate, amt(l.ShownMicros))
+		} else {
+			sign := "+"
+			if l.ExtraMicros < 0 {
+				sign = "−"
+			}
+			l.Text = fmt.Sprintf("%s: %s × %s %s %s = %s", when, sum, rate, sign, amt(abs(l.ExtraMicros)), amt(l.ShownMicros))
 		}
-		l.Text = fmt.Sprintf("%s: %s × %s %s %s = %s", when, sum, rate, sign, amt(abs(l.ExtraMicros)), amt(l.ShownMicros))
-		f.add("formula", false, "%s %s: зп по таблице %s, а %s × %s = %s — проверь блок, в строке разница %s", l.Model, when,
-			amt(l.ShownMicros), cellNum(base), rate, amt(pct), signedAmt(l.ExtraMicros))
+		if expectedFix > 0 {
+			f.add("formula", false, "%s %s: начислено %s, а %s × %s + фикс %s = %s — проверь блок, в строке разница %s", l.Model, when,
+				amt(l.ShownMicros), cellNum(base), rate, amt(int64(money.RoundCents(money.Micros(expectedFix)))), amt(expectedTotal), signedAmt(diff))
+		} else {
+			f.add("formula", false, "%s %s: начислено %s, а %s × %s = %s — проверь блок, в строке разница %s", l.Model, when,
+				amt(l.ShownMicros), cellNum(base), rate, amt(expectedTotal), signedAmt(diff))
+		}
 	}
 }
 

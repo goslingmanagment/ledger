@@ -639,9 +639,10 @@ func formatCounter(n int, source string) string {
 // factCell is a person's day on a model by a source after the sheets: the revenue by Hub page the rate takes — the net
 // of their shares by the facts, the posted amounts by the reports.
 type factCell struct {
-	pages []PayoutPage
-	pots  []PayoutPot // the reports' days: the person's pot shares, in value beside the pages
-	value int64
+	pages    []PayoutPage
+	pots     []PayoutPot // the reports' days: the person's pot shares, in value beside the pages
+	value    int64
+	hasShift bool // true when the day receives a shift fix (reports: has pages; facts: has a 'fix' row)
 }
 
 // sourceCells reads the cells of a source after the sheets in [from, to] by "<person>\x00<model slug>\x00<day>".
@@ -691,31 +692,38 @@ func reportCells(ctx context.Context, q ledger.Querier, from, to string) (map[st
 			c.pots = append(c.pots, PayoutPot{Pot: sh.Pot, Name: sh.Name, RevenueMicros: sh.Micros})
 		}
 		c.value += net
+		c.hasShift = len(c.pages) > 0
 		out[k] = c
 	}
 	return out, rows.Err()
 }
 
-// factCells reads fact_accruals of the sales in [from, to] by "<person>\x00<model slug>\x00<day>".
+// factCells reads fact_accruals of the sales (and shift-fix markers) in [from, to] by "<person>\x00<model slug>\x00<day>".
 func factCells(ctx context.Context, q ledger.Querier, from, to string) (map[string]factCell, error) {
-	rows, err := q.QueryContext(ctx, `SELECT person, model, day, page_label, SUM(net_micros) FROM fact_accruals
-		WHERE person IS NOT NULL AND kind = 'sales' AND day BETWEEN ? AND ? GROUP BY person, model, day, page_label
-		ORDER BY person, model, day, page_label`, from, to)
+	rows, err := q.QueryContext(ctx, `SELECT person, model, day, kind, page_label, SUM(net_micros), COALESCE(SUM(amount_micros), 0)
+		FROM fact_accruals WHERE person IS NOT NULL AND kind IN ('sales', 'fix') AND day BETWEEN ? AND ?
+		GROUP BY person, model, day, kind, page_label ORDER BY person, model, day, page_label`, from, to)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := map[string]factCell{}
 	for rows.Next() {
-		var person, model, day, page string
-		var net int64
-		if err := rows.Scan(&person, &model, &day, &page, &net); err != nil {
+		var person, model, day, kind, page string
+		var net, amt int64
+		if err := rows.Scan(&person, &model, &day, &kind, &page, &net, &amt); err != nil {
 			return nil, err
 		}
 		k := person + "\x00" + ledger.Slug(model) + "\x00" + day
 		c := out[k]
-		c.pages = append(c.pages, PayoutPage{Page: page, RevenueMicros: net})
-		c.value += net
+		if kind == "fix" {
+			if amt > 0 {
+				c.hasShift = true
+			}
+		} else {
+			c.pages = append(c.pages, PayoutPage{Page: page, RevenueMicros: net})
+			c.value += net
+		}
 		out[k] = c
 	}
 	return out, rows.Err()

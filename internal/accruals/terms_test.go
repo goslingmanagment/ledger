@@ -302,6 +302,40 @@ func TestFromTheTermsDayADayTakesTheRegistrysTermOfThatDay(t *testing.T) {
 		"alfa 2026-11-10 0.25 0 35000000\nalfa 2026-11-12 0.3 0 12000000\nbravo 2026-11-10 0.2 0 10000000" {
 		t.Fatalf("report_accruals:\n%s", got)
 	}
+	// PreparePayout uses Hub's terms from terms-from: Альфа's week splits at the 11th raise (25% -> 30%)
+	// and Браво's 10th uses Hub's 0 fix while her held sheet 12th keeps the sheet header's fix, with no formula flag.
+	ba, err := payroll.PreparePayout(ctx, s.RO, "alfa", reportNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var alfaLines []string
+	for _, l := range ba.Lines {
+		alfaLines = append(alfaLines, l.Text)
+	}
+	if got, want := strings.Join(alfaLines, "|"), "09.11: 80 × 25% = 20|10.11: 140 × 25% = 35|12.11: 40 × 30% = 12"; got != want {
+		t.Fatalf("Альфа prepare lines %q, want %q", got, want)
+	}
+	for _, fl := range ba.Flags {
+		if fl.Kind == "formula" {
+			t.Fatalf("unexpected formula flag for Альфа: %+v", fl)
+		}
+	}
+	bb, err := payroll.PreparePayout(ctx, s.RO, "bravo", reportNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bravoLines []string
+	for _, l := range bb.Lines {
+		bravoLines = append(bravoLines, l.Text)
+	}
+	if got, want := strings.Join(bravoLines, "|"), "10.11: 50 × 20% = 10|12.11: 50 × 20% + фикс 10 = 20"; got != want {
+		t.Fatalf("Браво prepare lines %q, want %q", got, want)
+	}
+	for _, fl := range bb.Flags {
+		if fl.Kind == "formula" {
+			t.Fatalf("unexpected formula flag for Браво: %+v", fl)
+		}
+	}
 	w, err := WeekDiff(ctx, s.RO, "2026-11-09")
 	if err != nil {
 		t.Fatal(err)
@@ -448,6 +482,18 @@ func TestFromTheTermsDayARegistryNewcomerIsAccruedWithoutATab(t *testing.T) {
 	}
 	if _, err := payroll.ReadPersonPay(ctx, s.RO, "delta", "2026-11-09", "2026-11-15", reportNow); err != nil {
 		t.Fatalf("the person read of a newcomer: %v", err)
+	}
+	bd, err := payroll.PreparePayout(ctx, s.RO, "delta", reportNow)
+	if err != nil {
+		t.Fatalf("prepare payout of a newcomer: %v", err)
+	}
+	if len(bd.Lines) != 1 || bd.Lines[0].Text != "11.11: 60 × 25% = 15" {
+		t.Fatalf("newcomer prepare lines: %+v", bd.Lines)
+	}
+	for _, fl := range bd.Flags {
+		if fl.Kind == "no_rate" || fl.Kind == "formula" {
+			t.Fatalf("unexpected flag for newcomer: %+v", fl)
+		}
 	}
 	if d, _ := payroll.CompareTerms(ctx, s.RO, "2026-11-17"); d.NewcomersText() != "delta (Alpha)" {
 		t.Fatalf("newcomers after the switch %q", d.NewcomersText())
