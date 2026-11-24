@@ -181,7 +181,7 @@ func TestHomesPagesAreAtomicAndARetractionSurvivesReplay(t *testing.T) {
 	if _, err := syncHomesPages(t, s, page); err == nil {
 		t.Fatal("cursor failure accepted")
 	}
-	if st, err := hub.ReadHomesStatus(ctx, s.RO); err != nil || st.Cursor != "3" || st.Held != 1 || count(t, s, `SELECT seq FROM hub_sale_homes WHERE transaction_id=51 AND retracted=0`) != 1 {
+	if st, err := hub.ReadHomesStatus(ctx, s.RO); err != nil || st.State != "error" || st.Error == "" || st.Cursor != "3" || st.Held != 1 || count(t, s, `SELECT seq FROM hub_sale_homes WHERE transaction_id=51 AND retracted=0`) != 1 {
 		t.Fatalf("partial commit: %+v %v", st, err)
 	}
 	exec(t, s, `DROP TRIGGER reject_cursor`)
@@ -211,5 +211,18 @@ func TestHomesPagesAreAtomicAndARetractionSurvivesReplay(t *testing.T) {
 	}
 	if got := rows(t, s, `SELECT status FROM fact_weeks WHERE week='2026-11-09'`); got != "ok" {
 		t.Fatalf("newer upsert: %s", got)
+	}
+}
+
+func TestMissingHomesConfigurationRecordsFailedAttempt(t *testing.T) {
+	s, ctx := open(t)
+	t.Setenv("LEDGER_HUB_AGENT_KEY", "")
+	t.Setenv("HOME", t.TempDir())
+	if _, err := hub.SyncConfiguredHomes(ctx, s, switchNow); err == nil {
+		t.Fatal("missing configuration passed")
+	}
+	st, err := hub.ReadHomesStatus(ctx, s.RO)
+	if err != nil || st.State != "error" || st.Error == "" || st.LastOK != "" {
+		t.Fatal(st, err)
 	}
 }

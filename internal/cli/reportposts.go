@@ -17,6 +17,7 @@ import (
 
 	"github.com/goslingmanagment/ledger/internal/brief"
 	"github.com/goslingmanagment/ledger/internal/client"
+	"github.com/goslingmanagment/ledger/internal/config"
 	"github.com/goslingmanagment/ledger/internal/db"
 	"github.com/goslingmanagment/ledger/internal/events"
 	"github.com/goslingmanagment/ledger/internal/payroll"
@@ -290,14 +291,19 @@ func collectReports(ctx context.Context, args []string) error {
 	var store *db.Store
 	var api *client.Client
 	if *localDB && (from == "" || !*dry) {
-		store, err = OpenStore(ctx)
+		if *dry {
+			store, err = db.OpenReadOnly(config.LoadServer().DB)
+		} else {
+			store, err = OpenStore(ctx)
+		}
 		if err != nil {
 			return err
 		}
 		defer store.Close()
 	}
 	if from == "" {
-		from = ts.Date(ts.Now().In(ts.MSK).AddDate(0, 0, -cfg.SinceDays))
+		now := ts.Now().In(ts.MSK)
+		from = ts.Date(now.AddDate(0, 0, -cfg.SinceDays))
 		var serverSince string
 		if *localDB {
 			serverSince, err = reports.PostsSince(ctx, store.RO, ts.Now())
@@ -321,6 +327,7 @@ func collectReports(ctx context.Context, args []string) error {
 				from = serverSince
 			}
 		}
+		from = max(from, ts.Date(now.AddDate(0, 0, -reports.MaxCollectDays)))
 	}
 	got, readErr := reports.CollectPosts(ctx, cfg, tgTopicReader(cfg.TgDir), from, *limit)
 	if readErr != nil && *dry {

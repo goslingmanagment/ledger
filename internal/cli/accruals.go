@@ -287,7 +287,7 @@ func group(out *bufio.Writer, title string, g accruals.Group) {
 	}
 	fmt.Fprintf(out, "\n%s: %s, продаж %d\n", title, usd(g.Micros), len(g.Sales))
 	writeTable(indent{out}, []string{"время", "страница", "вид", "net", "сумма", "почему"}, trim(saleRows(g.Sales)),
-		[]bool{false, false, false, true, true})
+		[]bool{false, false, false, true, true, false})
 }
 
 // trim keeps the columns time … share and the reason of a group's sales.

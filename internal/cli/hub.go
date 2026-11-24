@@ -282,16 +282,12 @@ func hubHomesSync(ctx context.Context, args []string) error {
 	if err := Flags("hub homes-sync").Parse(args); err != nil {
 		return err
 	}
-	cfg, err := hub.ConfigFromEnv()
-	if err != nil {
-		return err
-	}
 	store, err := OpenStore(ctx)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
-	st, err := hub.SyncSaleHomes(ctx, store, hub.NewClient(cfg, nil), time.Now())
+	st, err := hub.SyncConfiguredHomes(ctx, store, time.Now())
 	if printErr := printJSON(st); printErr != nil {
 		return printErr
 	}

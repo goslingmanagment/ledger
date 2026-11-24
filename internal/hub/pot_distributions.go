@@ -76,21 +76,27 @@ func (p potFeedPage) validate(since string) error {
 			!validPotMills(d.BaseMills) || len(d.Lines) == 0 || len(d.Inflows) == 0 {
 			return fmt.Errorf("неполная раздача Workboard %d", d.ID)
 		}
-		if (d.Formula.Kind != "equal" && d.Formula.Kind != "weights" && d.Formula.Kind != "manual") ||
+		if d.Formula.Kind == "" ||
 			len(d.Formula.Params) == 0 || d.Formula.Params[0] != '{' {
 			return fmt.Errorf("неверная формула раздачи %d", d.ID)
 		}
+		lineLeft, inflowLeft := *d.BaseMills, *d.BaseMills
 		seen := map[string]bool{}
 		for _, l := range d.Lines {
-			if l.PersonCode == "" || seen[l.PersonCode] || !validPotMills(l.BaseMills) {
+			if l.PersonCode == "" || seen[l.PersonCode] || !validPotMills(l.BaseMills) || *l.BaseMills > lineLeft {
 				return fmt.Errorf("неверная доля раздачи %d", d.ID)
 			}
+			lineLeft -= *l.BaseMills
 			seen[l.PersonCode] = true
 		}
 		for _, i := range d.Inflows {
-			if i.TransactionID <= 0 || i.PageLabel == "" || !validPotMills(i.BaseMills) {
+			if i.TransactionID <= 0 || i.PageLabel == "" || !validPotMills(i.BaseMills) || *i.BaseMills > inflowLeft {
 				return fmt.Errorf("неверное поступление раздачи %d", d.ID)
 			}
+			inflowLeft -= *i.BaseMills
+		}
+		if lineLeft != 0 || inflowLeft != 0 {
+			return fmt.Errorf("суммы долей и поступлений не сходятся с базой раздачи %d", d.ID)
 		}
 	}
 	for _, h := range p.Held {
@@ -143,8 +149,6 @@ func (s PotStatus) FeedProblem(now time.Time) string {
 		return "лента раздач Workboard: " + s.Error
 	case s.State != "ok" || s.LastOK == "":
 		return "нет полного успешного чтения раздач Workboard"
-	case s.Held > 0:
-		return fmt.Sprintf("Workboard придержал раздачи: %d", s.Held)
 	}
 	t, err := ts.Parse(s.LastOK)
 	if err != nil || now.Sub(t) > time.Hour {
@@ -247,7 +251,7 @@ func savePotPage(ctx context.Context, tx *sql.Tx, p potFeedPage, now time.Time) 
 		r, err := tx.ExecContext(ctx, `INSERT INTO hub_pot_distributions(id,seq,state,pot_code,pot_name,model_slug,day,formula_kind,formula_params,base_mills,lines_json,at,updated_at)
   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET seq=excluded.seq,state=excluded.state,pot_code=excluded.pot_code,pot_name=excluded.pot_name,
   model_slug=excluded.model_slug,day=excluded.day,formula_kind=excluded.formula_kind,formula_params=excluded.formula_params,base_mills=excluded.base_mills,
-  lines_json=excluded.lines_json,at=excluded.at,updated_at=excluded.updated_at WHERE excluded.seq>hub_pot_distributions.seq`,
+  lines_json=excluded.lines_json,at=excluded.at,updated_at=excluded.updated_at WHERE excluded.seq>hub_pot_distributions.seq AND hub_pot_distributions.state<>'reversed'`,
 			d.ID, c.Seq, c.Change, d.Pot.Code, d.Pot.Name, d.Pot.ModelSlug, d.Day, d.Formula.Kind, string(d.Formula.Params), *d.BaseMills, string(lines), ts.Format(c.At), ts.Format(now))
 		if err != nil {
 			return err

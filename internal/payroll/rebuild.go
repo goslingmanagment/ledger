@@ -82,6 +82,10 @@ func Rebuild(ctx context.Context, store *db.Store, now time.Time) (Report, error
 		if err := Refresh(ctx, tx, now); err != nil {
 			return rep, fmt.Errorf("начисления по отчётам: %w", err)
 		}
+		// This transaction will reconcile the refreshed mirror before committing.
+		if _, err := tx.ExecContext(ctx, `UPDATE hub_pot_sync SET dirty=0 WHERE dirty=1 AND state='ok'`); err != nil {
+			return rep, err
+		}
 	}
 	from, err := AccrualFrom(ctx, tx)
 	if err != nil {
@@ -136,9 +140,6 @@ func Rebuild(ctx context.Context, store *db.Store, now time.Time) (Report, error
 		}
 	}
 	if err := rebuildFIFO(ctx, tx); err != nil {
-		return rep, err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE hub_pot_sync SET dirty=0 WHERE dirty=1 AND state='ok'`); err != nil {
 		return rep, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -380,12 +381,15 @@ func reconcileAccruals(ctx context.Context, tx *sql.Tx, from string, plan afterP
 			if w.basis == nil || rp.potFrom == "" || w.date < rp.potFrom {
 				continue
 			}
-			var oldPots, oldRefs string
-			err := tx.QueryRowContext(ctx, `SELECT hub_pots,sale_refs FROM report_accrual_entries WHERE entry_id=?`, hs[0].id).Scan(&oldPots, &oldRefs)
+			var sameBasis bool
+			err := tx.QueryRowContext(ctx, `SELECT hub_pots=? AND (? OR
+                (sale_refs=? AND pages IS ? AND net_micros=? AND rate IS ? AND fix_micros=? AND hub_reports=?))
+                FROM report_accrual_entries WHERE entry_id=?`, w.basis.hubPots, rp.paid[day] > 0, w.basis.saleRefs,
+				w.basis.pages, w.basis.net, w.basis.rate, w.basis.fix, w.basis.hubReports, hs[0].id).Scan(&sameBasis)
 			if err != nil && err != sql.ErrNoRows {
 				return err
 			}
-			if err == sql.ErrNoRows || (oldPots == w.basis.hubPots && (rp.paid[day] > 0 || oldRefs == w.basis.saleRefs)) {
+			if err == sql.ErrNoRows || sameBasis {
 				continue
 			}
 		}
@@ -420,8 +424,8 @@ func reconcileAccruals(ctx context.Context, tx *sql.Tx, from string, plan afterP
 			return fmt.Errorf("%s: %w", day, err)
 		}
 		if w.basis != nil {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO report_accrual_entries(entry_id, net_micros, rate, fix_micros,hub_reports,sale_refs,hub_pots) VALUES (?, ?, ?, ?,?,?,?)`,
-				id, int64(w.basis.net), w.basis.rate, int64(w.basis.fix), w.basis.hubReports, w.basis.saleRefs, w.basis.hubPots); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO report_accrual_entries(entry_id, net_micros, rate, fix_micros,hub_reports,sale_refs,hub_pots,pages) VALUES (?, ?, ?, ?,?,?,?,?)`,
+				id, int64(w.basis.net), w.basis.rate, int64(w.basis.fix), w.basis.hubReports, w.basis.saleRefs, w.basis.hubPots, w.basis.pages); err != nil {
 				return err
 			}
 		}

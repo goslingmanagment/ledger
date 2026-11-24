@@ -40,6 +40,7 @@ const (
 	FlagSumMismatch   = "sum_mismatch"
 	FlagDateMismatch  = "date_mismatch"
 	FlagNoDate        = "no_date"
+	FlagParseError    = "parse_error"
 	FlagDuplicate     = "duplicate"
 	// FlagSecondReport: the message holds two reports (two posts pasted into one); only the first is read. It moves no
 	// money: the first report counts as before, the second is not in the pay base until it is sent as its own message.
@@ -47,7 +48,7 @@ const (
 )
 
 // flagOrder is the order flags are stored and shown in.
-var flagOrder = []string{FlagUnknownAuthor, FlagTagMismatch, FlagNoDate, FlagDateMismatch, FlagSumMismatch, FlagUnknownPage, FlagDuplicate, FlagSecondReport}
+var flagOrder = []string{FlagUnknownAuthor, FlagTagMismatch, FlagNoDate, FlagParseError, FlagDateMismatch, FlagSumMismatch, FlagUnknownPage, FlagDuplicate, FlagSecondReport}
 
 // FlagText says a flag in Russian.
 var FlagText = map[string]string{
@@ -57,6 +58,7 @@ var FlagText = map[string]string{
 	FlagSumMismatch:   "строки аккаунтов не сходятся с «Общим доходом»",
 	FlagDateMismatch:  "дата отчёта дальше суток от дня отправки",
 	FlagNoDate:        "дату отчёта не прочитать",
+	FlagParseError:    "правка сообщения не разобрана как отчёт",
 	FlagDuplicate:     "та же страница того же дня в другом сообщении: считается последнее",
 	FlagSecondReport:  "в сообщении два отчёта: прочитан только первый, второй нужно отправить отдельным сообщением",
 }
@@ -64,7 +66,7 @@ var FlagText = map[string]string{
 // Blocking says whether a flag keeps the whole post out of the pay base (unknown_page keeps out only its page).
 func Blocking(flag string) bool {
 	switch flag {
-	case FlagUnknownAuthor, FlagNoDate, FlagSumMismatch, FlagDateMismatch:
+	case FlagUnknownAuthor, FlagNoDate, FlagParseError, FlagSumMismatch, FlagDateMismatch:
 		return true
 	}
 	return false
@@ -419,16 +421,17 @@ func ParsePosts(ctx context.Context, tx *sql.Tx, now time.Time) (ParseReport, er
 	if err != nil {
 		return rep, err
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT id, payload FROM events WHERE source = ? ORDER BY id`, PostSource)
+	rows, err := tx.QueryContext(ctx, `SELECT id, kind, payload FROM events WHERE source = ? ORDER BY id`, PostSource)
 	if err != nil {
 		return rep, err
 	}
-	var list []*post
+	var list, unreadable []*post
+	hasReport := map[string]bool{}
 	latest := map[string]postVersion{} // message → its newest event by edit time (then message time, then arrival order)
 	for rows.Next() {
 		var id int64
-		var raw string
-		if err := rows.Scan(&id, &raw); err != nil {
+		var kind, raw string
+		if err := rows.Scan(&id, &kind, &raw); err != nil {
 			rows.Close()
 			return rep, err
 		}
@@ -445,13 +448,24 @@ func ParsePosts(ctx context.Context, tx *sql.Tx, now time.Time) (ParseReport, er
 		if cur, have := latest[k]; !have || v.after(cur) {
 			latest[k] = v
 		}
+		if kind == PostKindRetract {
+			continue
+		}
 		if p := m.build(id, e); p != nil {
 			list = append(list, p)
+			hasReport[k] = true
+		} else {
+			unreadable = append(unreadable, &post{EventID: id, Peer: e.Peer, Topic: e.Topic, MsgID: e.MsgID, PostedAt: e.Date, Sender: e.Sender, SenderID: e.SenderID, Text: e.Text, Flags: []string{FlagParseError}, key: k})
 		}
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return rep, err
+	}
+	for _, p := range unreadable {
+		if hasReport[p.key] {
+			list = append(list, p)
+		}
 	}
 	rep.Posts = len(list)
 	for _, p := range list {

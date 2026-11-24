@@ -121,7 +121,7 @@ func (hs HubTerms) On(person, model, day string) *HubTerm {
 
 // LoadHubTerms reads the terms the registry serves now (not gone), the model as ledger names it.
 func LoadHubTerms(ctx context.Context, q ledger.Querier) (HubTerms, error) {
-	slugs, err := optionalMap(ctx, q, "hub_model_slugs")
+	slugs, err := hubModelMap(ctx, q)
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +138,7 @@ func LoadHubTerms(ctx context.Context, q ledger.Querier) (HubTerms, error) {
 			return nil, err
 		}
 		h.Model = h.ModelSlug
-		if m, ok := slugs[h.ModelSlug]; ok {
+		if m, ok := slugs[ledger.Slug(h.ModelSlug)]; ok {
 			h.Model = m
 		}
 		out = append(out, h)

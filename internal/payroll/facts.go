@@ -683,18 +683,13 @@ func reportCells(ctx context.Context, q ledger.Querier, from, to string) (map[st
 		if err := json.Unmarshal([]byte(pots), &shares); err != nil {
 			return nil, fmt.Errorf("report_accruals %s %s %s: pots: %w", person, model, day, err)
 		}
-		var list []struct {
-			Page   string `json:"page"`
-			Micros int64  `json:"micros"`
-		}
-		if err := json.Unmarshal([]byte(pages), &list); err != nil {
+		list, err := reportPages(pages)
+		if err != nil {
 			return nil, fmt.Errorf("report_accruals %s %s %s: pages: %w", person, model, day, err)
 		}
 		k := person + "\x00" + ledger.Slug(model) + "\x00" + day
 		c := out[k]
-		for _, p := range list {
-			c.pages = append(c.pages, PayoutPage{Page: p.Page, RevenueMicros: p.Micros})
-		}
+		c.pages = append(c.pages, list...)
 		for _, sh := range shares {
 			c.pots = append(c.pots, payoutPot(sh, rate))
 		}
@@ -703,6 +698,21 @@ func reportCells(ctx context.Context, q ledger.Querier, from, to string) (map[st
 		out[k] = c
 	}
 	return out, rows.Err()
+}
+
+func reportPages(raw string) ([]PayoutPage, error) {
+	var list []struct {
+		Page   string
+		Micros int64
+	}
+	if err := json.Unmarshal([]byte(raw), &list); err != nil {
+		return nil, err
+	}
+	out := make([]PayoutPage, 0, len(list))
+	for _, p := range list {
+		out = append(out, PayoutPage{Page: p.Page, RevenueMicros: p.Micros})
+	}
+	return out, nil
 }
 
 func payoutPot(sh hub.PotShare, rate *float64) PayoutPot {

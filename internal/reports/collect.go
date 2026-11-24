@@ -138,7 +138,8 @@ type tgMessage struct {
 }
 
 type tgHistory struct {
-	Messages []tgMessage `json:"messages"`
+	Messages  []tgMessage `json:"messages"`
+	Truncated *bool       `json:"truncated"`
 }
 
 // LooksLikeReport is the collector's filter: a message with «Общий доход». The server decides what is a report.
@@ -219,7 +220,7 @@ func CollectPosts(ctx context.Context, cfg CollectConfig, read TopicReader, sinc
 					Kind: kind, OccurredAt: e.Date, Payload: payload})
 			}
 			switch {
-			case len(h.Messages) < lim:
+			case h.Truncated != nil && !*h.Truncated, h.Truncated == nil && len(h.Messages) < lim:
 				done = true
 			case fresh == 0 || !last.After(before):
 				lim *= 2 // one second holds a whole page: a bigger page gets past it

@@ -630,7 +630,7 @@ func HubVersionsByDay(ctx context.Context, q ledger.Querier) (map[[3]string][]in
 		if err := rows.Scan(&id, &person, &date, &page); err != nil {
 			return nil, err
 		}
-		k := [3]string{person, models[page], date}
+		k := [3]string{person, ledger.Slug(models[page]), date}
 		if list := out[k]; len(list) == 0 || list[len(list)-1] != id {
 			out[k] = append(list, id)
 		}

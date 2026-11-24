@@ -173,6 +173,9 @@ func HubPots(ctx context.Context, e Env) Result {
 		return fail(hubPotsCheck, "warn", err.Error(), nil)
 	}
 	if st.From == "" {
+		if st.State == "error" || st.Error != "" {
+			return fail(hubPotsCheck, "warn", st.FeedProblem(e.Now), st)
+		}
 		return pass(hubPotsCheck, "доли Workboard ещё не включены")
 	}
 	rows, err := e.Q.QueryContext(ctx, `SELECT id,person,date FROM payroll_pending_changes WHERE reason='общак' AND state='open' ORDER BY date,person`)

@@ -266,7 +266,7 @@ func TestCollectReportsLocalDBWindowAndFiveDayOldEdit(t *testing.T) {
 	}
 	defer func() { tgTopicReader = oldReader }()
 
-	// 1. Live HTTP server with a collect-only key serves GET /v1/report-posts/since = 2026-11-10 to --dry-run.
+	// Include the evening before the report date in the automatic Telegram read.
 	srv := httptest.NewServer(server.New(store, slog.New(slog.NewTextHandler(io.Discard, nil)), "test").Mux)
 	defer srv.Close()
 	tok, _, err := auth.Create(ctx, store.RW, "mac", []string{auth.ScopeCollect}, false, now)
@@ -279,8 +279,8 @@ func TestCollectReportsLocalDBWindowAndFiveDayOldEdit(t *testing.T) {
 	if err := collectReports(ctx, []string{"--dry-run", "--config", cfg, "--spool", spool, "--state", state}); err != nil {
 		t.Fatal(err)
 	}
-	if readSince != "2026-11-10" {
-		t.Fatalf("HTTP --dry-run since = %q, want 2026-11-10", readSince)
+	if readSince != "2026-11-09" {
+		t.Fatalf("HTTP --dry-run since = %q, want 2026-11-09", readSince)
 	}
 	store.Close()
 
@@ -289,8 +289,8 @@ func TestCollectReportsLocalDBWindowAndFiveDayOldEdit(t *testing.T) {
 	if err := collectReports(ctx, []string{"--local-db", "--dry-run", "--config", cfg, "--spool", spool, "--state", state}); err != nil {
 		t.Fatal(err)
 	}
-	if readSince != "2026-11-10" {
-		t.Fatalf("--local-db --dry-run since = %q, want 2026-11-10", readSince)
+	if readSince != "2026-11-09" {
+		t.Fatalf("--local-db --dry-run since = %q, want 2026-11-09", readSince)
 	}
 
 	// 3. --local-db live run reads back 5 days, ingests the edited post and opens payroll_pending_changes!
@@ -298,8 +298,8 @@ func TestCollectReportsLocalDBWindowAndFiveDayOldEdit(t *testing.T) {
 	if err := collectReports(ctx, []string{"--local-db", "--config", cfg, "--spool", spool, "--state", state}); err != nil {
 		t.Fatal(err)
 	}
-	if readSince != "2026-11-10" {
-		t.Fatalf("--local-db since = %q, want 2026-11-10", readSince)
+	if readSince != "2026-11-09" {
+		t.Fatalf("--local-db since = %q, want 2026-11-09", readSince)
 	}
 	store, err = db.Open(dbPath)
 	if err != nil {
@@ -309,5 +309,21 @@ func TestCollectReportsLocalDBWindowAndFiveDayOldEdit(t *testing.T) {
 	changes, err := payroll.OpenChanges(ctx, store.RO, "alfa")
 	if err != nil || len(changes) != 1 || changes[0].Date != "2026-11-10" || changes[0].PostedMicros != 25_000_000 || changes[0].NewMicros != 35_000_000 {
 		t.Fatalf("pending changes after 5-day-old collect: %+v err=%v", changes, err)
+	}
+}
+
+func TestDryRunLocalReportCollectionCannotCreateDatabase(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "reports.json")
+	if err := os.WriteFile(cfg, []byte(`{"topics":[{"peer":"fixture","topic":1}],"tg_dir":"."}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "missing.db")
+	t.Setenv("LEDGER_DB", path)
+	if err := collectReports(t.Context(), []string{"--dry-run", "--local-db", "--config", cfg}); !os.IsNotExist(err) {
+		t.Fatalf("expected missing read-only database, got %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("dry run created database: %v", err)
 	}
 }

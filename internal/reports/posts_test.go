@@ -571,6 +571,9 @@ func TestPostVersionSelectionByEditTimestampAndRetract(t *testing.T) {
 }
 
 func TestReportPostsSinceEndpointScopesAndShape(t *testing.T) {
+	oldNow := ts.Now
+	ts.Now = func() time.Time { return time.Date(2026, 11, 20, 12, 0, 0, 0, ts.MSK) }
+	t.Cleanup(func() { ts.Now = oldNow })
 	s := postBook(t)
 	ctx := t.Context()
 	setSetting(t, s, "payroll_reports_from", "2026-11-10")
@@ -593,8 +596,8 @@ func TestReportPostsSinceEndpointScopesAndShape(t *testing.T) {
 		if err := key("ok-"+sc, sc).Do(ctx, http.MethodGet, "/v1/report-posts/since", nil, &raw); err != nil {
 			t.Fatalf("%s on /v1/report-posts/since: %v", sc, err)
 		}
-		if len(raw) != 1 || raw["since"] != "2026-11-12" {
-			t.Fatalf("%s answer: %+v, want only since=2026-11-12", sc, raw)
+		if len(raw) != 1 || raw["since"] != "2026-11-11" {
+			t.Fatalf("%s answer: %+v, want only since=2026-11-11", sc, raw)
 		}
 	}
 	// Forbidden for all other scopes.
@@ -668,4 +671,16 @@ func TestSecondReportMovesNoMoney(t *testing.T) {
 		t.Errorf("flags: %s", f)
 	}
 	want(t, days(t, s), alone...)
+}
+
+func TestCollectStopsOnFullFinalPage(t *testing.T) {
+	calls := 0
+	read := func(context.Context, string, int64, string, string, int) ([]byte, error) {
+		calls++
+		return []byte(`{"truncated":false,"messages":[{"id":7,"date":"2026-11-14T21:00:00Z"}]}`), nil
+	}
+	got, err := CollectPosts(t.Context(), CollectConfig{Topics: []CollectTopic{{Peer: "fixture", Topic: 1}}}, read, "2026-11-14", 1)
+	if err != nil || calls != 1 || got.Messages != 1 {
+		t.Fatal(got, calls, err)
+	}
 }

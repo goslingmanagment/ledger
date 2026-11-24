@@ -153,7 +153,7 @@ func reportDays(ctx context.Context, q ledger.Querier) ([]reportDay, error) {
 			rows.Close()
 			return nil, err
 		}
-		k := [3]string{person, model, day}
+		k := [3]string{person, ledger.Slug(model), day}
 		d := byKey[k]
 		if d == nil {
 			d = &reportDay{person: person, model: model, day: day, pages: []reportPage{}, posts: []int64{}}
@@ -196,7 +196,7 @@ func reportDays(ctx context.Context, q ledger.Querier) ([]reportDay, error) {
 		return nil, err
 	}
 	addShare := func(person, model, day string, part hub.PotShare) {
-		k := [3]string{person, model, day}
+		k := [3]string{person, ledger.Slug(model), day}
 		d := byKey[k]
 		if d == nil {
 			d = &reportDay{person: person, model: model, day: day, pages: []reportPage{}, posts: []int64{}}

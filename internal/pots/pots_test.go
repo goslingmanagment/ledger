@@ -352,7 +352,7 @@ func TestLegacyPotWritesStopAtDistributionDay(t *testing.T) {
 	hubFact(t, s, "8140", "page-a", "2026-11-12T11:00:00.000+03:00", 9000)
 	potDecision(t, s, 86, "8140", "set-one", now)
 	plan, err := pots.PlanHub(ctx, s.RO, now)
-	if err != nil || len(plan.Add)+len(plan.Remove) != 0 || len(plan.Waiting) != 1 || !strings.Contains(plan.Waiting[0].Why, "Деньги → Общаки") {
+	if err != nil || len(plan.Add)+len(plan.Remove) != 0 || len(plan.Waiting) != 0 {
 		t.Fatal(plan, err)
 	}
 	in.OccurredAt = "2026-11-11T12:00:00+03:00"
