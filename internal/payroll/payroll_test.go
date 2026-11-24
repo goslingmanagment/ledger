@@ -1197,6 +1197,9 @@ func TestUnenteredFromFacts(t *testing.T) {
 		[2]any{"2026-11-10T05:00:00+03:00", 50000}, // Bravo's slot: a neighbour's sale
 		[2]any{"2026-11-11T03:00:00+03:00", 40000}, // Bravo's slot on his day off
 		[2]any{"2026-11-10T20:00:00+03:00", 20000}) // Alfa's slot
+	if _, err := s.RW.ExecContext(ctx, `UPDATE hub_sale_homes_sync SET state='ok',last_ok=?`, now); err != nil {
+		t.Fatal(err)
+	}
 	for _, q := range []string{
 		`INSERT INTO hub_pages(page_label, platform, model_slug, model_name, seen_at) VALUES ('page-1', 'fansly', 'Alpha', 'Alpha', '2026-11-15')`,
 		`INSERT INTO hub_team_sync(window_from, window_to, status, reasons, read_at, ok_at) VALUES
@@ -1302,8 +1305,11 @@ func wantUnentered(t *testing.T, got, want map[string]unenteredGot, what string)
 }
 
 // proveWeek stores Hub's team facts proving the week of 2026-11-09 (the one before is not), page-1 as Alpha's page.
-func proveWeek(t *testing.T, s *db.Store, ctx context.Context, accruals string) {
+func proveWeek(t *testing.T, s *db.Store, ctx context.Context, now, accruals string) {
 	t.Helper()
+	if _, err := s.RW.ExecContext(ctx, `UPDATE hub_sale_homes_sync SET state='ok',last_ok=?`, now); err != nil {
+		t.Fatal(err)
+	}
 	for _, q := range []string{
 		`INSERT INTO hub_pages(page_label, platform, model_slug, model_name, seen_at) VALUES ('page-1', 'fansly', 'Alpha', 'Alpha', '2026-11-15')`,
 		`INSERT INTO hub_team_sync(window_from, window_to, status, reasons, read_at, ok_at) VALUES
@@ -1334,7 +1340,7 @@ func TestUnenteredStopsAtPaidThrough(t *testing.T) {
 		[2]any{"2026-11-03T03:00:00+03:00", 60000}, // his slot, unproven week, before paid-through
 		[2]any{"2026-11-17T03:00:00+03:00", 40000}) // his slot, unproven week, after it
 	// The week of 11-09 is proven: his own sales 11-10 (before paid-through) and 11-12 (after it).
-	proveWeek(t, s, ctx, `(5, 'Bravo', 'bravo', 'Alpha', 'page-1', '2026-11-10', '2026-11-09', 'sales', 1, 30000000),
+	proveWeek(t, s, ctx, now, `(5, 'Bravo', 'bravo', 'Alpha', 'page-1', '2026-11-10', '2026-11-09', 'sales', 1, 30000000),
 		(5, 'Bravo', 'bravo', 'Alpha', 'page-1', '2026-11-12', '2026-11-09', 'sales', 1, 15000000)`)
 	teamWork(t, s, ctx, 5, "Bravo", "shift", "2026-11-10T00:01:00+03:00", "2026-11-10T07:59:00+03:00")
 	teamWork(t, s, ctx, 5, "Bravo", "shift", "2026-11-12T00:00:00+03:00", "2026-11-12T08:00:00+03:00")
@@ -1377,7 +1383,7 @@ func TestUnenteredTabOffTheCard(t *testing.T) {
 	f.run(t, s, ctx, now)
 	hubDay(t, s, ctx, "page-1", "2026-10-01T00:00:00+03:00", now, [2]any{"2026-11-03T03:00:00+03:00", 60000})
 	// The week of 11-09 is proven, and Hub user 6 (the card foxtrot by its code) sold on Alpha's page-1 on 11-10.
-	proveWeek(t, s, ctx, `(6, 'Foxtrot', 'foxtrot', 'Alpha', 'page-1', '2026-11-10', '2026-11-09', 'sales', 1, 30000000)`)
+	proveWeek(t, s, ctx, now, `(6, 'Foxtrot', 'foxtrot', 'Alpha', 'page-1', '2026-11-10', '2026-11-09', 'sales', 1, 30000000)`)
 	teamWork(t, s, ctx, 6, "Foxtrot", "shift", "2026-11-10T00:01:00+03:00", "2026-11-10T07:59:00+03:00")
 	rebuild(t, s, ctx, now)
 	wantUnentered(t, unenteredRows(t, s), map[string]unenteredGot{

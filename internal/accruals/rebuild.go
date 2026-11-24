@@ -1,12 +1,5 @@
-// Package accruals counts what each person would be paid from Hub's facts (ledger release 2, L3), in shadow. Every
-// sale of a proven window of the team's facts (hub_team_sync) goes through the split rules (internal/split). Each share
-// of a shift or a look-in goes to its person at the rate of their tab for the page's model: payroll.Terms, the same
-// header the sheet's days are counted by — «Ставка %» of the revenue, and «Фикс/см» for a day with a shift (from
-// settings.payroll_terms_hub_from the person's term holding on the day in Hub's people registry, people.terms). The общак
-// is summed per week with its sales; what waits, waits for a decision, is nobody's or unknown is listed with its
-// sales, not accrued. Nothing here posts; from settings.payroll_facts_from on payroll.Rebuild posts fact_accruals of the
-// proven weeks as the debts (L4), before it they are a shadow. `ledger accruals diff` puts a week of it beside the
-// payout sheets.
+// Package accruals prices Hub's computed sale shares and shift days. From payroll_facts_from,
+// payroll posts only proven weeks. Until then the facts are available for comparison.
 package accruals
 
 import (
@@ -21,12 +14,10 @@ import (
 	"time"
 
 	"github.com/goslingmanagment/ledger/internal/db"
-	"github.com/goslingmanagment/ledger/internal/decisions"
 	"github.com/goslingmanagment/ledger/internal/hub"
 	"github.com/goslingmanagment/ledger/internal/ledger"
 	"github.com/goslingmanagment/ledger/internal/money"
 	"github.com/goslingmanagment/ledger/internal/payroll"
-	"github.com/goslingmanagment/ledger/internal/split"
 	"github.com/goslingmanagment/ledger/internal/ts"
 )
 
@@ -47,26 +38,14 @@ type Report struct {
 	Rewritten int      `json:"rewritten"`
 	Unknown   []string `json:"unknownWeeks,omitempty"`
 	Unmapped  []string `json:"unmapped,omitempty"` // Hub users no card names
-	// Claims is how many of the owner's claims (sale_claims) the facts gave their person; ClaimsIgnored — the rest, why.
-	Claims        int            `json:"claims"`
-	ClaimsIgnored []IgnoredClaim `json:"claimsIgnored,omitempty"`
-}
-
-// IgnoredClaim is a claim the facts did not honour: the sale is not nobody's, not in the proven facts, or the person
-// has no Hub user to credit.
-type IgnoredClaim struct {
-	Ref    string `json:"transactionRef"`
-	Person string `json:"person"`
-	Why    string `json:"why"`
 }
 
 type window struct {
-	from, to     time.Time
-	key          string
-	status       string
-	reasons      []string
-	workTo       time.Time
-	readAt, okAt string
+	from, to time.Time
+	key      string
+	status   string
+	reasons  []string
+	readAt   string
 }
 
 // holder is a work that held a sale, as fact_homes.holders keeps it.
@@ -108,7 +87,7 @@ type accrualRow struct {
 
 // Rebuild recomputes fact_homes, fact_accruals and fact_weeks from the mirror of the team's facts, in one
 // transaction, then — once the accruals are switched to the facts (settings.payroll_facts_from) — the debts.
-// Idempotent; it runs after every read of the facts and every claim.
+// Idempotent; it runs after every read of the facts and sale homes.
 func Rebuild(ctx context.Context, store *db.Store, now time.Time) (Report, error) {
 	tx, err := store.RW.BeginTx(ctx, nil)
 	if err != nil {
@@ -141,16 +120,11 @@ func settle(ctx context.Context, store *db.Store, now time.Time) error {
 // rebuildTx is Rebuild inside the caller's transaction.
 func rebuildTx(ctx context.Context, tx *sql.Tx, now time.Time) (Report, error) {
 	var rep Report
-	rules := split.Default
 	windows, err := loadWindows(ctx, tx)
 	if err != nil {
 		return rep, err
 	}
 	works, err := loadWorks(ctx, tx)
-	if err != nil {
-		return rep, err
-	}
-	sales, err := loadSales(ctx, tx)
 	if err != nil {
 		return rep, err
 	}
@@ -162,97 +136,46 @@ func rebuildTx(ctx context.Context, tx *sql.Tx, now time.Time) (Report, error) {
 	if err != nil {
 		return rep, err
 	}
-	claims, err := loadClaims(ctx, tx)
+	feed, err := hub.ReadHomesStatus(ctx, tx)
 	if err != nil {
 		return rep, err
 	}
-	hubFrom, err := decisions.HubFrom(ctx, tx)
-	if err != nil {
-		return rep, err
-	}
-	// The facts are read from Hub's first works (hub_team_since) for «не занесено»; the rule settles from its own
-	// week. A window before it holds no sale of the rule, and its works must not stand in for the rule's windows'.
-	ruleWeek := ts.WeekStart(rules.Since)
-	ruled := windows[:0:0]
-	for _, w := range windows {
-		if w.from.Before(ruleWeek) {
-			delete(works, w.key)
-			delete(sales, w.key)
-			continue
-		}
-		ruled = append(ruled, w)
-	}
-	windows = ruled
-
+	first := ts.WeekStart(hub.FactsStart)
 	// A work at a window's edge is cut (Hub computes it from that window's activity only): its whole version is the one
 	// of the proven window its start falls in.
 	whole := map[string]hub.TeamWork{}
+	byRef := map[string]hub.TeamWork{}
+	usernames := map[int64]string{}
 	for _, w := range windows {
-		if w.status != "ok" {
-			continue
-		}
 		for _, x := range works[w.key] {
-			if !x.StartedAt.Before(w.from) && x.StartedAt.Before(w.to) {
+			usernames[x.UserID] = x.Username
+			byRef[x.Ref] = x
+			if w.status == "ok" && !w.from.Before(first) && !x.StartedAt.Before(w.from) && x.StartedAt.Before(w.to) {
 				whole[x.Ref] = x
 			}
 		}
-	}
-	usernames := map[int64]string{}
-	for _, list := range works {
-		for _, x := range list {
-			usernames[x.UserID] = x.Username
+		if w.status == "ok" && !w.from.Before(first) {
+			rep.Windows++
 		}
 	}
-
-	var homes []homeRow
-	claimed := map[string][]homeRow{} // the rows of each claimed sale of the proven windows
-	for _, w := range windows {
-		if w.status != "ok" {
-			continue
-		}
-		rep.Windows++
-		byRef := map[string]hub.TeamWork{}
-		splitWorks := make([]split.Work, 0, len(works[w.key]))
-		for _, x := range works[w.key] {
-			if c, ok := whole[x.Ref]; ok {
-				x = c
-			}
-			byRef[x.Ref] = x
-			splitWorks = append(splitWorks, x.Split())
-		}
-		list := sales[w.key]
-		splitSales := make([]split.Sale, len(list))
-		for i, s := range list {
-			splitSales[i] = s.Split()
-			// Hub's decision of the sale, and the shares it gives (they come as the resolution), rule the sales of the switch
-			// day and later (settings.sale_decisions_hub_from). A sale before it, and every sale while the setting is empty,
-			// goes by ledger's own rows as it did: the claims below, and a resolution Hub's old tables held.
-			if s.Decision != nil && !decisions.HubRules(hubFrom, ts.Date(s.OccurredAt)) {
-				splitSales[i].Decision, splitSales[i].Resolution = nil, nil
-			}
-			if c, ok := claims[s.TransactionRef]; ok {
-				if user, ok := who.userOf(c.person, models[s.PageLabel], usernames); ok {
-					splitSales[i].ClaimedBy = &user
-				}
-			}
-		}
-		rep.Sales += len(list)
-		// The works are known up to Hub's workTo: a PPV whose wait runs past it still waits.
-		for i, h := range rules.HomesOf(splitSales, splitWorks, w.workTo) {
-			rows := homesOf(list[i], h, w.key, models[list[i].PageLabel], byRef, usernames, who)
-			homes = append(homes, rows...)
-			if _, ok := claims[list[i].TransactionRef]; ok {
-				claimed[list[i].TransactionRef] = rows
-			}
-		}
+	for ref, x := range whole {
+		byRef[ref] = x
 	}
-	if err := checkClaims(ctx, tx, claims, claimed, models, who, &rep); err != nil {
+	homes, gaps, sales, err := mirrorHomes(ctx, tx, models, usernames, byRef, who)
+	if err != nil {
 		return rep, err
 	}
-
+	rep.Sales = sales
+	for i := range windows {
+		w := &windows[i]
+		if reason := gaps[w.key]; reason != "" {
+			w.status = "unknown"
+			w.reasons = append(w.reasons, reason)
+		}
+	}
 	acc := map[accrualKey]*accrualRow{}
 	for _, h := range homes {
-		if (h.home != split.Shift && h.home != split.Visit) || h.user == 0 {
+		if (h.home != "shift" && h.home != "visit") || h.user == 0 || h.day == "" {
 			continue
 		}
 		k := accrualKey{h.user, h.model, h.page, h.day}
@@ -264,26 +187,31 @@ func rebuildTx(ctx context.Context, tx *sql.Tx, now time.Time) (Report, error) {
 		a.sales++
 		a.net += h.share
 	}
-	// The fix of a tab is paid for each Moscow day with a shift (not a look-in) on the model's pages, as the sheet
-	// spreads it over the days with records.
-	ruleDay := ts.Date(rules.Since)
+	// The fix belongs to the person, even when two logins worked different pages of the model.
+	// Keep a deterministic login on the output row for existing readers.
+	type fixDay struct {
+		person, model, day string
+		unmappedUser       int64
+	}
+	fixes := map[fixDay]hub.TeamWork{}
 	for _, x := range whole {
-		if x.Kind != split.Shift || x.Day() < ruleDay {
+		day := x.Day()
+		if x.Kind != "shift" || day < ts.Date(hub.FactsStart) {
 			continue
 		}
-		seen := map[string]bool{}
-		for _, p := range x.Pages {
-			m := models[p.PageLabel]
-			if p.SalesFrom == nil || seen[m] {
-				continue
+		for _, pg := range x.Pages {
+			model := models[pg.PageLabel]
+			key := fixDay{person: who.workPerson(x, model), model: model, day: day}
+			if key.person == "" {
+				key.unmappedUser = x.UserID
 			}
-			seen[m] = true
-			k := accrualKey{x.UserID, m, "", x.Day()}
-			if acc[k] == nil {
-				person, _ := who.person(x.UserID, x.Username, m)
-				acc[k] = &accrualRow{username: x.Username, person: person, kind: "fix"}
+			if old, ok := fixes[key]; !ok || x.UserID < old.UserID || (x.UserID == old.UserID && x.Ref < old.Ref) {
+				fixes[key] = x
 			}
 		}
+	}
+	for k, x := range fixes {
+		acc[accrualKey{x.UserID, k.model, "", k.day}] = &accrualRow{username: x.Username, person: k.person, kind: "fix"}
 	}
 	unmapped := map[string]bool{}
 	for k, a := range acc {
@@ -320,7 +248,7 @@ func rebuildTx(ctx context.Context, tx *sql.Tx, now time.Time) (Report, error) {
 	sort.Strings(rep.Unmapped)
 	rep.Accruals = len(acc)
 
-	weeks := weekStatuses(rules, windows, now)
+	weeks := weekStatuses(windows, now, feed.Problem(now))
 	for _, w := range weeks {
 		if w.status != "ok" {
 			rep.Unknown = append(rep.Unknown, w.week)
@@ -331,54 +259,107 @@ func rebuildTx(ctx context.Context, tx *sql.Tx, now time.Time) (Report, error) {
 	return rep, err
 }
 
-// homesOf turns a sale's home into rows: a share each, a «моё» with an own amount below the net leaves the rest
-// nobody's; a home without shares is one row of the whole net. The day of a share is the Moscow day of the work it
-// is credited to — the day holding the middle of the work (Hub's `dayOfWork`, as the payout sheet and Hub's own
-// export date a shift; Hub's first-shift exception `dayOfShift` needs a fact the contract does not carry). A share
-// without a work holding the sale (the owner's split, a «делим» naming someone off the page) is dated by the sale.
-func homesOf(s hub.TeamSale, h split.Home, win, model string, works map[string]hub.TeamWork, usernames map[int64]string,
-	who *people) []homeRow {
-	net := *s.NetMills * 1000
-	saleDay := ts.Date(s.OccurredAt)
-	base := homeRow{ref: s.TransactionRef, window: win, at: ts.FormatMilli(s.OccurredAt), page: s.PageLabel, model: model,
-		kind: s.Kind, net: net, home: h.Kind, reason: h.Reason, pot: h.Pot, day: saleDay}
-	if !h.WaitsUntil.IsZero() {
-		base.waitsUntil = ts.FormatMilli(h.WaitsUntil)
+// mirrorHomes uses team sales only for the coverage check and the holder context shown in a diff.
+// A new feed home may arrive before the next hourly team snapshot.
+func mirrorHomes(ctx context.Context, q ledger.Querier, models map[string]string, usernames map[int64]string, works map[string]hub.TeamWork, who *people) ([]homeRow, map[string]string, int, error) {
+	gaps := map[string]string{}
+	rows, err := q.QueryContext(ctx, `SELECT s.window_from, min(s.transaction_ref) FROM hub_sales s
+		LEFT JOIN hub_sale_homes h ON h.transaction_id=CAST(s.transaction_ref AS INTEGER) AND s.transaction_ref=CAST(h.transaction_id AS TEXT) AND h.retracted=0
+		WHERE h.transaction_id IS NULL GROUP BY s.window_from`)
+	if err != nil {
+		return nil, nil, 0, err
 	}
-	for _, ref := range s.Holders {
-		if w, ok := works[ref]; ok {
-			person, _ := who.person(w.UserID, w.Username, model)
-			base.holders = append(base.holders, holder{UserID: w.UserID, Person: person, Day: w.Day(), Kind: w.Kind})
+	for rows.Next() {
+		var win, ref string
+		if err := rows.Scan(&win, &ref); err != nil {
+			rows.Close()
+			return nil, nil, 0, err
+		}
+		gaps[win] = "нет дома активной продажи " + ref
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, nil, 0, err
+	}
+
+	rows, err = q.QueryContext(ctx, `SELECT h.payload, COALESCE(json_extract(s.payload,'$.holders'),'[]')
+		FROM hub_sale_homes h LEFT JOIN hub_sales s ON s.transaction_ref=CAST(h.transaction_id AS TEXT)
+		WHERE h.retracted=0 ORDER BY h.transaction_id`)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	defer rows.Close()
+	var homes []homeRow
+	sales := 0
+	for rows.Next() {
+		var raw, holderRefs string
+		if err := rows.Scan(&raw, &holderRefs); err != nil {
+			return nil, nil, 0, err
+		}
+		h, err := hub.DecodeSaleHome([]byte(raw))
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		if h.OccurredAt.Before(hub.FactsStart) {
+			continue
+		}
+		sales++
+		win := ts.Format(ts.WeekStart(h.OccurredAt))
+		base := homeRow{ref: strconv.FormatInt(h.TransactionID, 10), window: win, at: ts.FormatMilli(h.OccurredAt), page: h.PageLabel,
+			model: models[h.PageLabel], kind: h.SaleKind, net: *h.NetMills * 1000, home: h.Home, reason: h.Reason, pot: h.Pot, day: ts.Date(h.OccurredAt)}
+		if h.WaitsUntil != nil {
+			base.waitsUntil = ts.FormatMilli(*h.WaitsUntil)
+		}
+		var refs []string
+		if err := json.Unmarshal([]byte(holderRefs), &refs); err != nil {
+			return nil, nil, 0, err
+		}
+		for _, ref := range refs {
+			if w, ok := works[ref]; ok {
+				base.holders = append(base.holders, holder{UserID: w.UserID, Person: who.workPerson(w, base.model), Day: w.Day(), Kind: w.Kind})
+			}
+		}
+		if len(h.Shares) == 0 {
+			base.share = base.net
+			homes = append(homes, base)
+			continue
+		}
+		var given int64
+		for i, sh := range h.Shares {
+			given += *sh.Mills * 1000
+			if sh.ReportDate == "" || sh.DaySource == "unresolved" {
+				gaps[win] = "у доли продажи " + base.ref + " нет даты отчёта"
+				sh.ReportDate = "" // keep the share visible, without inventing a payable day
+			}
+			r := base
+			r.seq, r.user, r.workRef, r.share, r.day, r.percent = i, sh.UserID, sh.WorkRef, *sh.Mills*1000, sh.ReportDate, sh.Percent
+			r.username = usernames[sh.UserID]
+			if w, ok := works[sh.WorkRef]; ok && w.UserID == sh.UserID {
+				r.username = w.Username
+			}
+			if r.username == "" {
+				r.username = "hub:" + strconv.FormatInt(sh.UserID, 10)
+			}
+			r.person = sh.PersonCode
+			if r.person == "" {
+				r.person, _ = who.person(r.user, r.username, r.model)
+			}
+			homes = append(homes, r)
+		}
+		if given < base.net {
+			base.seq, base.home, base.share = len(h.Shares), "nobody", base.net-given
+			homes = append(homes, base)
 		}
 	}
-	if len(h.Shares) == 0 {
-		base.share = net
-		return []homeRow{base}
+	return homes, gaps, sales, rows.Err()
+}
+
+func (p *people) workPerson(w hub.TeamWork, model string) string {
+	if w.PersonCode != "" {
+		return w.PersonCode
 	}
-	var out []homeRow
-	var given int64
-	for i, sh := range h.Shares {
-		r := base
-		r.seq, r.user, r.workRef, r.share = i, sh.UserID, sh.WorkRef, sh.Mills*1000
-		pct := sh.Percent
-		r.percent = &pct
-		r.username = usernames[sh.UserID]
-		if w, ok := works[sh.WorkRef]; ok {
-			r.day, r.username = w.Day(), w.Username
-		}
-		if r.username == "" {
-			r.username = "hub:" + strconv.FormatInt(sh.UserID, 10)
-		}
-		r.person, _ = who.person(sh.UserID, r.username, model)
-		given += r.share
-		out = append(out, r)
-	}
-	if given < net {
-		r := base
-		r.seq, r.home, r.reason, r.share = len(out), split.Nobody, split.ReasonMarks, net-given
-		out = append(out, r)
-	}
-	return out
+	person, _ := p.person(w.UserID, w.Username, model)
+	return person
 }
 
 type weekStatus struct {
@@ -391,15 +372,19 @@ type weekStatus struct {
 // weekStatuses: a week's facts are proven when every window whose sales can land in its days is: the two weeks before
 // it (a PPV waits 7 days for its sender's shift, which may run past midnight), its own and the next one (a night shift
 // of its last day holds sales after midnight), each from the rule's week on, if begun.
-func weekStatuses(rules split.Rules, windows []window, now time.Time) []weekStatus {
+func weekStatuses(windows []window, now time.Time, feedProblem string) []weekStatus {
 	byKey := map[string]window{}
 	for _, w := range windows {
 		byKey[w.key] = w
 	}
-	first := ts.WeekStart(rules.Since)
+	first := ts.WeekStart(hub.FactsStart)
 	var out []weekStatus
 	for wk := first; wk.Before(now); wk = wk.AddDate(0, 0, 7) {
 		st := weekStatus{week: ts.Date(wk), status: "ok"}
+		if feedProblem != "" {
+			st.status = "unknown"
+			st.reasons = append(st.reasons, feedProblem)
+		}
 		for d := -2; d <= 1; d++ {
 			need := wk.AddDate(0, 0, 7*d)
 			if need.Before(first) || !need.Before(now) {
@@ -444,9 +429,12 @@ func write(ctx context.Context, tx *sql.Tx, homes []homeRow, acc map[accrualKey]
 			pct = *h.percent
 		}
 		wk := weekOf(h.day)
+		if h.day == "" {
+			wk = weekOf(h.at[:10])
+		}
 		homeArgs[wk] = append(homeArgs[wk], []any{h.ref, h.seq, h.window, h.at, h.page, h.model, h.kind, h.net, h.home, h.reason,
 			nullStr(h.pot), nullStr(h.waitsUntil), user, nullStr(h.username), nullStr(h.person), nullStr(h.workRef), pct, h.share,
-			h.day, wk, string(b)})
+			nullStr(h.day), wk, string(b)})
 	}
 	keys := make([]accrualKey, 0, len(acc))
 	for k := range acc {
@@ -607,7 +595,7 @@ func weekOf(day string) string {
 }
 
 func loadWindows(ctx context.Context, q ledger.Querier) ([]window, error) {
-	rows, err := q.QueryContext(ctx, `SELECT window_from, window_to, status, reasons, COALESCE(work_to, ''), read_at, COALESCE(ok_at, '')
+	rows, err := q.QueryContext(ctx, `SELECT window_from, window_to, status, reasons, read_at
 		FROM hub_team_sync ORDER BY window_from`)
 	if err != nil {
 		return nil, err
@@ -616,8 +604,8 @@ func loadWindows(ctx context.Context, q ledger.Querier) ([]window, error) {
 	var out []window
 	for rows.Next() {
 		var w window
-		var from, to, reasons, workTo string
-		if err := rows.Scan(&from, &to, &w.status, &reasons, &workTo, &w.readAt, &w.okAt); err != nil {
+		var from, to, reasons string
+		if err := rows.Scan(&from, &to, &w.status, &reasons, &w.readAt); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(reasons), &w.reasons)
@@ -627,11 +615,6 @@ func loadWindows(ctx context.Context, q ledger.Querier) ([]window, error) {
 		}
 		if w.to, err = ts.Parse(to); err != nil {
 			return nil, err
-		}
-		if w.status == "ok" {
-			if w.workTo, err = ts.Parse(workTo); err != nil {
-				return nil, fmt.Errorf("hub_team_sync %s: work_to %w", from, err)
-			}
 		}
 		out = append(out, w)
 	}
@@ -655,27 +638,6 @@ func loadWorks(ctx context.Context, q ledger.Querier) (map[string][]hub.TeamWork
 			return nil, fmt.Errorf("hub_works %s %s: %w", win, ref, err)
 		}
 		out[win] = append(out[win], w)
-	}
-	return out, rows.Err()
-}
-
-func loadSales(ctx context.Context, q ledger.Querier) (map[string][]hub.TeamSale, error) {
-	rows, err := q.QueryContext(ctx, `SELECT window_from, transaction_ref, payload FROM hub_sales ORDER BY window_from, occurred_at, transaction_ref`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := map[string][]hub.TeamSale{}
-	for rows.Next() {
-		var win, ref, payload string
-		if err := rows.Scan(&win, &ref, &payload); err != nil {
-			return nil, err
-		}
-		s, err := hub.DecodeTeamSale([]byte(payload))
-		if err != nil {
-			return nil, fmt.Errorf("hub_sales %s: %w", ref, err)
-		}
-		out[win] = append(out[win], s)
 	}
 	return out, rows.Err()
 }

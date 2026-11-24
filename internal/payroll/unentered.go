@@ -14,7 +14,6 @@ import (
 	"github.com/goslingmanagment/ledger/internal/db"
 	"github.com/goslingmanagment/ledger/internal/hub"
 	"github.com/goslingmanagment/ledger/internal/ledger"
-	"github.com/goslingmanagment/ledger/internal/split"
 	"github.com/goslingmanagment/ledger/internal/ts"
 )
 
@@ -519,7 +518,7 @@ type teamFacts struct {
 	weeks map[string]bool   // Mondays of the proven weeks
 	pages map[string]string // page of the grant → ledger model
 	res   *Resolver
-	users map[int64]string            // the Hub users of the proven windows → username
+	users factLogins                  // the Hub users of the proven windows → username
 	isHub map[string]bool             // person, model → one of those users is the person (cache)
 	net   map[string]map[string]int64 // person, model, date → page → net of their shares, mills
 	works map[string]*dayWorks        // person, model, date
@@ -532,7 +531,7 @@ type dayWorks struct {
 }
 
 func loadFacts(ctx context.Context, q ledger.Querier, now time.Time) (*teamFacts, error) {
-	f := &teamFacts{since: ts.Date(split.Default.Since), weeks: map[string]bool{}, users: map[int64]string{}, isHub: map[string]bool{},
+	f := &teamFacts{since: ts.Date(hub.FactsStart), weeks: map[string]bool{}, isHub: map[string]bool{},
 		net: map[string]map[string]int64{}, works: map[string]*dayWorks{}}
 	rows, err := q.QueryContext(ctx, `SELECT week FROM fact_weeks WHERE status = 'ok'`)
 	if err != nil {
@@ -584,7 +583,9 @@ func loadFacts(ctx context.Context, q ledger.Querier, now time.Time) (*teamFacts
 	// A work is in every window its days touch: the whole version is the one of the proven window it began in, else
 	// the longest one there is (it began before the facts). The Hub users the facts answer for are those of the rule's
 	// weeks: the windows before them (hub_team_since) are read for the slot (settleSlots).
-	ruleWeek := ts.WeekStart(split.Default.Since)
+	if f.users, err = factUsers(ctx, q); err != nil {
+		return nil, err
+	}
 	rows, err = q.QueryContext(ctx, `SELECT s.window_from, s.window_to, w.ref, w.payload FROM hub_works w
 		JOIN hub_team_sync s ON s.window_from = w.window_from WHERE s.status = 'ok' ORDER BY w.ref, s.window_from`)
 	if err != nil {
@@ -613,9 +614,6 @@ func loadFacts(ctx context.Context, q ledger.Querier, now time.Time) (*teamFacts
 			rows.Close()
 			return nil, fmt.Errorf("hub_team_sync %s: bad window", wf)
 		}
-		if !from.Before(ruleWeek) {
-			f.users[w.UserID] = w.Username
-		}
 		v := version{w: w, whole: !w.StartedAt.Before(from) && w.StartedAt.Before(to)}
 		old, seen := works[ref]
 		switch {
@@ -639,7 +637,7 @@ func loadFacts(ctx context.Context, q ledger.Querier, now time.Time) (*teamFacts
 				continue
 			}
 			seen[ledger.Slug(model)] = true
-			person, err := f.res.HubPerson(model, w.UserID, w.Username)
+			person, err := f.res.factPerson(model, w.UserID, w.Username, w.PersonCode)
 			if err != nil {
 				continue
 			}
@@ -674,12 +672,7 @@ func (f *teamFacts) cover(person, model, date string) bool {
 	k := person + "\x00" + ledger.Slug(model)
 	is, ok := f.isHub[k]
 	if !ok {
-		for id, name := range f.users {
-			if got, err := f.res.HubPerson(model, id, name); err == nil && got == person {
-				is = true
-				break
-			}
-		}
+		is = f.users.has(f.res, model, person)
 		f.isHub[k] = is
 	}
 	return is
@@ -865,7 +858,7 @@ func provenWorks(ctx context.Context, q ledger.Querier) (teamWorks, error) {
 		if err := json.Unmarshal([]byte(payload), &w); err != nil {
 			return tw, fmt.Errorf("hub_works %d: %w", user, err)
 		}
-		person, err := res.HubPerson("", user, username)
+		person, err := res.factPerson("", user, username, w.PersonCode)
 		if err != nil {
 			continue // a Hub user without a card claims no one's cell
 		}
@@ -898,7 +891,7 @@ func (tw teamWorks) dayOff(person, page string, from, to time.Time) bool {
 		return false
 	}
 	for _, w := range tw.works {
-		if w.person == person && w.kind == split.Shift && w.from.Before(to) && from.Before(w.to) && slices.Contains(w.pages, page) {
+		if w.person == person && w.kind == "shift" && w.from.Before(to) && from.Before(w.to) && slices.Contains(w.pages, page) {
 			return false
 		}
 	}

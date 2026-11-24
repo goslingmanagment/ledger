@@ -8,8 +8,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/goslingmanagment/ledger/internal/split"
 )
 
 // fakeTeam is Hub's agentTeamSales over synthetic works and sales: the window's sales, the works around it (a day
@@ -133,7 +131,7 @@ func setTeamSince(b *bench, day string) {
 		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, day)
 }
 
-func TestTeamAnswerMapsOntoTheSplitRules(t *testing.T) {
+func TestTeamAnswerPreservesWorkAndSaleFacts(t *testing.T) {
 	raw, err := os.ReadFile("testdata/team_sales.json")
 	if err != nil {
 		t.Fatal(err)
@@ -146,12 +144,12 @@ func TestTeamAnswerMapsOntoTheSplitRules(t *testing.T) {
 	if r := a.whole(from, to, []string{"alfa-1", "alfa-of"}); len(r) != 0 {
 		t.Fatalf("a whole answer refused: %v", r)
 	}
-	shift := a.works[0].Split()
-	if shift.Kind != split.Shift || shift.UserID != 101 || shift.Role != split.RoleChatter ||
-		!reflect.DeepEqual(shift.Pages, []split.WorkPage{{PageLabel: "alfa-1", From: mustTime("2026-11-05T10:00:00Z")}}) {
+	shift := a.works[0]
+	if shift.Kind != "shift" || shift.UserID != 101 || shift.Role != "chatter" ||
+		len(shift.Pages) != 2 || shift.Pages[0].SalesFrom == nil || shift.Pages[1].SalesFrom != nil {
 		t.Errorf("work = %+v (a page it holds no sales of must not hold them)", shift)
 	}
-	if a.works[1].Split().Kind != split.Visit || !a.works[2].Split().Ongoing || a.works[2].Split().Role != "team_lead" {
+	if a.works[1].Kind != "visit" || !a.works[2].Ongoing || a.works[2].Role != "team_lead" {
 		t.Errorf("visit or ongoing team lead's shift lost: %+v %+v", a.works[1], a.works[2])
 	}
 	// 10:00–17:00 UTC is 13:00–20:00 in Moscow: the 5th.
@@ -159,41 +157,32 @@ func TestTeamAnswerMapsOntoTheSplitRules(t *testing.T) {
 		t.Errorf("day of work %s", d)
 	}
 
-	ppv := a.sales[0].Split()
+	ppv := a.sales[0]
 	sentAt := mustTime("2026-11-05T09:20:00Z")
-	if ppv.Kind != split.SalePPV || ppv.NetMills != 24_000 || ppv.FanRef != "fan-11" || ppv.PPVSender == nil ||
-		*ppv.PPVSender != (split.Person{UserID: 102, Username: "user102", Role: split.RoleChatter}) ||
-		!ppv.PPVSentAt.Equal(sentAt) || ppv.LastWriter == nil || *ppv.LastWriter != 102 ||
-		!reflect.DeepEqual(ppv.Holders, []string{"101:2026-11-05T10:00:00.000Z"}) || ppv.Marks != nil || ppv.Resolution != nil {
+	if ppv.Kind != "ppv" || *ppv.NetMills != 24_000 || ppv.FanRef == nil || *ppv.FanRef != "fan-11" || ppv.PPVSender == nil ||
+		*ppv.PPVSender != (TeamPerson{UserID: 102, Username: "user102", Role: "chatter"}) ||
+		!ppv.PPVSentAt.Equal(sentAt) || ppv.LastWriterUserID == nil || *ppv.LastWriterUserID != 102 ||
+		!reflect.DeepEqual(ppv.Holders, []string{"101:2026-11-05T10:00:00.000Z"}) || ppv.Marks == nil || len(ppv.Marks) != 0 || len(ppv.Resolution) != 0 {
 		t.Errorf("ppv = %+v", ppv)
 	}
 
-	tip := a.sales[1].Split()
-	if tip.FanRef != "" || !tip.Campaign || tip.LastWriter != nil || tip.Platform != "onlyfans" {
+	tip := a.sales[1]
+	if tip.FanRef != nil || !tip.Campaign || tip.LastWriterUserID != nil || tip.Platform != "onlyfans" {
 		t.Errorf("tip = %+v", tip)
 	}
 	colleague, own := int64(201), int64(10_000)
-	wantMarks := []split.Mark{
-		{UserID: 101, Mark: split.MarkSplit, ShareWith: &colleague, Confirmed: true}, // Hub's «share» is the split's «делим»
-		{UserID: 201, Mark: split.MarkNotMine},                                       // a draft report
-		{UserID: 102, Mark: split.MarkMine, OwnAmountMills: &own},                    // no `confirmed` (Hub before hub#1101): a draft
+	wantMarks := []TeamMark{
+		{UserID: 101, Mark: "share", ShareWithUserID: &colleague, Confirmed: true},
+		{UserID: 201, Mark: "not_mine"},                // a draft report
+		{UserID: 102, Mark: "mine", AmountMills: &own}, // no `confirmed` (Hub before hub#1101): a draft
 	}
 	if !reflect.DeepEqual(tip.Marks, wantMarks) {
 		t.Errorf("marks = %+v", tip.Marks)
 	}
-	if !reflect.DeepEqual(tip.Resolution, []split.OwnerShare{{UserID: 101, Percent: 40}, {UserID: 201, Percent: 60}}) {
+	if !reflect.DeepEqual(tip.Resolution, []TeamShare{{UserID: 101, Percent: 40}, {UserID: 201, Percent: 60}}) {
 		t.Errorf("resolution = %+v", tip.Resolution)
 	}
 
-	// The split reads the mapped facts: the chatter's PPV is not the holder's (its sender had only a look-in, over
-	// before the purchase, and no shift within the week: nobody's), a Campaign contribution goes to the pot whatever the
-	// marks, a renewal to the one shift holding it.
-	works := []split.Work{a.works[0].Split(), a.works[1].Split(), a.works[2].Split()}
-	homes := split.HomesOf([]split.Sale{ppv, tip, a.sales[2].Split()}, works, mustTime("2026-11-20T00:00:00Z"))
-	if homes[0].Kind != split.Nobody || homes[0].Reason != split.ReasonPPVSenderNoShift || homes[1].Kind != split.Pot ||
-		homes[2].Kind != split.Shift || homes[2].Reason != split.ReasonHolder || homes[2].Shares[0].UserID != 101 {
-		t.Errorf("homes %+v", homes)
-	}
 }
 
 func TestTeamAnswerOutOfContractIsRefused(t *testing.T) {
@@ -237,13 +226,13 @@ func TestTeamSalesCarryHubsDecision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d := a.sales[0].Split().Decision; d == nil || *d != (split.Decision{Kind: split.DecisionPot, Pot: "spring"}) {
+	if d := a.sales[0].Decision; d == nil || d.Kind != "pot" || d.Pot == nil || *d.Pot != "spring" {
 		t.Errorf("a pot decision = %+v", d)
 	}
-	if d := a.sales[1].Split().Decision; d == nil || *d != (split.Decision{Kind: split.DecisionNobody}) {
+	if d := a.sales[1].Decision; d == nil || d.Kind != "nobody" || d.Pot != nil {
 		t.Errorf("«никому» = %+v", d)
 	}
-	if d := a.sales[2].Split().Decision; d != nil {
+	if d := a.sales[2].Decision; d != nil {
 		t.Errorf("no decision = %+v", d)
 	}
 }

@@ -3,7 +3,6 @@ package cli
 import (
 	"bufio"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,7 +12,6 @@ import (
 	"time"
 
 	"github.com/goslingmanagment/ledger/internal/accruals"
-	"github.com/goslingmanagment/ledger/internal/db"
 	"github.com/goslingmanagment/ledger/internal/money"
 	"github.com/goslingmanagment/ledger/internal/reports"
 	"github.com/goslingmanagment/ledger/internal/ts"
@@ -23,60 +21,6 @@ func init() {
 	Command(Cmd{Name: "accruals diff", Run: accrualsDiff,
 		Summary: "было — стало за неделю: таблица выплат, отчёты смен и факты хаба рядом (тень): [--week понедельник] [--json]"})
 	Command(Cmd{Name: "accruals rebuild", Summary: "пересчитать начисления из фактов хаба сейчас (рядом с базой)", Run: accrualsRebuild})
-	Command(Cmd{Name: "accruals claim", Run: accrualsClaim,
-		Summary: `ничья продажа — человеку по слову владельца: ledger accruals claim <transactionRef> --person <код> --note "…"`})
-	Command(Cmd{Name: "accruals unclaim", Run: accrualsUnclaim,
-		Summary: `снять заявку на продажу, она снова по правилу: ledger accruals unclaim <transactionRef> --note "…"`})
-}
-
-func accrualsClaim(ctx context.Context, args []string) error {
-	fs := Flags("accruals claim")
-	person := fs.String("person", "", "кому: код карточки (people.slug)")
-	note := fs.String("note", "", "слово владельца: кто заявил и почему")
-	pos, err := ParseArgs(fs, args)
-	if err != nil {
-		return err
-	}
-	if len(pos) != 1 {
-		return Exit{Code: 2, Msg: `нужен номер продажи: ledger accruals claim <transactionRef> --person <код> --note "…"`}
-	}
-	return claimCall(ctx, "/v1/accruals/claim", accruals.ClaimInput{Ref: pos[0], Person: *person, Note: *note}, accruals.Claim)
-}
-
-func accrualsUnclaim(ctx context.Context, args []string) error {
-	fs := Flags("accruals unclaim")
-	note := fs.String("note", "", "слово владельца: почему заявка снята")
-	pos, err := ParseArgs(fs, args)
-	if err != nil {
-		return err
-	}
-	if len(pos) != 1 {
-		return Exit{Code: 2, Msg: `нужен номер продажи: ledger accruals unclaim <transactionRef> --note "…"`}
-	}
-	return claimCall(ctx, "/v1/accruals/unclaim", accruals.ClaimInput{Ref: pos[0], Note: *note}, accruals.Unclaim)
-}
-
-// claimCall writes a claim beside the database, or through the API with the decide right.
-func claimCall(ctx context.Context, path string, in accruals.ClaimInput,
-	write func(context.Context, *db.Store, accruals.ClaimInput, string, time.Time) (accruals.ClaimResult, error)) error {
-	var out accruals.ClaimResult
-	if local() {
-		store, err := openDirect(ctx)
-		if err != nil {
-			return err
-		}
-		defer store.Close()
-		if out, err = write(ctx, store, in, localAuthor(), time.Now()); err != nil {
-			var r *accruals.Refusal
-			if errors.As(err, &r) {
-				return Exit{Code: 2, Msg: "не записано: " + r.Error()}
-			}
-			return err
-		}
-	} else if err := call(ctx, http.MethodPost, path, in, &out); err != nil {
-		return err
-	}
-	return printJSON(out)
 }
 
 func accrualsDiff(ctx context.Context, args []string) error {
@@ -259,11 +203,11 @@ func printDiff(out *bufio.Writer, d accruals.Diff) {
 		if len(p.Claimed) > 0 {
 			fmt.Fprintln(out, "  Ничьи продажи по заявке (слово владельца):")
 			rows := [][]string{}
-			for i, r := range saleRows(p.Claimed) {
-				rows = append(rows, []string{r[1], r[2], r[3], r[4], r[6], p.Claimed[i].Note})
+			for _, r := range saleRows(p.Claimed) {
+				rows = append(rows, []string{r[1], r[2], r[3], r[4], r[6]})
 			}
-			writeTable(indent{out}, []string{"время", "страница", "вид", "net", "начислено", "заметка"}, rows,
-				[]bool{false, false, false, true, true, false})
+			writeTable(indent{out}, []string{"время", "страница", "вид", "net", "начислено"}, rows,
+				[]bool{false, false, false, true, true})
 		}
 	}
 	if len(d.HubDays) > 0 {
@@ -343,7 +287,7 @@ func group(out *bufio.Writer, title string, g accruals.Group) {
 	}
 	fmt.Fprintf(out, "\n%s: %s, продаж %d\n", title, usd(g.Micros), len(g.Sales))
 	writeTable(indent{out}, []string{"время", "страница", "вид", "net", "сумма", "почему"}, trim(saleRows(g.Sales)),
-		[]bool{false, false, false, true, true, false})
+		[]bool{false, false, false, true, true})
 }
 
 // trim keeps the columns time … share and the reason of a group's sales.

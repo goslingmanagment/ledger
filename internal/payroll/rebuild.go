@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/goslingmanagment/ledger/internal/db"
+	"github.com/goslingmanagment/ledger/internal/hub"
 	"github.com/goslingmanagment/ledger/internal/journal"
 	"github.com/goslingmanagment/ledger/internal/ledger"
 	"github.com/goslingmanagment/ledger/internal/money"
@@ -92,6 +93,17 @@ func Rebuild(ctx context.Context, store *db.Store, now time.Time) (Report, error
 	}
 	if err := assignPeople(ctx, tx, res); err != nil {
 		return rep, err
+	}
+	// Payroll also runs independently of the feed jobs. Expire previously proven weeks
+	// before pricing, even if the collector stopped after its last successful read.
+	homes, err := hub.ReadHomesStatus(ctx, tx)
+	if err != nil {
+		return rep, err
+	}
+	if reason := homes.Problem(now); reason != "" {
+		if _, err := tx.ExecContext(ctx, `UPDATE fact_weeks SET status='unknown', reasons=json_array(?) WHERE status='ok'`, reason); err != nil {
+			return rep, err
+		}
 	}
 	plan, err := planAfter(ctx, tx, now)
 	if err != nil {

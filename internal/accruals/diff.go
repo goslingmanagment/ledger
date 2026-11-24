@@ -10,10 +10,10 @@ import (
 	"time"
 
 	"github.com/goslingmanagment/ledger/internal/auth"
+	"github.com/goslingmanagment/ledger/internal/hub"
 	"github.com/goslingmanagment/ledger/internal/ledger"
 	"github.com/goslingmanagment/ledger/internal/money"
 	"github.com/goslingmanagment/ledger/internal/server"
-	"github.com/goslingmanagment/ledger/internal/split"
 	"github.com/goslingmanagment/ledger/internal/ts"
 )
 
@@ -105,7 +105,7 @@ type PersonDiff struct {
 	Days           []DayDiff  `json:"days"`
 	Notes          []string   `json:"notes,omitempty"`
 	Sales          []SaleLine `json:"sales"` // of the days that differ
-	// Claimed are the nobody's sales of the week the owner gave the person by a claim (sale_claims), every one.
+	// Claimed are the nobody's sales of the week the owner gave the person by a Hub decision, every one.
 	Claimed []SaleLine `json:"claimed,omitempty"`
 	// ReportsMicros is what the posted shift reports accrue for the week (report_accruals); ReportsNetMicros their
 	// revenue, ReportsUnpricedMicros the part of it «без ставки».
@@ -237,7 +237,7 @@ func WeekDiff(ctx context.Context, q ledger.Querier, week string) (Diff, error) 
 		Scan(&d.Facts.Status, &reasons, &readAt); {
 	case err == sql.ErrNoRows:
 		d.Facts = WeekFacts{Status: "unknown", Reasons: []string{"фактов этой недели нет: она раньше правила (" +
-			ts.Date(split.Default.Since) + ") или факты ещё не читались (ledger hub team-sync)"}}
+			ts.Date(hub.FactsStart) + ") или факты ещё не читались (ledger hub team-sync)"}}
 	case err != nil:
 		return d, err
 	default:
@@ -279,16 +279,12 @@ func WeekDiff(ctx context.Context, q ledger.Querier, week string) (Diff, error) 
 	if err != nil {
 		return d, err
 	}
-	claims, err := loadClaims(ctx, q)
-	if err != nil {
-		return d, err
-	}
 	for i := range d.People {
 		if err := personDays(ctx, q, &d.People[i], week, d.Until, known); err != nil {
 			return d, err
 		}
 		p := &d.People[i]
-		p.Claimed = claimedOf(p, week, d.Until, homes, claims)
+		p.Claimed = claimedOf(p, week, d.Until, homes)
 		if !known || p.DiffMicros == nil || !differs(*p.DiffMicros) {
 			continue
 		}
@@ -309,8 +305,8 @@ func WeekDiff(ctx context.Context, q ledger.Querier, week string) (Diff, error) 
 		return d, err
 	}
 
-	groups := map[string]*Group{split.Pot: &d.Pot, split.Waiting: &d.Waiting, split.Decide: &d.Decide,
-		split.Nobody: &d.Nobody, split.Unknown: &d.Unknown, split.BeforeRule: &d.BeforeRule}
+	groups := map[string]*Group{"pot": &d.Pot, "waiting": &d.Waiting, "decide": &d.Decide,
+		"nobody": &d.Nobody, "unknown": &d.Unknown, "before_rule": &d.BeforeRule}
 	for _, g := range groups {
 		g.Sales = []SaleLine{}
 	}
@@ -455,7 +451,7 @@ func salesOf(p *PersonDiff, day string, homes []homeRow, names map[string]string
 		rs := bySale[ref]
 		mine := false
 		for _, h := range rs {
-			if h.person == p.Person && (h.home == split.Shift || h.home == split.Visit) {
+			if h.person == p.Person && (h.home == "shift" || h.home == "visit") {
 				mine = true
 				if h.day == day {
 					var amount *int64
@@ -487,11 +483,11 @@ func salesOf(p *PersonDiff, day string, homes []homeRow, names map[string]string
 	return out
 }
 
-// claimedOf are the person's claimed sales of the week, with the amount at their rate and the owner's word.
-func claimedOf(p *PersonDiff, week, until string, homes []homeRow, claims map[string]claim) []SaleLine {
+// claimedOf are the person's claimed sales of the week, with the amount at their rate.
+func claimedOf(p *PersonDiff, week, until string, homes []homeRow) []SaleLine {
 	var out []SaleLine
 	for _, h := range homes {
-		if h.person != p.Person || h.reason != split.ReasonOwnerClaim || h.day < week || h.day > until {
+		if h.person != p.Person || h.reason != "owner_claim" || h.day < week || h.day > until {
 			continue
 		}
 		var amount *int64
@@ -500,7 +496,6 @@ func claimedOf(p *PersonDiff, week, until string, homes []homeRow, claims map[st
 			amount = &v
 		}
 		l := line("+", h, amount, "")
-		l.Note = claims[h.ref].note
 		out = append(out, l)
 	}
 	return out
@@ -508,7 +503,7 @@ func claimedOf(p *PersonDiff, week, until string, homes []homeRow, claims map[st
 
 func whereTo(h homeRow, names map[string]string) string {
 	switch h.home {
-	case split.Shift, split.Visit:
+	case "shift", "visit":
 		if n := names[h.person]; n != "" {
 			return n
 		}
@@ -516,18 +511,18 @@ func whereTo(h homeRow, names map[string]string) string {
 			return h.username + " (хаб)"
 		}
 		return "смене"
-	case split.Pot:
-		if h.pot != "" && h.pot != split.PotObshak {
+	case "pot":
+		if h.pot != "" && h.pot != "obshak" {
 			return "общак " + h.pot
 		}
 		return "общак"
-	case split.Waiting:
+	case "waiting":
 		return "ждёт смены отправителя"
-	case split.Decide:
+	case "decide":
 		return "ждёт решения"
-	case split.Nobody:
+	case "nobody":
 		return "ничей"
-	case split.BeforeRule:
+	case "before_rule":
 		return "по-старому (таблица)"
 	}
 	return "неизвестно"
@@ -551,42 +546,40 @@ func ReasonText(reason, waitsUntil string) string {
 }
 
 var reasonText = map[string]string{
-	split.ReasonSaleBeforeRule:     "до начала правила: платит таблица",
-	split.ReasonWorkBeforeRule:     "смена дня до правила: по-старому, платит таблица",
-	split.ReasonHolderNotInWorks:   "держателя нет среди работ: факты не полны",
-	split.ReasonPPVSender:          "PPV отправителя: его смена держала продажу",
-	split.ReasonPPVSenderOtherPage: "PPV отправителя: его смена на другой странице",
-	split.ReasonPPVSenderNextShift: "PPV отправителя: его следующая смена",
-	split.ReasonPPVSenderWaiting:   "PPV ждёт смены отправителя",
-	split.ReasonPPVSenderNoShift:   "PPV отправителя: смены за 7 дней не было",
-	split.ReasonPostTip:            "чаевые под постом",
-	split.ReasonCampaign:           "Campaign OnlyFans",
-	split.ReasonHolder:             "страницу держала одна смена",
-	split.ReasonLastWriter:         "последним писал фану",
-	split.ReasonLookInLastWriter:   "заход: последним писал фану",
-	split.ReasonNoHolder:           "страницу никто не держал",
-	split.ReasonNoLastWriter:       "держали несколько смен, последним писал никто из них",
-	split.ReasonMarksDisagree:      "метки чаттеров не сходятся",
-	split.ReasonMarks:              "по меткам чаттеров",
-	split.ReasonOwnerSplit:         "решение владельца",
-	split.ReasonOwnerClaim:         "ничья, заявка по слову владельца",
-	split.ReasonOwnerNobody:        "решение владельца в хабе: никому",
-	split.ReasonOwnerPot:           "решение владельца в хабе: в общак",
+	"sale_before_rule":      "до начала правила: платит таблица",
+	"work_before_rule":      "смена дня до правила: по-старому, платит таблица",
+	"holder_not_in_works":   "держателя нет среди работ: факты не полны",
+	"ppv_sender":            "PPV отправителя: его смена держала продажу",
+	"ppv_sender_other_page": "PPV отправителя: его смена на другой странице",
+	"ppv_sender_next_shift": "PPV отправителя: его следующая смена",
+	"ppv_sender_waiting":    "PPV ждёт смены отправителя",
+	"ppv_sender_no_shift":   "PPV отправителя: смены за 7 дней не было",
+	"post_tip":              "чаевые под постом",
+	"campaign":              "Campaign OnlyFans",
+	"holder":                "страницу держала одна смена",
+	"last_writer":           "последним писал фану",
+	"look_in_last_writer":   "заход: последним писал фану",
+	"no_holder":             "страницу никто не держал",
+	"no_last_writer":        "держали несколько смен, последним писал никто из них",
+	"marks_disagree":        "метки чаттеров не сходятся",
+	"marks":                 "по меткам чаттеров",
+	"owner_split":           "решение владельца",
+	"ppv_sender_left":       "отправитель PPV покинул команду",
+	"slot_owner":            "по расписанию страницу держала смена человека",
+	"agreed":                "по согласованному решению",
+	"owner_claim":           "ничья, заявка по слову владельца",
+	"owner_nobody":          "решение владельца в хабе: никому",
+	"owner_pot":             "решение владельца в хабе: в общак",
 }
 
 const homeColumns = `SELECT transaction_ref, seq, window_from, occurred_at, page_label, model, sale_kind, net_micros, home,
 	reason, COALESCE(pot, ''), COALESCE(waits_until, ''), COALESCE(hub_user_id, 0), COALESCE(username, ''), COALESCE(person, ''),
-	COALESCE(work_ref, ''), share_micros, day, holders FROM fact_homes`
+	COALESCE(work_ref, ''), share_micros, COALESCE(day, ''), holders FROM fact_homes`
 
 // loadHomes reads fact_homes of the sales whose days or holders' days may fall in [from, to].
 func loadHomes(ctx context.Context, q ledger.Querier, from, to string) ([]homeRow, error) {
 	return scanHomes(q.QueryContext(ctx, homeColumns+` WHERE day BETWEEN ? AND ? OR substr(occurred_at, 1, 10) BETWEEN ? AND ?
 		ORDER BY occurred_at, transaction_ref, seq`, from, to, from, to))
-}
-
-// saleHomes reads the rows of one sale.
-func saleHomes(ctx context.Context, q ledger.Querier, ref string) ([]homeRow, error) {
-	return scanHomes(q.QueryContext(ctx, homeColumns+` WHERE transaction_ref = ? ORDER BY seq`, ref))
 }
 
 func scanHomes(rows *sql.Rows, err error) ([]homeRow, error) {

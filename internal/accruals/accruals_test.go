@@ -21,7 +21,6 @@ import (
 	"github.com/goslingmanagment/ledger/internal/hub"
 	"github.com/goslingmanagment/ledger/internal/payroll"
 	"github.com/goslingmanagment/ledger/internal/server"
-	"github.com/goslingmanagment/ledger/internal/split"
 	"github.com/goslingmanagment/ledger/internal/ts"
 )
 
@@ -161,7 +160,7 @@ func username(user int64) string {
 func work(user int64, kind, from, to string, pages ...string) hub.TeamWork {
 	a, b := at(from), at(to)
 	w := hub.TeamWork{Ref: fmt.Sprintf("%d:%s", user, a.UTC().Format("2006-01-02T15:04:05.000Z")), UserID: user,
-		Username: username(user), Role: split.RoleChatter, Kind: kind, StartedAt: a, EndedAt: b,
+		Username: username(user), Role: "chatter", Kind: kind, StartedAt: a, EndedAt: b,
 		WorkedMinutes: int(b.Sub(a).Minutes()), Pages: []hub.TeamWorkPage{}}
 	for _, p := range pages {
 		from := a
@@ -177,6 +176,45 @@ func sale(ref, kind, page, when string, net int64, holders ...hub.TeamWork) hub.
 		s.Holders = append(s.Holders, h.Ref)
 	}
 	return s
+}
+
+// putSale adds a sale to a proven window of the mirror.
+func putSale(t *testing.T, s *db.Store, window string, x hub.TeamSale) {
+	t.Helper()
+	b, _ := json.Marshal(x)
+	exec(t, s, `INSERT INTO hub_sales(transaction_ref, window_from, page_label, platform, kind, net_mills, occurred_at, post_tip,
+		campaign, payload, first_seen_at, read_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, '2026-11-24', '2026-11-24')`,
+		x.TransactionRef, ts.Format(at(window)), x.PageLabel, x.Platform, x.Kind, *x.NetMills, ts.FormatMilli(x.OccurredAt), string(b))
+}
+
+// putHome installs a synthetic K1 home for a team sale.
+func putHome(t *testing.T, s *db.Store, id int64, home, reason, pot string, shares ...hub.SaleHomeShare) {
+	t.Helper()
+	var h hub.SaleHome
+	var occurred string
+	var mills int64
+	if err := s.RO.QueryRow(`SELECT page_label,kind,occurred_at,net_mills FROM hub_sales WHERE transaction_ref=?`, id).
+		Scan(&h.PageLabel, &h.SaleKind, &occurred, &mills); err != nil {
+		t.Fatal(err)
+	}
+	h.Seq, h.TransactionID, h.At, h.Op, h.RuleVersion = id, id, switchNow, "upsert", "test-v1"
+	h.OccurredAt, h.NetMills, h.Home, h.Reason, h.Pot = at(occurred), &mills, home, reason, pot
+	h.Shares = append([]hub.SaleHomeShare{}, shares...)
+	b, err := json.Marshal(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec(t, s, `INSERT INTO hub_sale_homes(transaction_id,seq,retracted,payload) VALUES (?,?,0,?)
+		ON CONFLICT(transaction_id) DO UPDATE SET seq=hub_sale_homes.seq+1,payload=excluded.payload`, id, id, string(b))
+}
+
+func share(w hub.TeamWork, mills int64) hub.SaleHomeShare {
+	return hub.SaleHomeShare{UserID: w.UserID, WorkRef: w.Ref, ReportDate: w.Day(), DaySource: "shift", Percent: new(100), Mills: new(mills)}
+}
+
+func freshHomes(t *testing.T, s *db.Store) {
+	t.Helper()
+	exec(t, s, `UPDATE hub_sale_homes_sync SET state='ok', last_ok=?`, ts.Format(switchNow))
 }
 
 // putWindow puts a proven week of facts into the mirror, as the collector leaves it.
@@ -195,10 +233,7 @@ func putWindow(t *testing.T, s *db.Store, from string, works []hub.TeamWork, sal
 			w.Day(), string(b))
 	}
 	for _, x := range sales {
-		b, _ := json.Marshal(x)
-		exec(t, s, `INSERT INTO hub_sales(transaction_ref, window_from, page_label, platform, kind, net_mills, occurred_at, post_tip,
-			campaign, payload, first_seen_at, read_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, '2026-11-24', '2026-11-24')`,
-			x.TransactionRef, key, x.PageLabel, x.Platform, x.Kind, *x.NetMills, ts.FormatMilli(x.OccurredAt), x.PostTip, string(b))
+		putSale(t, s, from, x)
 	}
 }
 
@@ -207,23 +242,29 @@ func putWindow(t *testing.T, s *db.Store, from string, works []hub.TeamWork, sal
 // shifts, user 103's own tip; and the weeks around it, proven and empty.
 func week(t *testing.T, s *db.Store) {
 	t.Helper()
-	alfa := work(101, split.Shift, "2026-11-10 10:00", "2026-11-10 18:00", "page-a")
-	bravo := work(102, split.Shift, "2026-11-10 12:00", "2026-11-10 20:00", "page-b")
-	bravoNext := work(102, split.Shift, "2026-11-12 10:00", "2026-11-12 18:00", "page-a")
-	other := work(103, split.Shift, "2026-11-10 14:00", "2026-11-10 22:00", "page-a")
-	post := sale("3", split.SaleTip, "page-a", "2026-11-10 15:00", 30_000, alfa, other)
+	alfa := work(101, "shift", "2026-11-10 10:00", "2026-11-10 18:00", "page-a")
+	bravo := work(102, "shift", "2026-11-10 12:00", "2026-11-10 20:00", "page-b")
+	bravoNext := work(102, "shift", "2026-11-12 10:00", "2026-11-12 18:00", "page-a")
+	other := work(103, "shift", "2026-11-10 14:00", "2026-11-10 22:00", "page-a")
+	post := sale("3", "tip", "page-a", "2026-11-10 15:00", 30_000, alfa, other)
 	post.PostTip = true
-	ppv := sale("2", split.SalePPV, "page-a", "2026-11-11 21:00", 40_000)
-	ppv.PPVSender = &hub.TeamPerson{UserID: 102, Username: "user102", Role: split.RoleChatter}
+	ppv := sale("2", "ppv", "page-a", "2026-11-11 21:00", 40_000)
+	ppv.PPVSender = &hub.TeamPerson{UserID: 102, Username: "user102", Role: "chatter"}
 	putWindow(t, s, "2026-11-02", nil, nil)
 	putWindow(t, s, "2026-11-09", []hub.TeamWork{alfa, bravo, other, bravoNext}, []hub.TeamSale{
-		sale("1", split.SaleTip, "page-a", "2026-11-10 11:00", 100_000, alfa),
+		sale("1", "tip", "page-a", "2026-11-10 11:00", 100_000, alfa),
 		ppv,
 		post,
-		sale("4", split.SaleTip, "page-a", "2026-11-10 17:00", 20_000, alfa, other),
-		sale("5", split.SaleTip, "page-a", "2026-11-10 20:00", 12_000, other),
+		sale("4", "tip", "page-a", "2026-11-10 17:00", 20_000, alfa, other),
+		sale("5", "tip", "page-a", "2026-11-10 20:00", 12_000, other),
 	})
 	putWindow(t, s, "2026-11-16", nil, nil)
+	putHome(t, s, 1, "shift", "holder", "", share(alfa, 100_000))
+	putHome(t, s, 2, "shift", "ppv_sender_next_shift", "", share(bravoNext, 40_000))
+	putHome(t, s, 3, "pot", "post_tip", "obshak")
+	putHome(t, s, 4, "decide", "no_last_writer", "")
+	putHome(t, s, 5, "shift", "holder", "", share(other, 12_000))
+	freshHomes(t, s)
 }
 
 func rebuild(t *testing.T, s *db.Store, ctx context.Context) Report {
@@ -254,7 +295,7 @@ func TestEachShareLandsOnItsPersonsDayAtTheirRate(t *testing.T) {
 	// Браво's PPV, bought on the 11th, lands on her next shift's day, the 12th, at her 20%; her fix per shift is paid
 	// for both days with a shift, the one without sales too.
 	if n := count(t, s, `SELECT count(*) FROM fact_homes WHERE transaction_ref = '2' AND person = 'bravo' AND day = '2026-11-12'
-		AND reason = ?`, split.ReasonPPVSenderNextShift); n != 1 {
+		AND reason = ?`, "ppv_sender_next_shift"); n != 1 {
 		t.Fatal("the PPV did not land on its sender's day")
 	}
 	if n := count(t, s, `SELECT SUM(amount_micros) FROM fact_accruals WHERE person = 'bravo' AND week = '2026-11-09'`); n != 28_000_000 {
@@ -289,10 +330,7 @@ func TestEachShareLandsOnItsPersonsDayAtTheirRate(t *testing.T) {
 		t.Fatalf("a rebuild over the same facts rewrote %d weeks or posted", again.Rewritten)
 	}
 	// Браво's next shift was not there yet: the PPV waited on the day of its sale; once it is, the row moves weeks.
-	exec(t, s, `UPDATE hub_works SET started_at = '2026-11-16T10:00:00.000+03:00' WHERE user_id = 102 AND kind = 'shift'
-		AND started_at LIKE '2026-11-12%'`)
-	exec(t, s, `UPDATE hub_works SET payload = json_set(payload, '$.startedAt', '2026-11-16T07:00:00Z', '$.endedAt', '2026-11-16T15:00:00Z')
-		WHERE user_id = 102 AND started_at LIKE '2026-11-16%'`)
+	exec(t, s, `UPDATE hub_sale_homes SET payload=json_set(payload,'$.shares[0].reportDate','2026-11-16') WHERE transaction_id=2`)
 	if moved := rebuild(t, s, ctx); moved.Rewritten != 2 {
 		t.Fatalf("the PPV moved to the next week: %d weeks rewritten", moved.Rewritten)
 	}
@@ -366,10 +404,12 @@ func TestAWindowBeforeTheRuleSettlesNothing(t *testing.T) {
 	s, ctx := open(t)
 	sheets(t, s, ctx, map[string][][]payroll.Cell{"Браво": tab("2026-11-02", 0.2, 10, [7]any{50, nil, nil, nil, nil, nil, nil})})
 	// Браво's night shift into the rule's first day holds a tip after midnight: the rule's, on the 2nd.
-	night := work(102, split.Shift, "2026-11-01 22:00", "2026-11-02 06:00", "page-b")
-	putWindow(t, s, "2026-11-02", []hub.TeamWork{night}, []hub.TeamSale{sale("1", split.SaleTip, "page-b", "2026-11-02 01:00", 50_000, night)})
+	night := work(102, "shift", "2026-11-01 22:00", "2026-11-02 06:00", "page-b")
+	putWindow(t, s, "2026-11-02", []hub.TeamWork{night}, []hub.TeamSale{sale("1", "tip", "page-b", "2026-11-02 01:00", 50_000, night)})
 	putWindow(t, s, "2026-11-09", nil, nil)
 	putWindow(t, s, "2026-11-16", nil, nil)
+	putHome(t, s, 1, "shift", "holder", "", share(night, 50_000))
+	freshHomes(t, s)
 	first := rebuild(t, s, ctx)
 	diff := func() string {
 		d, err := WeekDiff(ctx, s.RO, "2026-11-02")
@@ -386,12 +426,12 @@ func TestAWindowBeforeTheRuleSettlesNothing(t *testing.T) {
 
 	// The week before the rule, read while the night was still going: Браво's shift of the 30th with its tip, and the
 	// night as it was then, its first half only.
-	early := work(102, split.Shift, "2026-10-30 10:00", "2026-10-30 18:00", "page-b")
+	early := work(102, "shift", "2026-10-30 10:00", "2026-10-30 18:00", "page-b")
 	going := night
 	going.EndedAt, going.Ongoing = at("2026-11-02 00:30"), true
 	putWindow(t, s, "2026-10-26", []hub.TeamWork{early, going}, []hub.TeamSale{
-		sale("2", split.SaleTip, "page-b", "2026-10-30 11:00", 70_000, early),
-		sale("3", split.SaleTip, "page-b", "2026-11-01 23:00", 9_000, going),
+		sale("2", "tip", "page-b", "2026-10-30 11:00", 70_000, early),
+		sale("3", "tip", "page-b", "2026-11-01 23:00", 9_000, going),
 	})
 	again := rebuild(t, s, ctx)
 	if again.Rewritten != 0 || again.Windows != first.Windows || again.Sales != first.Sales || again.Accruals != first.Accruals {

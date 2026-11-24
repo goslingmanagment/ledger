@@ -12,7 +12,6 @@ import (
 	"github.com/goslingmanagment/ledger/internal/hub"
 	"github.com/goslingmanagment/ledger/internal/ledger"
 	"github.com/goslingmanagment/ledger/internal/money"
-	"github.com/goslingmanagment/ledger/internal/split"
 	"github.com/goslingmanagment/ledger/internal/ts"
 )
 
@@ -702,7 +701,7 @@ func ShiftsWithoutReport(ctx context.Context, q ledger.Querier, from, to string,
 	}
 	// A work is in every window its days touch: the version that ended last stands.
 	rows, err := q.QueryContext(ctx, `SELECT ref, payload FROM hub_works WHERE kind = ? AND substr(started_at, 1, 10) BETWEEN ? AND ?
-		ORDER BY ref, ended_at`, split.Shift, addDays(from, -1), to)
+		ORDER BY ref, ended_at`, "shift", addDays(from, -1), to)
 	if err != nil {
 		return nil, err
 	}
