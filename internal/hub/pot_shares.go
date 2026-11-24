@@ -128,7 +128,7 @@ func PotTabHolds(ctx context.Context, q ledger.Querier, st PotStatus, person str
           AND EXISTS(SELECT 1 FROM settings WHERE key='payroll_terms_hub_from' AND value<>'' AND value<=?)
     ), held AS (
         SELECT DISTINCT h.distribution_id,h.page_labels_json,h.reason,coalesce(m.model,p.model_slug,d.model_slug) model
-        FROM hub_pot_distribution_held h JOIN json_each(h.page_labels_json) j
+        FROM hub_pot_distribution_held h LEFT JOIN json_each(h.page_labels_json) j
         LEFT JOIN hub_pages p ON p.page_label=j.value
         LEFT JOIN hub_pot_distributions d ON d.id=h.distribution_id
         LEFT JOIN mapping m ON m.slug=coalesce(p.model_slug,d.model_slug) COLLATE NOCASE
