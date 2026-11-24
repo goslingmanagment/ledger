@@ -59,7 +59,7 @@ func AccrualFrom(ctx context.Context, q ledger.Querier) (string, error) {
 
 // Refresh brings the shadows the sources after the sheets read up to date before a rebuild (the accruals from the
 // reports: their terms are the tabs' and move with the sheets). Set by internal/accruals; nil — nothing to refresh.
-var Refresh func(ctx context.Context, store *db.Store, now time.Time) error
+var Refresh func(ctx context.Context, tx *sql.Tx, now time.Time) error
 
 // Rebuild brings the books in line with what is known: who each tab belongs to, the accruals (from the sheets, and
 // from Hub's facts from settings.payroll_facts_from on, or from the shift reports from settings.payroll_reports_from
@@ -73,16 +73,16 @@ func Rebuild(ctx context.Context, store *db.Store, now time.Time) (Report, error
 	if err := projectPeople(ctx, store, now); err != nil {
 		return rep, err
 	}
-	if Refresh != nil {
-		if err := Refresh(ctx, store, now); err != nil {
-			return rep, fmt.Errorf("начисления по отчётам: %w", err)
-		}
-	}
 	tx, err := store.RW.BeginTx(ctx, nil)
 	if err != nil {
 		return rep, err
 	}
 	defer tx.Rollback()
+	if Refresh != nil {
+		if err := Refresh(ctx, tx, now); err != nil {
+			return rep, fmt.Errorf("начисления по отчётам: %w", err)
+		}
+	}
 	from, err := AccrualFrom(ctx, tx)
 	if err != nil {
 		return rep, err
@@ -136,6 +136,9 @@ func Rebuild(ctx context.Context, store *db.Store, now time.Time) (Report, error
 		}
 	}
 	if err := rebuildFIFO(ctx, tx); err != nil {
+		return rep, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE hub_pot_sync SET dirty=0 WHERE dirty=1 AND state='ok'`); err != nil {
 		return rep, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -374,7 +377,17 @@ func reconcileAccruals(ctx context.Context, tx *sql.Tx, from string, plan afterP
 		}
 		account := "payable:" + w.person
 		if ok && len(hs) == 1 && hs[0].account == account && hs[0].amount == -w.amount && hs[0].date == w.date && hs[0].source == w.source {
-			continue
+			if w.basis == nil || rp.potFrom == "" || w.date < rp.potFrom {
+				continue
+			}
+			var oldPots, oldRefs string
+			err := tx.QueryRowContext(ctx, `SELECT hub_pots,sale_refs FROM report_accrual_entries WHERE entry_id=?`, hs[0].id).Scan(&oldPots, &oldRefs)
+			if err != nil && err != sql.ErrNoRows {
+				return err
+			}
+			if err == sql.ErrNoRows || (oldPots == w.basis.hubPots && (rp.paid[day] > 0 || oldRefs == w.basis.saleRefs)) {
+				continue
+			}
 		}
 		at := now
 		if ok {
@@ -407,8 +420,8 @@ func reconcileAccruals(ctx context.Context, tx *sql.Tx, from string, plan afterP
 			return fmt.Errorf("%s: %w", day, err)
 		}
 		if w.basis != nil {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO report_accrual_entries(entry_id, net_micros, rate, fix_micros) VALUES (?, ?, ?, ?)`,
-				id, int64(w.basis.net), w.basis.rate, int64(w.basis.fix)); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO report_accrual_entries(entry_id, net_micros, rate, fix_micros,hub_reports,sale_refs,hub_pots) VALUES (?, ?, ?, ?,?,?,?)`,
+				id, int64(w.basis.net), w.basis.rate, int64(w.basis.fix), w.basis.hubReports, w.basis.saleRefs, w.basis.hubPots); err != nil {
 				return err
 			}
 		}

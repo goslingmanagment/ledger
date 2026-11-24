@@ -295,6 +295,19 @@ func Changed(ctx context.Context, store *db.Store, now time.Time) error {
 	return reports.Changed(ctx, store, now)
 }
 
+const workboardPots = "Общаки с %s ведутся в Workboard «Деньги → Общаки»"
+
+func guardLegacyPot(ctx context.Context, q ledger.Querier, lastDay string) error {
+	st, err := hub.ReadPotStatus(ctx, q)
+	if err != nil {
+		return err
+	}
+	if st.From != "" && (lastDay == "" || lastDay >= st.From) {
+		return refuse(workboardPots, st.From)
+	}
+	return nil
+}
+
 // Declare writes a pot, or changes the pot of the slug. A change that would put a purchase in the pot outside its
 // pages or dates is refused: the purchase is removed first.
 func Declare(ctx context.Context, store *db.Store, in DeclareInput, keyName string, now time.Time) (Pot, error) {
@@ -304,6 +317,13 @@ func Declare(ctx context.Context, store *db.Store, in DeclareInput, keyName stri
 	}
 	defer tx.Rollback()
 	if in, err = normalize(ctx, tx, in); err != nil {
+		return Pot{}, err
+	}
+	lastDay := ""
+	if in.EndsAt != nil {
+		lastDay = *in.EndsAt
+	}
+	if err := guardLegacyPot(ctx, tx, lastDay); err != nil {
 		return Pot{}, err
 	}
 	next := Pot{Slug: in.Slug, Pages: in.Pages, StartsAt: in.StartsAt, EndsAt: in.EndsAt}
@@ -643,17 +663,6 @@ func AddSale(ctx context.Context, store *db.Store, slug string, in SaleInput, de
 	default:
 		return res, refuse("source бывает agent, report_line или owner, а не %q", source)
 	}
-	// From the switch day's sales on (settings.sale_decisions_hub_from) a sale Hub sees goes to a pot by Hub's decision
-	// alone: the job writes the purchase. By hand — money Hub does not see, and the sales before that day. A line of a
-	// report is no other door: its sale is the same sale.
-	if in.TransactionRef != "" {
-		if why, err := hubOnly(ctx, tx, refs, slug); err != nil || why != "" {
-			if err != nil {
-				return res, err
-			}
-			return res, refuse("%s", why)
-		}
-	}
 	var s found
 	if s.page, err = fill("page_label", given.page, src.page); err != nil {
 		return res, err
@@ -700,6 +709,20 @@ func AddSale(ctx context.Context, store *db.Store, slug string, in SaleInput, de
 		return res, refuse("нетто покупки %s: нужно больше нуля", money.Micros(s.net).Cents())
 	}
 	day := s.at[:10]
+	if err := guardLegacyPot(ctx, tx, day); err != nil {
+		return res, err
+	}
+	// From the switch day's sales on (settings.sale_decisions_hub_from) a sale Hub sees goes to a pot by Hub's decision
+	// alone: the job writes the purchase. By hand — money Hub does not see, and the sales before that day. A line of a
+	// report is no other door: its sale is the same sale.
+	if in.TransactionRef != "" {
+		if why, err := hubOnly(ctx, tx, refs, slug); err != nil || why != "" {
+			if err != nil {
+				return res, err
+			}
+			return res, refuse("%s", why)
+		}
+	}
 	if err := p.inPot(s.page, day); err != nil {
 		return res, err
 	}
@@ -864,6 +887,9 @@ func RemoveSale(ctx context.Context, store *db.Store, id int64, in RemoveInput, 
 		return Sale{}, ErrNotFound
 	}
 	if err != nil {
+		return Sale{}, err
+	}
+	if err := guardLegacyPot(ctx, tx, s.Day); err != nil {
 		return Sale{}, err
 	}
 	if s.RemovedAt != nil {

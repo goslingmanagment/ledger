@@ -21,6 +21,8 @@ func init() {
 	Command(Cmd{Name: "hub status", Summary: "что хаб доказал по каждой странице и датасету и по неделям фактов команды", Run: hubStatus})
 	Command(Cmd{Name: "hub team-sync", Summary: "прочитать факты смен и продаж хаба по неделям: [--from ГГГГ-ММ-ДД] [--to ГГГГ-ММ-ДД]", Run: hubTeamSync})
 	Command(Cmd{Name: "hub net", Summary: "оборот страниц месяца по зеркалу хаба: --month ГГГГ-ММ [--as-of]", Run: hubNet})
+	Command(Cmd{Name: "hub pots-sync", Summary: "прочитать раздачи общаков Workboard (рядом с базой)", Run: hubPotsSync})
+	Command(Cmd{Name: "payroll pots-hub-from", Summary: "проверить или включить раздачи Workboard с даты", Run: payrollPotsHubFrom})
 	Command(Cmd{Name: "hub homes-sync", Summary: "прочитать дома продаж хаба и пересчитать факты (рядом с базой)", Run: hubHomesSync})
 	Command(Cmd{Name: "hub reports-sync", Summary: "прочитать отчёты смен, сданные в хабе, сейчас, как джоб hub-reports (рядом с базой)", Run: hubReportsSync})
 }
@@ -223,6 +225,57 @@ func hubTeamSync(ctx context.Context, args []string) error {
 		return Exit{Code: 3, Msg: fmt.Sprintf("хаб не доказал %d окон из %d — «неизвестно», см. reasons", n, len(rep.Windows))}
 	}
 	return nil
+}
+
+func hubPotsSync(ctx context.Context, args []string) error {
+	if len(args) != 0 {
+		return Exit{Code: 2, Msg: "ledger hub pots-sync"}
+	}
+	store, err := OpenStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	st, err := hub.SyncConfiguredPots(ctx, store, time.Now())
+	if err != nil {
+		return err
+	}
+	if err := printJSON(st); err != nil {
+		return err
+	}
+	if st.Held > 0 {
+		return Exit{Code: 3, Msg: "Workboard придержал раздачи — ledger health"}
+	}
+	return nil
+}
+
+func payrollPotsHubFrom(ctx context.Context, args []string) error {
+	fs := Flags("payroll pots-hub-from")
+	off := fs.Bool("off", false, "вернуться к общакам ledger")
+	dry := fs.Bool("dry-run", false, "только проверить переход")
+	pos, err := ParseArgs(fs, args)
+	if err != nil {
+		return err
+	}
+	if (*off && len(pos) != 0) || (!*off && len(pos) != 1) {
+		return Exit{Code: 2, Msg: "ledger payroll pots-hub-from ГГГГ-ММ-ДД|--off [--dry-run]"}
+	}
+	day := ""
+	if !*off {
+		day = pos[0]
+		if day == "" {
+			return Exit{Code: 2, Msg: "нужна дата ГГГГ-ММ-ДД"}
+		}
+	}
+	store, err := OpenStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	if err := hub.SetPotSharesFrom(ctx, store, day, *dry, time.Now()); err != nil {
+		return err
+	}
+	return printJSON(map[string]any{"ok": true, "potSharesHubFrom": day, "dryRun": *dry})
 }
 
 func hubHomesSync(ctx context.Context, args []string) error {

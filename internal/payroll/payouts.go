@@ -59,9 +59,12 @@ type PayoutPage struct {
 
 // PayoutPot is a person's share of a day's purchases in one pot.
 type PayoutPot struct {
-	Pot           string `json:"pot"`
-	Name          string `json:"name"`
-	RevenueMicros int64  `json:"revenueMicros"`
+	DistributionID int64    `json:"distributionId,omitempty"`
+	Basis          string   `json:"basis,omitempty"`
+	Rate           *float64 `json:"rate,omitempty"`
+	Pot            string   `json:"pot"`
+	Name           string   `json:"name"`
+	RevenueMicros  int64    `json:"revenueMicros"`
 }
 
 // PayoutDay is one accrued day of one tab.
