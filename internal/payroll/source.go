@@ -196,15 +196,18 @@ func sourceName(source string) string {
 
 // reportBasis is what a reports day was counted from: the posted revenue and the terms.
 type reportBasis struct {
-	net, fix money.Micros
-	rate     *float64
+	hubReports, saleRefs, hubPots string
+	net, fix                      money.Micros
+	rate                          *float64
 }
 
 // reportPlan is what the shift reports say about every tab's day from the switch on.
 type reportPlan struct {
-	from string
-	want map[string]factDay
-	held map[string]string // "<model>/<name>:<date>" → why the reports cannot answer for it
+	potHoldFrom string
+	potFrom     string
+	from        string
+	want        map[string]factDay
+	held        map[string]string // "<model>/<name>:<date>" → why the reports cannot answer for it
 	// waiting are the days of the board «Отчёт» with no counted Hub report: nothing accrues (not held as posted), each
 	// stands in «не занесено» as unknown with why.
 	waiting   map[string]string
@@ -222,7 +225,7 @@ func (p *reportPlan) marks() []unenteredRow      { return p.markers }
 func (p *reportPlan) lost() []Unaccrued          { return p.unaccrued }
 func (p *reportPlan) holds(model, name, date string) bool {
 	_, ok := p.held[model+"/"+name+":"+date]
-	return ok
+	return ok || (p.potHoldFrom != "" && date >= p.potHoldFrom)
 }
 
 // blockingFlags are the flags of a post that keep it out of the pay base (as v_report_pages and reports.Blocking).
@@ -238,6 +241,14 @@ var blockingFlags = map[string]string{
 // (in the sheet or posted) with no posted report.
 func planReports(ctx context.Context, q ledger.Querier, from string, now time.Time) (*reportPlan, error) {
 	p := &reportPlan{from: from, want: map[string]factDay{}, held: map[string]string{}, waiting: map[string]string{}}
+	potStatus, err := hub.ReadPotStatus(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	p.potFrom = potStatus.From
+	if potStatus.FeedProblem(now) != "" {
+		p.potHoldFrom = potStatus.From
+	}
 	tabs, tabOf, err := planTabs(ctx, q)
 	if err != nil {
 		return nil, err
@@ -247,20 +258,25 @@ func planReports(ctx context.Context, q ledger.Querier, from string, now time.Ti
 			p.held[key] = why
 		}
 	}
+	refsByDay, err := reportSaleRefs(ctx, q, from)
+	if err != nil {
+		return nil, err
+	}
 	reported := map[string]bool{}
-	rows, err := q.QueryContext(ctx, `SELECT person, model, day, net_micros, rate, fix_micros, amount_micros, COALESCE(reason, '')
-		FROM report_accruals WHERE day >= ? ORDER BY person, model, day`, from)
+	rows, err := q.QueryContext(ctx, `SELECT person, model, day, net_micros, rate, fix_micros, amount_micros, COALESCE(reason, ''),coalesce(hub_reports,'[]'),
+ coalesce((SELECT json_group_array(json(j.value)) FROM json_each(a.pots) j WHERE j.value->>'distributionId' IS NOT NULL),'[]')
+		FROM report_accruals a WHERE day >= ? ORDER BY person, model, day`, from)
 	if err != nil {
 		return nil, err
 	}
 	type lostKey struct{ person, model string }
 	lost := map[lostKey]*Unaccrued{}
 	for rows.Next() {
-		var person, model, day, reason string
+		var person, model, day, reason, hubReports, hubPots string
 		var net, fix int64
 		var rate sql.NullFloat64
 		var amount sql.NullInt64
-		if err := rows.Scan(&person, &model, &day, &net, &rate, &fix, &amount, &reason); err != nil {
+		if err := rows.Scan(&person, &model, &day, &net, &rate, &fix, &amount, &reason, &hubReports, &hubPots); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -285,7 +301,11 @@ func planReports(ctx context.Context, q ledger.Querier, from string, now time.Ti
 			hold(key, fmt.Sprintf("нет ставки: %s — выручка по отчёту %s", reason, money.Micros(net).Cents()))
 			continue
 		}
-		b := &reportBasis{net: money.Micros(net), fix: money.Micros(fix)}
+		saleRefs := refsByDay[[3]string{person, model, day}]
+		if saleRefs == "" {
+			saleRefs = "[]"
+		}
+		b := &reportBasis{hubReports: hubReports, hubPots: hubPots, saleRefs: saleRefs, net: money.Micros(net), fix: money.Micros(fix)}
 		if rate.Valid {
 			v := rate.Float64
 			b.rate = &v
@@ -554,6 +574,25 @@ func planReports(ctx context.Context, q ledger.Querier, from string, now time.Ti
 		return nil, err
 	}
 
+	// A pot-only day can disappear when a distribution is reversed or held. Its booked basis identifies
+	// that withdrawal even when the current mirror no longer contains a payable line.
+	rows, err = q.QueryContext(ctx, `SELECT tab||':'||day FROM v_booked_report_days WHERE hub_pots<>'[]' AND day>=?`, from)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		retracted[key] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
 	// Money of a day with no posted report: in the sheet, or posted already. A day that answers only to Hub's report or
 	// whose post was retracted is not held by them.
 	rows, err = q.QueryContext(ctx, `SELECT model, name, person, date FROM payroll_days WHERE person IS NOT NULL AND amount <> 0 AND date >= ?`, from)
@@ -600,6 +639,30 @@ func planReports(ctx context.Context, q ledger.Querier, from string, now time.Ti
 		}
 	}
 	return p, p.mark(ctx, q, tabs, now)
+}
+
+// Snapshot only sales on this model's pages. A version may cover several models.
+func reportSaleRefs(ctx context.Context, q ledger.Querier, from string) (map[[3]string]string, error) {
+	rows, err := q.QueryContext(ctx, `SELECT person,model,day,json_group_array(ref) FROM (
+ SELECT DISTINCT l.person,p.model,l.report_date AS day,l.transaction_ref AS ref
+ FROM v_report_lines l JOIN v_report_pages p
+ ON p.person=l.person AND p.report_date=l.report_date AND p.page=l.page_label AND p.accrue_micros IS NOT NULL
+ WHERE l.counted=1 AND l.report_date>=? AND ((l.source='hub' AND p.basis='hub') OR (l.source='agent' AND p.basis<>'hub'))
+ ORDER BY l.person,p.model,day,ref) GROUP BY person,model,day`, from)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[[3]string]string{}
+	for rows.Next() {
+		var k [3]string
+		var refs string
+		if err := rows.Scan(&k[0], &k[1], &k[2], &refs); err != nil {
+			return nil, err
+		}
+		out[k] = refs
+	}
+	return out, rows.Err()
 }
 
 // mark lists the held days of the last 45 days and the worked shifts without a posted report for «не занесено».

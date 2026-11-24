@@ -118,6 +118,10 @@ func PlanHub(ctx context.Context, q ledger.Querier, now time.Time) (HubPlan, err
 	if err != nil || from == "" {
 		return plan, err
 	}
+	st, err := hub.ReadPotStatus(ctx, q)
+	if err != nil {
+		return plan, err
+	}
 	plan.From = from
 	// The active decisions of kind pot that name a sale.
 	rows, err := q.QueryContext(ctx, `SELECT id, transaction_ref, COALESCE(pot, ''), source, COALESCE(decided_at, ''), changed_at, read_at
@@ -148,7 +152,7 @@ func PlanHub(ctx context.Context, q ledger.Querier, now time.Time) (HubPlan, err
 	}
 	var mades []made
 	rows, err = q.QueryContext(ctx, `SELECT id, hub_decision_id, COALESCE(transaction_ref, ''), pot FROM pot_sales
-		WHERE hub_decision_id IS NOT NULL AND removed_at IS NULL ORDER BY id`)
+		WHERE hub_decision_id IS NOT NULL AND removed_at IS NULL AND (?='' OR day<?) ORDER BY id`, st.From, st.From)
 	if err != nil {
 		return plan, err
 	}
@@ -229,6 +233,10 @@ func PlanHub(ctx context.Context, q ledger.Querier, now time.Time) (HubPlan, err
 			continue
 		}
 		day := sale.at[:10]
+		if st.From != "" && day >= st.From {
+			plan.Waiting = append(plan.Waiting, problem(workboardPots, st.From))
+			continue
+		}
 		if !decisions.HubRules(from, day) {
 			continue // a sale of a day before the switch: by hand, as it was
 		}

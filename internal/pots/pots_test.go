@@ -328,3 +328,35 @@ func TestASaleCountedInAHubReportIsGuarded(t *testing.T) {
 		t.Fatalf("forced %+v %v", out, err)
 	}
 }
+
+func TestLegacyPotWritesStopAtDistributionDay(t *testing.T) {
+	s, ctx := book(t)
+	if _, err := pots.Declare(ctx, s, pot(), "owner", now); err != nil {
+		t.Fatal(err)
+	}
+	in := pots.SaleInput{PageLabel: "page-a", NetMills: mills(874), OccurredAt: "2026-11-12T12:00:00+03:00"}
+	bought, err := add(t, s, ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	switchDay(t, s, "2026-11-01")
+	if _, err := s.RW.Exec("UPDATE settings SET value='2026-11-12' WHERE key='pot_shares_hub_from'"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = pots.Declare(ctx, s, pot(), "owner", now)
+	refusal(t, err, "Деньги → Общаки")
+	_, err = add(t, s, ctx, in)
+	refusal(t, err, "Деньги → Общаки")
+	_, err = pots.RemoveSale(ctx, s, bought.Sale.ID, pots.RemoveInput{Note: "fixture"}, "owner", now)
+	refusal(t, err, "Деньги → Общаки")
+	hubFact(t, s, "8140", "page-a", "2026-11-12T11:00:00.000+03:00", 9000)
+	potDecision(t, s, 86, "8140", "set-one", now)
+	plan, err := pots.PlanHub(ctx, s.RO, now)
+	if err != nil || len(plan.Add)+len(plan.Remove) != 0 || len(plan.Waiting) != 1 || !strings.Contains(plan.Waiting[0].Why, "Деньги → Общаки") {
+		t.Fatal(plan, err)
+	}
+	in.OccurredAt = "2026-11-11T12:00:00+03:00"
+	if _, err := add(t, s, ctx, in); err != nil {
+		t.Fatal(err)
+	}
+}

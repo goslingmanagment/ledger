@@ -665,7 +665,7 @@ func sourceCells(ctx context.Context, q ledger.Querier, source, from, to string)
 
 // reportCells reads report_accruals of the days in [from, to]: the posted amount of each page.
 func reportCells(ctx context.Context, q ledger.Querier, from, to string) (map[string]factCell, error) {
-	rows, err := q.QueryContext(ctx, `SELECT person, model, day, pages, net_micros, pots FROM report_accruals WHERE day BETWEEN ? AND ?
+	rows, err := q.QueryContext(ctx, `SELECT person, model, day, pages, net_micros, pots,rate FROM report_accruals WHERE day BETWEEN ? AND ?
 		ORDER BY person, model, day`, from, to)
 	if err != nil {
 		return nil, err
@@ -675,14 +675,11 @@ func reportCells(ctx context.Context, q ledger.Querier, from, to string) (map[st
 	for rows.Next() {
 		var person, model, day, pages, pots string
 		var net int64
-		if err := rows.Scan(&person, &model, &day, &pages, &net, &pots); err != nil {
+		var rate *float64
+		if err := rows.Scan(&person, &model, &day, &pages, &net, &pots, &rate); err != nil {
 			return nil, err
 		}
-		var shares []struct {
-			Pot    string `json:"pot"`
-			Name   string `json:"name"`
-			Micros int64  `json:"micros"`
-		}
+		var shares []hub.PotShare
 		if err := json.Unmarshal([]byte(pots), &shares); err != nil {
 			return nil, fmt.Errorf("report_accruals %s %s %s: pots: %w", person, model, day, err)
 		}
@@ -699,13 +696,21 @@ func reportCells(ctx context.Context, q ledger.Querier, from, to string) (map[st
 			c.pages = append(c.pages, PayoutPage{Page: p.Page, RevenueMicros: p.Micros})
 		}
 		for _, sh := range shares {
-			c.pots = append(c.pots, PayoutPot{Pot: sh.Pot, Name: sh.Name, RevenueMicros: sh.Micros})
+			c.pots = append(c.pots, payoutPot(sh, rate))
 		}
 		c.value += net
 		c.hasShift = len(c.pages) > 0
 		out[k] = c
 	}
 	return out, rows.Err()
+}
+
+func payoutPot(sh hub.PotShare, rate *float64) PayoutPot {
+	p := PayoutPot{Pot: sh.Pot, Name: sh.Name, RevenueMicros: sh.Micros, DistributionID: sh.DistributionID, Basis: sh.Basis}
+	if sh.DistributionID != 0 {
+		p.Rate = rate
+	}
+	return p
 }
 
 // factCells reads fact_accruals of the sales (and shift-fix markers) in [from, to] by "<person>\x00<model slug>\x00<day>".

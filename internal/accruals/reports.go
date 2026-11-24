@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/goslingmanagment/ledger/internal/db"
+	"github.com/goslingmanagment/ledger/internal/hub"
 	"github.com/goslingmanagment/ledger/internal/ledger"
 	"github.com/goslingmanagment/ledger/internal/money"
 	"github.com/goslingmanagment/ledger/internal/payroll"
@@ -30,8 +31,8 @@ import (
 // (hub_pay_terms) instead of the tab's header; a day the registry has no term for keeps the header (ecosystem H3).
 
 func init() {
-	payroll.Refresh = func(ctx context.Context, store *db.Store, now time.Time) error {
-		_, err := RebuildReports(ctx, store, now)
+	payroll.Refresh = func(ctx context.Context, tx *sql.Tx, now time.Time) error {
+		_, err := rebuildReportsTx(ctx, tx, now)
 		return err
 	}
 	reports.AfterChange = func(ctx context.Context, store *db.Store, now time.Time) error {
@@ -49,6 +50,7 @@ func init() {
 		}
 		return nil
 	}
+	hub.AfterPots = reports.AfterChange
 }
 
 // ReportsReport says what a rebuild of report_accruals did.
@@ -67,19 +69,12 @@ type reportPage struct {
 	Micros int64  `json:"micros"`
 }
 
-// potPart is a person's share of a day's purchases in one pot: revenue of the tab like a page.
-type potPart struct {
-	Pot    string `json:"pot"`
-	Name   string `json:"name"`
-	Micros int64  `json:"micros"`
-}
-
 type reportDay struct {
 	person, model, day string
 	pages              []reportPage
 	posts              []int64
 	hubReports         []int64 // Hub's handed-in versions the day is from (basis hub); nil — from the posts
-	pots               []potPart
+	pots               []hub.PotShare
 	potNet             int64
 	net                int64 // the pages and the pot shares
 	tabModel, tabName  *string
@@ -124,6 +119,11 @@ func RebuildReports(ctx context.Context, store *db.Store, now time.Time) (Report
 	defer tx.Rollback()
 	rep, err := rebuildReportsTx(ctx, tx, now)
 	if err != nil {
+		return rep, err
+	}
+	// With the report source off the computed day is the final (shadow) result.
+	if _, err := tx.ExecContext(ctx, `UPDATE hub_pot_sync SET dirty=0 WHERE dirty=1 AND state='ok'
+ AND (SELECT value FROM settings WHERE key='payroll_reports_from')=''`); err != nil {
 		return rep, err
 	}
 	return rep, tx.Commit()
@@ -186,18 +186,16 @@ func reportDays(ctx context.Context, q ledger.Querier) ([]reportDay, error) {
 		}
 	}
 	// The pot shares of the purchases of the day, in pots of the model: revenue of the person's tab beside the pages.
-	rows, err = q.QueryContext(ctx, `SELECT person, model, day, pot, pot_name, SUM(share_micros) FROM v_pot_shares
-		WHERE person IS NOT NULL GROUP BY person, model, day, pot ORDER BY person, day, model, pot`)
+	st, err := hub.ReadPotStatus(ctx, q)
 	if err != nil {
 		return nil, err
 	}
-	for rows.Next() {
-		var person, model, day string
-		var part potPart
-		if err := rows.Scan(&person, &model, &day, &part.Pot, &part.Name, &part.Micros); err != nil {
-			rows.Close()
-			return nil, err
-		}
+	rows, err = q.QueryContext(ctx, `SELECT person, model, day, pot, pot_name, SUM(share_micros) FROM v_pot_shares
+		WHERE person IS NOT NULL AND (?='' OR day<?) GROUP BY person, model, day, pot ORDER BY person, day, model, pot`, st.From, st.From)
+	if err != nil {
+		return nil, err
+	}
+	addShare := func(person, model, day string, part hub.PotShare) {
 		k := [3]string{person, model, day}
 		d := byKey[k]
 		if d == nil {
@@ -209,9 +207,27 @@ func reportDays(ctx context.Context, q ledger.Querier) ([]reportDay, error) {
 		d.potNet += part.Micros
 		d.net += part.Micros
 	}
+	for rows.Next() {
+		var person, model, day string
+		var part hub.PotShare
+		if err := rows.Scan(&person, &model, &day, &part.Pot, &part.Name, &part.Micros); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		addShare(person, model, day, part)
+	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	lines, err := hub.PotLines(ctx, q, st.From)
+	if err != nil {
+		return nil, err
+	}
+	for _, l := range lines {
+		if l.Problem == "" {
+			addShare(l.Person, l.Model, l.Day, l.PotShare)
+		}
 	}
 	sort.Slice(order, func(i, j int) bool {
 		a, b := order[i], order[j]

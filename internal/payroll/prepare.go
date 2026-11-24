@@ -3,8 +3,10 @@ package payroll
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/goslingmanagment/ledger/internal/hub"
 	"math"
 	"net/http"
 	"sort"
@@ -335,6 +337,13 @@ func PreparePayout(ctx context.Context, db *sql.DB, slug string, now time.Time) 
 	if err := hubFlags(ctx, tx, &b, card, today, f); err != nil {
 		return b, err
 	}
+	potProblems, err := hub.PotProblems(ctx, tx, slug, now)
+	if err != nil {
+		return b, err
+	}
+	for _, problem := range potProblems {
+		f.add("hub_pots", true, "%s", problem)
+	}
 	if err := unresolvedFlags(ctx, tx, b.AccrualFrom, res, card, f); err != nil {
 		return b, err
 	}
@@ -344,8 +353,12 @@ func PreparePayout(ctx context.Context, db *sql.DB, slug string, now time.Time) 
 	}
 	b.PendingChanges = pendingOut(pending)
 	for _, c := range pending {
-		f.add("pending_change", true, "изменение %d за выплаченный день %s (%s): проведено %s, по отчёту %s — %s; решить: ledger payroll change apply|dismiss %d",
-			c.ID, ddmm(c.Date), c.Model, money.Micros(c.PostedMicros).Cents(), money.Micros(c.NewMicros).Cents(), c.ReasonText, c.ID)
+		decision := "apply|dismiss"
+		if c.removedPot {
+			decision = "apply"
+		}
+		f.add("pending_change", true, "изменение %d за выплаченный день %s (%s): проведено %s, по отчёту %s — %s; решить: ledger payroll change %s %d",
+			c.ID, ddmm(c.Date), c.Model, money.Micros(c.PostedMicros).Cents(), money.Micros(c.NewMicros).Cents(), c.ReasonText, decision, c.ID)
 	}
 	sort.SliceStable(b.Flags, func(i, j int) bool { return b.Flags[i].Blocker && !b.Flags[j].Blocker })
 	return b, tx.Commit()
@@ -505,6 +518,28 @@ func prepareCells(ctx context.Context, q ledger.Querier, slug, from string, unpa
 			}
 			f := cells[slug+"\x00"+ledger.Slug(u.model)+"\x00"+u.date]
 			c := prepCells{week: weekOfDate(u.date), pages: f.pages, pots: f.pots, value: f.value, hasShift: f.hasShift}
+			if source == SourceReports && u.paid > 0 {
+				var pots string
+				var net int64
+				var rate *float64
+				err := q.QueryRowContext(ctx, `SELECT b.hub_pots,b.net_micros,b.rate FROM v_booked_report_days b
+    JOIN settings s ON s.key='pot_shares_hub_from' AND s.value<>'' AND b.day>=s.value
+    WHERE b.person=? AND b.tab=? AND b.day=?`, slug, tabKey(u.model, u.name), u.date).Scan(&pots, &net, &rate)
+				if err != nil && err != sql.ErrNoRows {
+					return nil, err
+				}
+				if err == nil {
+					var parts []hub.PotShare
+					if err := json.Unmarshal([]byte(pots), &parts); err != nil {
+						return nil, err
+					}
+					c.pots = nil
+					for _, part := range parts {
+						c.pots = append(c.pots, payoutPot(part, rate))
+					}
+					c.value = net
+				}
+			}
 			if sh, ok := out[tabKey(u.model, u.name)+":"+u.date]; ok {
 				c.week = sh.week
 			}
@@ -753,6 +788,11 @@ func potText(days []PrepareDay) string {
 			when := ""
 			if len(days) > 1 {
 				when = " " + ddmm(d.Date)
+			}
+			if p.DistributionID != 0 && p.Rate != nil {
+				pay := money.FromFloat(float64(p.RevenueMicros) / money.Scale * *p.Rate)
+				parts = append(parts, fmt.Sprintf("общак %s, раздача %d: доля базы %s (%s) × %s%% = %s%s", p.Name, p.DistributionID, cellNum(p.RevenueMicros), p.Basis, strconv.FormatFloat(*p.Rate*100, 'f', -1, 64), cellNum(int64(pay)), when))
+				continue
 			}
 			parts = append(parts, fmt.Sprintf("общак %s%s: база %s", p.Name, when, cellNum(p.RevenueMicros)))
 		}

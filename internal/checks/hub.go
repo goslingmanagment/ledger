@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -43,6 +44,7 @@ var Keys = map[string]string{
 	"у смен есть отчёты":           "shift_reports",
 	hubReportsCheck:                "hub_reports",
 	hubHomesCheck:                  "hub_homes",
+	hubPotsCheck:                   "hub_pots",
 	hubDecisionsCheck:              "hub_decisions",
 	"изменения за выплаченные дни ждут решения": "pending_changes",
 	weekColumnsCheck: "week_columns",
@@ -157,6 +159,42 @@ func ReadHubChecks(ctx context.Context, q ledger.Querier, now time.Time) (HubChe
 		ans.Checks = append(ans.Checks, c)
 	}
 	return ans, nil
+}
+
+const hubPotsCheck = "общаки Workboard доходят"
+
+func HubPots(ctx context.Context, e Env) Result {
+	problems, err := hub.PotProblems(ctx, e.Q, "", e.Now)
+	if err != nil {
+		return fail(hubPotsCheck, "warn", err.Error(), nil)
+	}
+	st, err := hub.ReadPotStatus(ctx, e.Q)
+	if err != nil {
+		return fail(hubPotsCheck, "warn", err.Error(), nil)
+	}
+	if st.From == "" {
+		return pass(hubPotsCheck, "доли Workboard ещё не включены")
+	}
+	rows, err := e.Q.QueryContext(ctx, `SELECT id,person,date FROM payroll_pending_changes WHERE reason='общак' AND state='open' ORDER BY date,person`)
+	if err != nil {
+		return fail(hubPotsCheck, "warn", err.Error(), nil)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var person, day string
+		if err := rows.Scan(&id, &person, &day); err != nil {
+			return fail(hubPotsCheck, "warn", err.Error(), nil)
+		}
+		problems = append(problems, fmt.Sprintf("%s за %s: изменение общака %d ждёт решения", person, day, id))
+	}
+	if err := rows.Err(); err != nil {
+		return fail(hubPotsCheck, "warn", err.Error(), nil)
+	}
+	if len(problems) > 0 {
+		return fail(hubPotsCheck, "warn", problems[0], problems)
+	}
+	return pass(hubPotsCheck, "раздачи прочитаны "+st.LastOK)
 }
 
 const hubHomesCheck = "дома продаж хаба доходят"

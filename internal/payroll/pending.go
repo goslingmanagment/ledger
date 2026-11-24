@@ -28,6 +28,7 @@ import (
 const (
 	ChangePostEdited   = "post_edited"
 	ChangeNewPost      = "new_post"
+	ChangePot          = "общак"
 	ChangeTermsChanged = "terms_changed"
 )
 
@@ -43,6 +44,7 @@ const decidedByLedger = "ledger"
 
 // ChangeReasonText says a reason in Russian.
 var ChangeReasonText = map[string]string{
+	ChangePot:          "изменилась доля общака Workboard",
 	ChangePostEdited:   "пост изменён после выплаты",
 	ChangeNewPost:      "отчёт пришёл, когда день стоял по таблице и был выплачен",
 	ChangeTermsChanged: "та же выручка, другие ставка или фикс вкладки",
@@ -50,6 +52,7 @@ var ChangeReasonText = map[string]string{
 
 // PendingChange is a row of payroll_pending_changes.
 type PendingChange struct {
+	removedPot   bool
 	ID           int64  `json:"id"`
 	Person       string `json:"person"`
 	Model        string `json:"model"`
@@ -115,7 +118,18 @@ func (p *reportPlan) loadGuard(ctx context.Context, q ledger.Querier) error {
 // follows the report (the day is no longer paid), dismissed, when the report came back to what is posted.
 func (p *reportPlan) guard(ctx context.Context, tx *sql.Tx, g guardDay, now time.Time) (bool, error) {
 	open, isOpen := p.open[g.key()]
-	if p.paid[g.key()] == 0 || g.next == g.posted {
+	var potChange string
+	var err error
+	if p.potFrom != "" && g.date >= p.potFrom && p.paid[g.key()] > 0 {
+		if potChange, err = bookedPotChange(ctx, tx, g); err != nil {
+			return false, err
+		}
+	}
+	refs := "[]"
+	if g.basis != nil {
+		refs = g.basis.saleRefs
+	}
+	if p.paid[g.key()] == 0 || (g.next == g.posted && potChange == "") {
 		if isOpen {
 			state, note := stateApplied, "день не выплачен: проведён по отчёту"
 			if g.next == g.posted {
@@ -130,39 +144,70 @@ func (p *reportPlan) guard(ctx context.Context, tx *sql.Tx, g guardDay, now time
 	// The owner applied exactly this change: let it through.
 	var applied int
 	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM payroll_pending_changes WHERE model = ? AND name = ? AND date = ?
-		AND state = ? AND posted_micros = ? AND new_micros = ? AND decided_by IS NOT ?`, g.model, g.name, g.date, stateApplied,
+		AND pot_change=? AND state = ? AND posted_micros = ? AND new_micros = ? AND decided_by IS NOT ?`, g.model, g.name, g.date, potChange, stateApplied,
 		int64(g.posted), int64(g.next), decidedByLedger).Scan(&applied); err != nil {
 		return false, err
 	}
 	if applied > 0 {
 		return false, nil
 	}
-	reason, err := changeReason(ctx, tx, g)
+	reason := ChangePot
+	if potChange == "" {
+		reason, err = changeReason(ctx, tx, g)
+	}
 	if err != nil {
 		return true, err
 	}
 	at := ts.Format(now)
 	if isOpen {
-		if open.PostedMicros == int64(g.posted) && open.NewMicros == int64(g.next) {
-			return true, nil
-		}
-		_, err := tx.ExecContext(ctx, `UPDATE payroll_pending_changes SET posted_micros = ?, new_micros = ?, reason = ?, noticed_at = ?
-			WHERE id = ?`, int64(g.posted), int64(g.next), reason, at, open.ID)
+		_, err := tx.ExecContext(ctx, `UPDATE payroll_pending_changes SET posted_micros=?,new_micros=?,reason=?,noticed_at=?,sale_refs=?,pot_change=?
+ WHERE id=? AND (posted_micros<>? OR new_micros<>? OR reason<>? OR sale_refs<>? OR pot_change<>?)`, int64(g.posted), int64(g.next), reason, at, refs, potChange,
+			open.ID, int64(g.posted), int64(g.next), reason, refs, potChange)
 		return true, err
 	}
 	// The owner dismissed exactly this change: it does not come back.
 	var dismissed int
 	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM payroll_pending_changes WHERE model = ? AND name = ? AND date = ?
-		AND state = ? AND posted_micros = ? AND new_micros = ? AND decided_by IS NOT ?`, g.model, g.name, g.date, stateDismissed,
+		AND pot_change=? AND state = ? AND posted_micros = ? AND new_micros = ? AND decided_by IS NOT ?`, g.model, g.name, g.date, potChange, stateDismissed,
 		int64(g.posted), int64(g.next), decidedByLedger).Scan(&dismissed); err != nil {
 		return true, err
 	}
 	if dismissed > 0 {
 		return true, nil
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO payroll_pending_changes(person, model, name, date, posted_micros, new_micros, reason, noticed_at, state)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, g.person, g.model, g.name, g.date, int64(g.posted), int64(g.next), reason, at, stateOpen)
+	_, err = tx.ExecContext(ctx, `INSERT INTO payroll_pending_changes(person, model, name, date, posted_micros, new_micros, reason, noticed_at, state,sale_refs,pot_change)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,?,?)`, g.person, g.model, g.name, g.date, int64(g.posted), int64(g.next), reason, at, stateOpen, refs, potChange)
 	return true, err
+}
+
+// Scope a pot decision to the exact booked entry and proposed distribution shares.
+func bookedPotChange(ctx context.Context, q ledger.Querier, g guardDay) (string, error) {
+	next := "[]"
+	if g.basis != nil {
+		next = g.basis.hubPots
+	}
+	old := "[]"
+	for _, id := range g.entries {
+		var parts string
+		err := q.QueryRowContext(ctx, `SELECT hub_pots FROM report_accrual_entries WHERE entry_id=?`, id).Scan(&parts)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		if parts != "[]" {
+			old = parts
+		}
+	}
+	if old == next {
+		return "", nil
+	}
+	key, _ := json.Marshal(struct {
+		Entries   []int64
+		Old, Next json.RawMessage
+	}{g.entries, json.RawMessage(old), json.RawMessage(next)})
+	return string(key), nil
 }
 
 // changeReason tells a change apart: a day posted from the sheet is a new post; one posted from a report is an edited
@@ -218,7 +263,10 @@ func nullText(s string) any {
 // PendingChanges reads the changes of a person ("" — everybody) in the states given (none — all), oldest day first.
 func PendingChanges(ctx context.Context, q ledger.Querier, person string, states ...string) ([]PendingChange, error) {
 	query := `SELECT id, person, model, name, date, posted_micros, new_micros, reason, noticed_at, state, COALESCE(decided_by, ''),
-		COALESCE(decided_at, ''), COALESCE(note, '') FROM payroll_pending_changes WHERE 1 = 1`
+		COALESCE(decided_at, ''), COALESCE(note, ''), CASE WHEN reason='общак' THEN EXISTS (
+    SELECT 1 FROM json_each(pot_change,'$.Old') o WHERE NOT EXISTS (
+      SELECT 1 FROM json_each(pot_change,'$.Next') n WHERE n.value->>'distributionId'=o.value->>'distributionId'
+        AND n.value->>'micros'>=o.value->>'micros')) ELSE 0 END FROM payroll_pending_changes WHERE 1 = 1`
 	var args []any
 	if person != "" {
 		query += ` AND person = ?`
@@ -239,7 +287,7 @@ func PendingChanges(ctx context.Context, q ledger.Querier, person string, states
 	for rows.Next() {
 		var c PendingChange
 		if err := rows.Scan(&c.ID, &c.Person, &c.Model, &c.Name, &c.Date, &c.PostedMicros, &c.NewMicros, &c.Reason, &c.NoticedAt, &c.State,
-			&c.DecidedBy, &c.DecidedAt, &c.Note); err != nil {
+			&c.DecidedBy, &c.DecidedAt, &c.Note, &c.removedPot); err != nil {
 			return nil, err
 		}
 		c.ReasonText = ChangeReasonText[c.Reason]
@@ -303,6 +351,9 @@ func DecideChange(ctx context.Context, store *db.Store, id int64, decision, by, 
 	}
 	if c.State != stateOpen {
 		return out, &ChangeRefusal{Msg: fmt.Sprintf("изменение %d уже решено: %s (%s %s)", id, c.State, c.DecidedBy, c.DecidedAt)}
+	}
+	if decision == DecisionDismiss && c.removedPot {
+		return out, &ChangeRefusal{Msg: "проведённая доля общака снята или уменьшена: сверьте раздачу и примените изменение"}
 	}
 	if err := decide(ctx, tx, id, state, by, note, now); err != nil {
 		return out, err
