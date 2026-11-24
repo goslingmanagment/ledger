@@ -121,21 +121,22 @@ func PotTabHolds(ctx context.Context, q ledger.Querier, st PotStatus, person str
         SELECT j.key slug,j.value model FROM settings s,json_each(s.value) j
         WHERE s.key='hub_model_slugs' AND json_valid(s.value)
     ), tabs AS (
-        SELECT person,model FROM payroll_tabs WHERE listed=1 AND person IS NOT NULL
+        SELECT person,model COLLATE NOCASE AS model FROM payroll_tabs WHERE listed=1 AND person IS NOT NULL
+        UNION SELECT person,model FROM payable_days WHERE kind='day' AND date>=?
         UNION SELECT t.person,coalesce(m.model,t.model_slug) FROM hub_pay_terms t
         LEFT JOIN mapping m ON m.slug=t.model_slug COLLATE NOCASE
         WHERE t.gone_at IS NULL AND t.valid_from<=? AND (t.valid_to IS NULL OR t.valid_to>=?)
           AND EXISTS(SELECT 1 FROM settings WHERE key='payroll_terms_hub_from' AND value<>'' AND value<=?)
     ), held AS (
-        SELECT DISTINCT h.distribution_id,h.page_labels_json,h.reason,coalesce(m.model,p.model_slug,d.model_slug) model
+        SELECT DISTINCT h.distribution_id,h.page_labels_json,h.reason,coalesce(m.model,nullif(h.model_slug,''),p.model_slug,d.model_slug) model
         FROM hub_pot_distribution_held h LEFT JOIN json_each(h.page_labels_json) j
         LEFT JOIN hub_pages p ON p.page_label=j.value
         LEFT JOIN hub_pot_distributions d ON d.id=h.distribution_id
-        LEFT JOIN mapping m ON m.slug=coalesce(p.model_slug,d.model_slug) COLLATE NOCASE
+        LEFT JOIN mapping m ON m.slug=coalesce(nullif(h.model_slug,''),p.model_slug,d.model_slug) COLLATE NOCASE
     )
     SELECT DISTINCT t.person,t.model,h.distribution_id,h.page_labels_json,h.reason FROM tabs t
     LEFT JOIN held h ON h.model IS NULL OR h.model=t.model COLLATE NOCASE
-    WHERE (?='' OR t.person=?) ORDER BY t.person,t.model,h.distribution_id`, today, st.From, today, person, person)
+    WHERE (?='' OR t.person=?) ORDER BY t.person,t.model,h.distribution_id`, st.From, today, st.From, today, person, person)
 	if err != nil {
 		return nil, err
 	}
