@@ -87,8 +87,14 @@
   назвать можно. Добавку со ссылкой видят защита общака от двойного учёта, `agreement` строки и стирание фана.
 - Посты «Отчётности» (R2a): `ledger collect reports [--dry-run] [--local-db] [--since]` на маке (конфиг `~/.config/ledger/reports.json`:
   `topics` [{peer, topic}], `since_days`, `tg_dir`; очередь `spool-reports`, только `tg history`, launchd раз в 15 минут) шлёт сообщения
-  с «Общий доход» событиями `tg_reports`; правка поста — новое событие. Сервер разбирает их в `shift_report_posts*` при приходе и джобом,
-  сейчас — `ledger report parse`. Настройки (seed `ledger import business`, значения — JSON-строки): `report_topics` — топик, его модель
+  с «Общий доход» событиями `tg_reports` (вместе с временем правки `edited_at` из поля `edited` `tg history`, которое входит в `source_id`,
+  чтобы возврат `A → B → A` был новым событием); отредактированное сообщение без «Общий доход» шлётся событием `retract` без текста чата
+  и снимает действующую версию поста (с пересчётом начисления или `payroll_pending_changes` на выплаченном дне). Без `--since` нижняя граница
+  чтения — `min(сегодня − since_days, GET /v1/report-posts/since)`: узкое чтение `{since}` без сумм и людей (права `read` и `collect`) отдаёт
+  самый ранний день с основой «пост» с `payroll_reports_from`, где `payable_days.unpaid > 0` или выплачен за последние 14 дней; в `--local-db`
+  считается тем же SQL, в `--dry-run` без сети и при 404 старого сервера — откат на `since_days`. Сервер разбирает их в `shift_report_posts*`
+  при приходе и джобом (действующая версия `current = 1` выбирается по `edited_at`, для старых событий без него — по времени сообщения и порядку
+  прихода, а не по порядку доставки), сейчас — `ledger report parse`. Настройки (seed `ledger import business`, значения — JSON-строки): `report_topics` — топик, его модель
   и `pages` {имя в посте строчными: страница хаба}; `report_authors` — {"tg:<id>": человек, "#тег": человек}, отправитель важнее тега.
   База оплаты по страницам — вид `v_report_pages` (пост против черновика: `posted_equal|posted_changed|post_only|draft_only`), глазами —
   `ledger report days`, пометки постов — `ledger report posts --flagged` и проверка «отчёты разобраны». Два отчёта в одном

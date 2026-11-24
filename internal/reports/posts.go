@@ -25,6 +25,13 @@ import (
 // PostSource is the event source of the chatters' posts in «Отчётность», sent by `ledger collect reports`.
 const PostSource = "tg_reports"
 
+// Kinds of a tg_reports event: post holds a message that looks like a shift report; retract marks an edited message
+// that no longer looks like one, carrying no chat text so non-report chatter stays out of events.
+const (
+	PostKindPost    = "post"
+	PostKindRetract = "retract"
+)
+
 // Flags of a post: stable machine codes.
 const (
 	FlagUnknownAuthor = "unknown_author"
@@ -63,12 +70,14 @@ func Blocking(flag string) bool {
 	return false
 }
 
-// PostEvent is the payload of a tg_reports event: one Telegram message as read.
+// PostEvent is the payload of a tg_reports event: one Telegram message as read. EditedAt is omitted on unedited
+// messages so their canonical payload matches legacy events.
 type PostEvent struct {
 	Peer     string `json:"peer"`
 	Topic    int64  `json:"topic"`
 	MsgID    int64  `json:"msg_id"`
 	Date     string `json:"date"`
+	EditedAt string `json:"edited_at,omitempty"`
 	Sender   string `json:"sender"`
 	SenderID string `json:"sender_id"`
 	Text     string `json:"text"`
@@ -78,15 +87,31 @@ func (e PostEvent) key() string {
 	return e.Peer + ":" + strconv.FormatInt(e.Topic, 10) + ":" + strconv.FormatInt(e.MsgID, 10)
 }
 
-// PostSourceID is the event id of a message: an edited text is a new event, the same text the same one.
-func PostSourceID(peer string, topic, msgID int64, text string) string {
-	sum := sha256.Sum256([]byte(text))
+func formatPostTime(t time.Time) string {
+	if t.Nanosecond() != 0 {
+		return ts.FormatMilli(t)
+	}
+	return ts.Format(t)
+}
+
+// PostSourceID is the event id of a message version: an unedited message hashes only its text (matching legacy
+// events); an edit timestamp enters the hash so reverting A → B → A with a newer edit time is a new event and never
+// collides with an earlier version.
+func PostSourceID(peer string, topic, msgID int64, text, editedAt string) string {
+	in := text
+	if editedAt != "" {
+		if t, err := ts.Parse(editedAt); err == nil {
+			editedAt = formatPostTime(t)
+		}
+		in = editedAt + "\x00" + text
+	}
+	sum := sha256.Sum256([]byte(in))
 	return fmt.Sprintf("%s:%d:%d:%s", peer, topic, msgID, hex.EncodeToString(sum[:])[:12])
 }
 
 func init() {
 	events.Register(events.Source{Name: PostSource,
-		Arrive: func(_ context.Context, _ *sql.Tx, a events.Arrival) (bool, error) {
+		Arrive: func(ctx context.Context, tx *sql.Tx, a events.Arrival) (bool, error) {
 			var e PostEvent
 			if err := json.Unmarshal(a.Payload, &e); err != nil || e.Peer == "" || e.MsgID <= 0 {
 				return false, &events.BadRequest{Msg: "пост: нужен payload {peer, topic, msg_id, date, sender, sender_id, text}"}
@@ -94,7 +119,23 @@ func init() {
 			if _, err := ts.Parse(e.Date); err != nil {
 				return false, &events.BadRequest{Msg: "пост: date: " + err.Error()}
 			}
-			return a.Inserted, nil
+			if e.EditedAt != "" {
+				if _, err := ts.Parse(e.EditedAt); err != nil {
+					return false, &events.BadRequest{Msg: "пост: edited_at: " + err.Error()}
+				}
+			}
+			if !a.Inserted {
+				return false, nil
+			}
+			if a.Kind == PostKindRetract {
+				var n int
+				if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM shift_report_posts WHERE peer = ? AND topic = ? AND msg_id = ? AND current = 1`,
+					e.Peer, e.Topic, e.MsgID).Scan(&n); err != nil {
+					return false, err
+				}
+				return n > 0, nil
+			}
+			return true, nil
 		},
 		Settle: func(ctx context.Context, store *db.Store, now time.Time) error {
 			if err := brief.InTx(ctx, store, func(tx *sql.Tx) error {
@@ -337,6 +378,38 @@ func (m mapping) build(eventID int64, e PostEvent) *post {
 	return p
 }
 
+// postVersion orders events of one Telegram message: by edit timestamp when present, else by message timestamp,
+// with edited preferred over unedited at the exact same instant and arrival order (events.id) as final tie-breaker
+// (preserving insertion order for legacy events that carry no edited_at).
+type postVersion struct {
+	at        time.Time
+	hasEdited bool
+	id        int64
+}
+
+func (v postVersion) after(o postVersion) bool {
+	if !v.at.Equal(o.at) {
+		return v.at.After(o.at)
+	}
+	if v.hasEdited != o.hasEdited {
+		return v.hasEdited
+	}
+	return v.id > o.id
+}
+
+func versionOf(id int64, e PostEvent) (postVersion, bool) {
+	at, err := ts.Parse(e.Date)
+	if err != nil {
+		return postVersion{}, false
+	}
+	if e.EditedAt != "" {
+		if et, err := ts.Parse(e.EditedAt); err == nil {
+			return postVersion{at: et, hasEdited: true, id: id}, true
+		}
+	}
+	return postVersion{at: at, hasEdited: false, id: id}, true
+}
+
 // ParsePosts parses every tg_reports event again and writes what changed: the posts, their pages, and the status of
 // the agent's current drafts. Idempotent; a changed setting (a page name, an author) shows on the next pass without
 // collecting again. It writes no posting and changes no balance.
@@ -351,7 +424,7 @@ func ParsePosts(ctx context.Context, tx *sql.Tx, now time.Time) (ParseReport, er
 		return rep, err
 	}
 	var list []*post
-	latest := map[string]int64{} // message → its newest event
+	latest := map[string]postVersion{} // message → its newest event by edit time (then message time, then arrival order)
 	for rows.Next() {
 		var id int64
 		var raw string
@@ -364,7 +437,14 @@ func ParsePosts(ctx context.Context, tx *sql.Tx, now time.Time) (ParseReport, er
 		if json.Unmarshal([]byte(raw), &e) != nil {
 			continue // Arrive refused such payloads: an old one stays unread, not fatal
 		}
-		latest[e.key()] = id
+		v, ok := versionOf(id, e)
+		if !ok {
+			continue
+		}
+		k := e.key()
+		if cur, have := latest[k]; !have || v.after(cur) {
+			latest[k] = v
+		}
 		if p := m.build(id, e); p != nil {
 			list = append(list, p)
 		}
@@ -375,7 +455,7 @@ func ParsePosts(ctx context.Context, tx *sql.Tx, now time.Time) (ParseReport, er
 	}
 	rep.Posts = len(list)
 	for _, p := range list {
-		p.Current = latest[p.key] == p.EventID
+		p.Current = latest[p.key].id == p.EventID
 	}
 	markDuplicates(list)
 	for _, p := range list {

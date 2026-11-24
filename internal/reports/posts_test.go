@@ -50,13 +50,30 @@ func setSetting(t *testing.T, s *db.Store, key, value string) {
 // send posts a message as the collector would, through events.Accept: the source parses it on arrival.
 func send(t *testing.T, s *db.Store, msgID int64, sender, at, text string) {
 	t.Helper()
-	e := PostEvent{Peer: peer, Topic: 4, MsgID: msgID, Date: at, Sender: "tg user", SenderID: sender, Text: text}
+	sendEdited(t, s, msgID, sender, at, "", text)
+}
+
+func sendEdited(t *testing.T, s *db.Store, msgID int64, sender, at, editedAt, text string) {
+	t.Helper()
+	e := PostEvent{Peer: peer, Topic: 4, MsgID: msgID, Date: at, EditedAt: editedAt, Sender: "tg user", SenderID: sender, Text: text}
 	payload, _ := json.Marshal(e)
-	ans, err := events.Accept(context.Background(), s, []events.Event{{Source: PostSource, SourceID: PostSourceID(peer, 4, msgID, text),
-		Kind: "post", OccurredAt: at, Payload: payload}}, ts.Now())
+	ans, err := events.Accept(context.Background(), s, []events.Event{{Source: PostSource, SourceID: PostSourceID(peer, 4, msgID, text, editedAt),
+		Kind: PostKindPost, OccurredAt: at, Payload: payload}}, ts.Now())
 	if err != nil || len(ans.Settle) > 0 {
 		t.Fatalf("accept: %v %v", err, ans.Settle)
 	}
+}
+
+func sendRetract(t *testing.T, s *db.Store, msgID int64, sender, at, editedAt string) events.Answer {
+	t.Helper()
+	e := PostEvent{Peer: peer, Topic: 4, MsgID: msgID, Date: at, EditedAt: editedAt, Sender: "tg user", SenderID: sender}
+	payload, _ := json.Marshal(e)
+	ans, err := events.Accept(context.Background(), s, []events.Event{{Source: PostSource, SourceID: PostSourceID(peer, 4, msgID, "", editedAt),
+		Kind: PostKindRetract, OccurredAt: at, Payload: payload}}, ts.Now())
+	if err != nil || len(ans.Settle) > 0 {
+		t.Fatalf("accept retract: %v %v", err, ans.Settle)
+	}
+	return ans
 }
 
 func report(date, tag string, total string, lines ...string) string {
@@ -357,15 +374,27 @@ func TestReportDaysFilterAndScopes(t *testing.T) {
 }
 
 func TestSourceIDFollowsTheText(t *testing.T) {
-	a := PostSourceID(peer, 4, 10, "текст")
-	if a != PostSourceID(peer, 4, 10, "текст") {
+	a := PostSourceID(peer, 4, 10, "текст", "")
+	if a != PostSourceID(peer, 4, 10, "текст", "") {
 		t.Error("the same text gives another id")
 	}
-	if a == PostSourceID(peer, 4, 10, "текст, правка") {
+	if a == PostSourceID(peer, 4, 10, "текст, правка", "") {
 		t.Error("an edit keeps the id")
 	}
 	if !strings.HasPrefix(a, peer+":4:10:") || len(a) != len(peer+":4:10:")+12 {
 		t.Errorf("id %s", a)
+	}
+	// A → B → A with a newer edit timestamp produces a distinct source_id so the revert is never skipped as duplicate.
+	reverted := PostSourceID(peer, 4, 10, "текст", "2026-11-09T10:00:00+03:00")
+	if reverted == a {
+		t.Error("reverted text with edit timestamp collides with unedited original")
+	}
+	// Equivalent instants in UTC and MSK normalize to the same source_id.
+	if reverted != PostSourceID(peer, 4, 10, "текст", "2026-11-09T07:00:00Z") {
+		t.Error("UTC and MSK edit timestamps gave different source_ids")
+	}
+	if reverted == PostSourceID(peer, 4, 10, "текст", "2026-11-09T10:05:00+03:00") {
+		t.Error("different edit timestamps gave the same source_id")
 	}
 }
 
@@ -387,7 +416,7 @@ func TestCollectPosts(t *testing.T) {
 		t.Fatalf("collected %+v, calls %v", got, calls)
 	}
 	var e PostEvent
-	if err := json.Unmarshal(got.Events[0].Payload, &e); err != nil || e.SenderID != "501" || e.Date != "2026-11-08T23:00:00+03:00" {
+	if err := json.Unmarshal(got.Events[0].Payload, &e); err != nil || e.SenderID != "501" || e.Date != "2026-11-08T23:00:00+03:00" || e.EditedAt != "" {
 		t.Errorf("payload %+v: %v", e, err)
 	}
 	// What the server took is not sent again; an edit is.
@@ -403,9 +432,177 @@ func TestCollectPosts(t *testing.T) {
 		t.Errorf("%d sent again", n)
 	}
 	edited := got.Events[0]
-	edited.SourceID = PostSourceID(peer, 4, 1, "другой текст")
+	edited.SourceID = PostSourceID(peer, 4, 1, "другой текст", "2026-11-09T01:00:00+03:00")
 	if n := len(LoadSent(path).Fresh([]events.Event{edited})); n != 1 {
 		t.Error("an edit is not fresh")
+	}
+}
+
+func TestCollectPostsEditTimestampABAAndRetract(t *testing.T) {
+	cfg := CollectConfig{Topics: []CollectTopic{{Peer: PeerID(peer), Topic: 4}}}
+	textA := report("08.11.2026", "#Anna", "$10", "• Page-A - $10")
+	textB := report("08.11.2026", "#Anna", "$15", "• Page-A - $15")
+	esc := func(s string) string { return strings.ReplaceAll(s, "\n", `\n`) }
+
+	collect := func(body string) Collected {
+		t.Helper()
+		read := func(_ context.Context, _ string, _ int64, _, _ string, _ int) ([]byte, error) {
+			return []byte(body), nil
+		}
+		got, err := CollectPosts(context.Background(), cfg, read, "2026-11-05", 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+
+	path := t.TempDir() + "/sent.json"
+	sent := LoadSent(path)
+
+	// 1. Initial unedited post A.
+	g1 := collect(`{"messages": [{"id": 10, "date": "2026-11-08T20:00:00+00:00", "sender": "a", "sender_id": 501, "text": "` + esc(textA) + `"}]}`)
+	if len(g1.Events) != 1 || g1.Events[0].Kind != PostKindPost {
+		t.Fatalf("v1: %+v", g1.Events)
+	}
+	if strings.Contains(string(g1.Events[0].Payload), "edited_at") {
+		t.Errorf("unedited post must omit edited_at: %s", g1.Events[0].Payload)
+	}
+	if err := sent.Save(path, g1.Events, "2026-11-05"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Edited to B at T1.
+	g2 := collect(`{"messages": [{"id": 10, "date": "2026-11-08T20:00:00+00:00", "edited": "2026-11-09T07:00:00+00:00", "sender": "a", "sender_id": 501, "text": "` + esc(textB) + `"}]}`)
+	if len(sent.Fresh(g2.Events)) != 1 {
+		t.Fatalf("B not fresh")
+	}
+	var e2 PostEvent
+	if err := json.Unmarshal(g2.Events[0].Payload, &e2); err != nil || e2.EditedAt != "2026-11-09T10:00:00+03:00" {
+		t.Fatalf("B payload: %+v %v", e2, err)
+	}
+	if err := sent.Save(path, g2.Events, "2026-11-05"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. Reverted back to A at T2 > T1: MUST NOT be skipped by Sent as duplicate of v1!
+	g3 := collect(`{"messages": [{"id": 10, "date": "2026-11-08T20:00:00+00:00", "edited": "2026-11-09T08:00:00+00:00", "sender": "a", "sender_id": 501, "text": "` + esc(textA) + `"}]}`)
+	if len(LoadSent(path).Fresh(g3.Events)) != 1 {
+		t.Fatalf("A -> B -> A revert was skipped as duplicate of original A")
+	}
+
+	// 4. Edited so it is no longer a report ("Общий доход" removed): emits content-free retract event (no chat text leaked),
+	// while an unedited chat message is ignored.
+	g4 := collect(`{"messages": [
+		{"id": 10, "date": "2026-11-08T20:00:00+00:00", "edited": "2026-11-09T09:00:00+00:00", "sender": "a", "sender_id": 501, "text": "удалил, секретный чат"},
+		{"id": 11, "date": "2026-11-08T20:05:00+00:00", "sender": "a", "sender_id": 501, "text": "обычный чат без правки"}]}`)
+	if len(g4.Events) != 1 || g4.Events[0].Kind != PostKindRetract {
+		t.Fatalf("retract events: %+v", g4.Events)
+	}
+	var e4 PostEvent
+	if err := json.Unmarshal(g4.Events[0].Payload, &e4); err != nil || e4.Text != "" || e4.EditedAt != "2026-11-09T12:00:00+03:00" {
+		t.Fatalf("retract payload leaked text or bad edited_at: %+v %v", e4, err)
+	}
+	if strings.Contains(string(g4.Events[0].Payload), "секретный") {
+		t.Fatalf("retract payload leaked non-report chat text: %s", g4.Events[0].Payload)
+	}
+}
+
+func TestPostVersionSelectionByEditTimestampAndRetract(t *testing.T) {
+	s := postBook(t)
+	const postedAt = "2026-11-08T20:30:00Z" // 23:30 MSK
+	textA := report("08.11.2026", "#Anna", "$10,00", "• Page-A - $10,00")
+	textB := report("08.11.2026", "#Anna", "$20,00", "• Page-A - $20,00")
+
+	// A → B → A in chronological order: latest edit timestamp wins.
+	sendEdited(t, s, 10, "501", postedAt, "", textA)
+	want(t, days(t, s), "anna 2026-11-08 page-a 1000/- post_only")
+
+	sendEdited(t, s, 10, "501", postedAt, "2026-11-09T10:00:00+03:00", textB)
+	want(t, days(t, s), "anna 2026-11-08 page-a 2000/- post_only")
+
+	sendEdited(t, s, 10, "501", postedAt, "2026-11-09T11:00:00+03:00", textA)
+	want(t, days(t, s), "anna 2026-11-08 page-a 1000/- post_only")
+	var versions, current int
+	if err := s.RO.QueryRow(`SELECT COUNT(*), SUM(current) FROM shift_report_posts WHERE msg_id = 10`).Scan(&versions, &current); err != nil ||
+		versions != 3 || current != 1 {
+		t.Fatalf("A -> B -> A: versions=%d current=%d err=%v", versions, current, err)
+	}
+
+	// Out-of-order delivery on msg 11: newer edit (12:00) arrives BEFORE older edit (11:00) and unedited original.
+	sendEdited(t, s, 11, "501", "2026-11-07T20:30:00Z", "2026-11-08T12:00:00+03:00", report("07.11.2026", "#Anna", "$30,00", "• Page-A - $30,00"))
+	sendEdited(t, s, 11, "501", "2026-11-07T20:30:00Z", "2026-11-08T11:00:00+03:00", report("07.11.2026", "#Anna", "$25,00", "• Page-A - $25,00"))
+	sendEdited(t, s, 11, "501", "2026-11-07T20:30:00Z", "", report("07.11.2026", "#Anna", "$15,00", "• Page-A - $15,00"))
+	want(t, days(t, s),
+		"anna 2026-11-07 page-a 3000/- post_only",
+		"anna 2026-11-08 page-a 1000/- post_only")
+
+	// Same-second edit beats unedited original even when arriving first.
+	sendEdited(t, s, 12, "501", "2026-11-06T20:30:00Z", "2026-11-06T23:30:00+03:00", report("06.11.2026", "#Anna", "$40,00", "• Page-A - $40,00"))
+	sendEdited(t, s, 12, "501", "2026-11-06T20:30:00Z", "", report("06.11.2026", "#Anna", "$10,00", "• Page-A - $10,00"))
+	want(t, days(t, s),
+		"anna 2026-11-06 page-a 4000/- post_only",
+		"anna 2026-11-07 page-a 3000/- post_only",
+		"anna 2026-11-08 page-a 1000/- post_only")
+
+	// Retract msg 10 at 12:00: its current version deactivates and disappears from v_report_pages.
+	sendRetract(t, s, 10, "501", postedAt, "2026-11-09T12:00:00+03:00")
+	if err := s.RO.QueryRow(`SELECT COUNT(*), SUM(current) FROM shift_report_posts WHERE msg_id = 10`).Scan(&versions, &current); err != nil ||
+		versions != 3 || current != 0 {
+		t.Fatalf("after retract: versions=%d current=%d err=%v", versions, current, err)
+	}
+	want(t, days(t, s),
+		"anna 2026-11-06 page-a 4000/- post_only",
+		"anna 2026-11-07 page-a 3000/- post_only")
+
+	// Re-editing msg 10 back into a report at 13:00 restores it.
+	sendEdited(t, s, 10, "501", postedAt, "2026-11-09T13:00:00+03:00", textA)
+	want(t, days(t, s),
+		"anna 2026-11-06 page-a 4000/- post_only",
+		"anna 2026-11-07 page-a 3000/- post_only",
+		"anna 2026-11-08 page-a 1000/- post_only")
+
+	// Out-of-order retract arriving BEFORE the original post still keeps the post inactive.
+	sendRetract(t, s, 13, "501", "2026-11-05T20:30:00Z", "2026-11-05T23:45:00+03:00")
+	sendEdited(t, s, 13, "501", "2026-11-05T20:30:00Z", "", report("05.11.2026", "#Anna", "$99,00", "• Page-A - $99,00"))
+	want(t, days(t, s),
+		"anna 2026-11-06 page-a 4000/- post_only",
+		"anna 2026-11-07 page-a 3000/- post_only",
+		"anna 2026-11-08 page-a 1000/- post_only")
+}
+
+func TestReportPostsSinceEndpointScopesAndShape(t *testing.T) {
+	s := postBook(t)
+	ctx := t.Context()
+	setSetting(t, s, "payroll_reports_from", "2026-11-10")
+	if _, err := s.RW.Exec(`INSERT INTO payable_days(person, seq, kind, date, model, name, amount, paid, unpaid, paid_by, source)
+		VALUES ('anna', 1, 'day', '2026-11-12', 'model-x', 'Anna', 25000000, 0, 25000000, '[]', 'reports')`); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(server.New(s, quiet, "test").Mux)
+	defer srv.Close()
+	key := func(name string, scopes ...string) *client.Client {
+		token, _, err := auth.Create(ctx, s.RW, name, scopes, false, ts.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return client.New(config.Client{URL: srv.URL, Key: token})
+	}
+	// Allowed for both read and collect; narrow response has only {"since": "..."}.
+	for _, sc := range []string{auth.ScopeRead, auth.ScopeCollect} {
+		var raw map[string]any
+		if err := key("ok-"+sc, sc).Do(ctx, http.MethodGet, "/v1/report-posts/since", nil, &raw); err != nil {
+			t.Fatalf("%s on /v1/report-posts/since: %v", sc, err)
+		}
+		if len(raw) != 1 || raw["since"] != "2026-11-12" {
+			t.Fatalf("%s answer: %+v, want only since=2026-11-12", sc, raw)
+		}
+	}
+	// Forbidden for all other scopes.
+	for _, sc := range []string{auth.ScopePayouts, auth.ScopeReports, auth.ScopePropose, auth.ScopeDecide, auth.ScopeImport} {
+		err := key("no-"+sc, sc).Do(ctx, http.MethodGet, "/v1/report-posts/since", nil, nil)
+		if ce, ok := err.(*client.Error); !ok || ce.Status != http.StatusForbidden {
+			t.Errorf("%s on /v1/report-posts/since: got %v, want 403", sc, err)
+		}
 	}
 }
 

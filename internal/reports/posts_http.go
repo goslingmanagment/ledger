@@ -11,6 +11,7 @@ import (
 	"github.com/goslingmanagment/ledger/internal/brief"
 	"github.com/goslingmanagment/ledger/internal/payroll"
 	"github.com/goslingmanagment/ledger/internal/server"
+	"github.com/goslingmanagment/ledger/internal/ts"
 )
 
 func init() {
@@ -75,6 +76,24 @@ func init() {
 				}
 			}
 			server.WriteJSON(w, http.StatusOK, PostsAnswer{From: from, To: to, Posts: list})
+		})))
+		// Narrow read-only lower bound for `ledger collect reports`: earliest post-basis day still unpaid or paid
+		// within the last 14 days. No sums, no people.
+		s.Mux.Handle("GET /v1/report-posts/since", auth.RequireAny(s, []string{auth.ScopeRead, auth.ScopeCollect}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			tx, err := s.Store.RO.BeginTx(r.Context(), &sql.TxOptions{ReadOnly: true})
+			if err != nil {
+				s.Log.Error("report posts since", "err", err)
+				server.WriteError(w, http.StatusInternalServerError, "граница постов не прочитана: сбой сервиса, подробности в журнале")
+				return
+			}
+			defer tx.Rollback()
+			since, err := PostsSince(r.Context(), tx, ts.Now())
+			if err != nil {
+				s.Log.Error("report posts since", "key", auth.KeyName(r.Context()), "err", err)
+				server.WriteError(w, http.StatusInternalServerError, "граница постов не прочитана: сбой сервиса, подробности в журнале")
+				return
+			}
+			server.WriteJSON(w, http.StatusOK, PostsSinceAnswer{Since: since})
 		})))
 		// Parse now, the way the job does: the collector's key may ask, it only re-reads what it sent.
 		s.Mux.Handle("POST /v1/report-posts/parse", auth.Require(s, auth.ScopeCollect, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

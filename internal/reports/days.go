@@ -5,8 +5,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"strings"
+	"time"
 
 	"github.com/goslingmanagment/ledger/internal/ledger"
+	"github.com/goslingmanagment/ledger/internal/payroll"
+	"github.com/goslingmanagment/ledger/internal/ts"
 )
 
 // States of a page of the pay base (v_report_pages).
@@ -207,6 +210,53 @@ func Posts(ctx context.Context, q ledger.Querier, from, to string, flagged bool)
 		}
 	}
 	return out, nil
+}
+
+// PostsSinceDays is how many days after a post-basis day was paid the collector still re-reads its posts, so a late
+// edit to a recently paid post arrives and opens payroll_pending_changes.
+const PostsSinceDays = 14
+
+// PostsSinceAnswer is the reply of GET /v1/report-posts/since: narrow, read-only, no sums and no people.
+type PostsSinceAnswer struct {
+	Since string `json:"since"`
+}
+
+// PostsSince is the earliest post-basis day (same basis rule as v_report_pages / payroll.HubBasisDays, from
+// settings.payroll_reports_from onward) that either still has payable_days.unpaid > 0 or was paid within the last
+// PostsSinceDays days. Empty when reports do not accrue or no such day exists.
+func PostsSince(ctx context.Context, q ledger.Querier, now time.Time) (string, error) {
+	reportsFrom, err := payroll.ReportsFrom(ctx, q)
+	if err != nil || reportsFrom == "" {
+		return "", err
+	}
+	hubDay, err := payroll.HubBasisDays(ctx, q, reportsFrom)
+	if err != nil {
+		return "", err
+	}
+	cutoff := ts.Date(now.In(ts.MSK).AddDate(0, 0, -PostsSinceDays))
+	rows, err := q.QueryContext(ctx, `SELECT pd.person, pd.date, pd.unpaid, pd.paid,
+		COALESCE((SELECT MAX(d.date) FROM json_each(pd.paid_by) j JOIN v_documents d ON d.num = j.value), '')
+		FROM payable_days pd
+		WHERE pd.kind = 'day' AND pd.date >= ?
+		ORDER BY pd.date`, reportsFrom)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var person, day, paidAt string
+		var unpaid, paid int64
+		if err := rows.Scan(&person, &day, &unpaid, &paid, &paidAt); err != nil {
+			return "", err
+		}
+		if hubDay(person, day) {
+			continue
+		}
+		if unpaid > 0 || (paid > 0 && (day >= cutoff || paidAt >= cutoff)) {
+			return day, nil
+		}
+	}
+	return "", rows.Err()
 }
 
 // postedOf reads the posted side of the pay base for the reports' people and dates, to show on GET /v1/reports.
