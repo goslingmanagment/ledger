@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/goslingmanagment/ledger/internal/auth"
+	"github.com/goslingmanagment/ledger/internal/hub"
 	"github.com/goslingmanagment/ledger/internal/ledger"
 	"github.com/goslingmanagment/ledger/internal/server"
 	"github.com/goslingmanagment/ledger/internal/ts"
@@ -23,28 +24,29 @@ import (
 
 // Keys are the stable machine keys of the checks, by name: the names are Russian sentences and may be reworded.
 var Keys = map[string]string{
-	"проводки сходятся":                         "balanced",
-	cashCheck:                                   "bybit_cash",
-	"монеты Bybit на счетах":                    "bybit_coins",
-	"монеты Bybit по цене покупки":              "bybit_coins_at_cost",
-	"карты против бота":                         "card_anchors",
-	"карты покрывают списания":                  "card_cover",
-	"движения Bybit разобраны":                  "bybit_unlinked",
-	"заявки равны покрытому net":                "requests",
-	"k переводов в норме":                       "transfer_k",
-	"переводы не просрочены":                    "transfers_overdue",
-	"депозиты сходятся с заявками":              "deposits",
-	"долги равны «К выплате»":                   "payables",
-	"дрейф закрытых месяцев":                    "month_drift",
-	"копии базы":                                "copies",
-	"источники живы":                            "sources",
-	"отчёты разобраны":                          "report_posts",
-	"у смен есть отчёты":                        "shift_reports",
-	hubReportsCheck:                             "hub_reports",
-	hubDecisionsCheck:                           "hub_decisions",
+	"проводки сходятся":            "balanced",
+	cashCheck:                      "bybit_cash",
+	"монеты Bybit на счетах":       "bybit_coins",
+	"монеты Bybit по цене покупки": "bybit_coins_at_cost",
+	"карты против бота":            "card_anchors",
+	"карты покрывают списания":     "card_cover",
+	"движения Bybit разобраны":     "bybit_unlinked",
+	"заявки равны покрытому net":   "requests",
+	"k переводов в норме":          "transfer_k",
+	"переводы не просрочены":       "transfers_overdue",
+	"депозиты сходятся с заявками": "deposits",
+	"долги равны «К выплате»":      "payables",
+	"дрейф закрытых месяцев":       "month_drift",
+	"копии базы":                   "copies",
+	"источники живы":               "sources",
+	"отчёты разобраны":             "report_posts",
+	"у смен есть отчёты":           "shift_reports",
+	hubReportsCheck:                "hub_reports",
+	hubHomesCheck:                  "hub_homes",
+	hubDecisionsCheck:              "hub_decisions",
 	"изменения за выплаченные дни ждут решения": "pending_changes",
-	weekColumnsCheck:                            "week_columns",
-	"ставки вкладок как в карточках":            "tab_rates",
+	weekColumnsCheck: "week_columns",
+	"ставки вкладок как в карточках": "tab_rates",
 	payTermsCheck:      "pay_terms",
 	checksRunning:      "checks_running",
 	secondReportsCheck: "second_reports",
@@ -155,4 +157,23 @@ func ReadHubChecks(ctx context.Context, q ledger.Querier, now time.Time) (HubChe
 		ans.Checks = append(ans.Checks, c)
 	}
 	return ans, nil
+}
+
+const hubHomesCheck = "дома продаж хаба доходят"
+
+func HubHomes(ctx context.Context, e Env) Result {
+	st, err := hub.ReadHomesStatus(ctx, e.Q)
+	if err != nil {
+		return fail(hubHomesCheck, "warn", err.Error(), nil)
+	}
+	if st.State == "absent" && st.LastOK == "" && st.Held == 0 {
+		return pass(hubHomesCheck, "хаб ещё не отдаёт ленту домов (404)")
+	}
+	if st.Error != "" {
+		return fail(hubHomesCheck, "warn", st.Error, st)
+	}
+	if problem := st.Problem(e.Now); problem != "" {
+		return fail(hubHomesCheck, "warn", problem, st)
+	}
+	return pass(hubHomesCheck, "дома продаж прочитаны "+st.LastOK)
 }

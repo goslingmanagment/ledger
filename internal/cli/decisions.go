@@ -31,7 +31,7 @@ func init() {
 	Command(Cmd{Name: "decision cancel", Run: decisionCancel,
 		Summary: `отменить решение: ledger decision cancel <id> --note "…"`})
 	Command(Cmd{Name: "decision hub-from", Run: decisionHubFrom,
-		Summary: "с дня решения, вопросы и заявки «чья продажа» пишет только хаб, а продажи этого дня и позже идут по решениям хаба — факты, общаки, договорённость строки (рядом с базой): [ГГГГ-ММ-ДД | --off]; без аргумента — показать"})
+		Summary: "с дня решения и вопросы «чья продажа» пишет только хаб; покупки общаков и договорённости строк следуют его решениям (рядом с базой): [ГГГГ-ММ-ДД | --off]; без аргумента — показать"})
 	Command(Cmd{Name: "hub decisions-sync", Run: hubDecisionsSync,
 		Summary: "прочитать решения «чья продажа» хаба сейчас и привести общаки в соответствие, как джоб hub-decisions (рядом с базой)"})
 }

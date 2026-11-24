@@ -22,7 +22,6 @@ import (
 	"github.com/goslingmanagment/ledger/internal/payroll"
 	"github.com/goslingmanagment/ledger/internal/reports"
 	"github.com/goslingmanagment/ledger/internal/server"
-	"github.com/goslingmanagment/ledger/internal/split"
 	"github.com/goslingmanagment/ledger/internal/ts"
 )
 
@@ -678,9 +677,9 @@ func TestAShiftWithoutAReport(t *testing.T) {
 // the shift). It is a piece of the shift, not a shift without a report on the next day: the whole shift's report answers it.
 func TestTheNightShiftsPieceAfterMidnightIsNoShiftOfItsOwn(t *testing.T) {
 	s, ctx := reportBook(t)
-	night := work(102, split.Shift, "2026-11-12 17:00", "2026-11-13 02:30", "page-a")
-	piece := work(102, split.Shift, "2026-11-13 00:00", "2026-11-13 02:30", "page-a")
-	alone := work(102, split.Shift, "2026-11-14 00:00", "2026-11-14 06:00", "page-a")
+	night := work(102, "shift", "2026-11-12 17:00", "2026-11-13 02:30", "page-a")
+	piece := work(102, "shift", "2026-11-13 00:00", "2026-11-13 02:30", "page-a")
+	alone := work(102, "shift", "2026-11-14 00:00", "2026-11-14 06:00", "page-a")
 	putWindow(t, s, "2026-11-09", []hub.TeamWork{night, piece, alone}, nil)
 	gaps, err := payroll.ShiftsWithoutReport(ctx, s.RO, "2026-11-03", "2026-11-17", reportNow)
 	if err != nil {

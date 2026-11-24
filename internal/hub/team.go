@@ -13,7 +13,6 @@ import (
 	"github.com/goslingmanagment/ledger/internal/db"
 	"github.com/goslingmanagment/ledger/internal/ledger"
 	"github.com/goslingmanagment/ledger/internal/server"
-	"github.com/goslingmanagment/ledger/internal/split"
 	"github.com/goslingmanagment/ledger/internal/ts"
 )
 
@@ -75,7 +74,7 @@ const SettingTeamSince = "hub_team_since"
 
 // TeamSince is the first day of the team's facts: hub_team_since, the rule's start without it, never later than it.
 func TeamSince(set Settings) (time.Time, error) {
-	rule := split.Default.Since
+	rule := FactsStart
 	v := strings.TrimSpace(set.raw[SettingTeamSince])
 	if v == "" {
 		return rule, nil
@@ -92,6 +91,8 @@ func TeamSince(set Settings) (time.Time, error) {
 
 // TeamWork is one piece of the team's work in Hub's answer.
 type TeamWork struct {
+	PersonCode    string         `json:"personCode,omitempty"`
+	ReportDate    string         `json:"reportDate,omitempty"`
 	Ref           string         `json:"ref"`
 	UserID        int64          `json:"userId"`
 	Username      string         `json:"username"`
@@ -175,57 +176,24 @@ type TeamShare struct {
 }
 
 var (
-	teamRoles     = map[string]bool{"owner": true, "team_lead": true, split.RoleChatter: true}
-	teamWorkKinds = map[string]bool{split.Shift: true, split.Visit: true}
-	teamSaleKinds = map[string]bool{split.SalePPV: true, split.SaleTip: true, split.SaleSubscription: true, split.SalePost: true}
-	// Hub's marks → the split's: «делим» is Hub's share, the split's MarkSplit.
-	teamMarks     = map[string]string{"mine": split.MarkMine, "share": split.MarkSplit, "not_mine": split.MarkNotMine}
-	teamDecisions = map[string]bool{split.DecisionSplit: true, split.DecisionNobody: true, split.DecisionPot: true}
+	teamRoles     = map[string]bool{"owner": true, "team_lead": true, "chatter": true}
+	teamWorkKinds = map[string]bool{"shift": true, "visit": true}
+	teamSaleKinds = map[string]bool{"ppv": true, "tip": true, "subscription": true, "post": true}
+	teamMarks     = map[string]bool{"mine": true, "share": true, "not_mine": true}
+	teamDecisions = map[string]bool{"split": true, "nobody": true, "pot": true}
 )
 
-// Split is the work as the split rules read it: the pages it holds sales of, from when.
-func (w TeamWork) Split() split.Work {
-	out := split.Work{Ref: w.Ref, UserID: w.UserID, Username: w.Username, Kind: w.Kind, StartedAt: w.StartedAt,
-		EndedAt: w.EndedAt, Ongoing: w.Ongoing, Role: w.Role}
-	for _, p := range w.Pages {
-		if p.SalesFrom != nil {
-			out.Pages = append(out.Pages, split.WorkPage{PageLabel: p.PageLabel, From: *p.SalesFrom})
-		}
-	}
-	return out
-}
+// FactsStart is the first Moscow day eligible for payroll from Hub's team facts.
+var FactsStart = time.Date(2026, 11, 2, 0, 0, 0, 0, ts.MSK)
 
-// Day is the Moscow day the work is paid on (split.DayOfWork).
-func (w TeamWork) Day() string { return split.DayOfWork(w.Split()) }
-
-// Split is the sale as the split rules read it.
-func (s TeamSale) Split() split.Sale {
-	out := split.Sale{TransactionRef: s.TransactionRef, PageLabel: s.PageLabel, Platform: s.Platform, Kind: s.Kind,
-		OccurredAt: s.OccurredAt, Holders: s.Holders, PPVSentAt: s.PPVSentAt, PostTip: s.PostTip, Campaign: s.Campaign,
-		LastWriter: s.LastWriterUserID}
-	if s.FanRef != nil {
-		out.FanRef = *s.FanRef
+// Day uses Hub's report day. Older work snapshots use the Moscow day containing the midpoint
+// (a tie goes to the start day, as in the original snapshots).
+func (w TeamWork) Day() string {
+	if w.ReportDate != "" {
+		return w.ReportDate
 	}
-	if s.NetMills != nil {
-		out.NetMills = *s.NetMills
-	}
-	if s.PPVSender != nil {
-		out.PPVSender = &split.Person{UserID: s.PPVSender.UserID, Username: s.PPVSender.Username, Role: s.PPVSender.Role}
-	}
-	for _, m := range s.Marks {
-		out.Marks = append(out.Marks, split.Mark{UserID: m.UserID, Mark: teamMarks[m.Mark], ShareWith: m.ShareWithUserID,
-			OwnAmountMills: m.AmountMills, Confirmed: m.Confirmed})
-	}
-	for _, r := range s.Resolution {
-		out.Resolution = append(out.Resolution, split.OwnerShare{UserID: r.UserID, Percent: r.Percent})
-	}
-	if s.Decision != nil {
-		out.Decision = &split.Decision{Kind: s.Decision.Kind}
-		if s.Decision.Pot != nil {
-			out.Decision.Pot = *s.Decision.Pot
-		}
-	}
-	return out
+	middle := (w.StartedAt.UnixMilli() + w.EndedAt.UnixMilli() - 1) / 2
+	return ts.Date(time.UnixMilli(middle))
 }
 
 // DecodeTeamWork reads a work kept in hub_works.payload.
@@ -247,6 +215,9 @@ func DecodeTeamSale(raw []byte) (TeamSale, error) {
 }
 
 func (w TeamWork) check() error {
+	if _, err := time.Parse(ts.DateLayout, w.ReportDate); w.ReportDate != "" && err != nil {
+		return fmt.Errorf("работа %s: reportDate %q", w.Ref, w.ReportDate)
+	}
 	switch {
 	case w.Ref == "" || w.UserID <= 0:
 		return errors.New("работа без ref или userId")
@@ -283,7 +254,7 @@ func (s TeamSale) check() error {
 		return fmt.Errorf("продажа %s: отправитель PPV не по контракту", s.TransactionRef)
 	}
 	for _, m := range s.Marks {
-		if m.UserID <= 0 || teamMarks[m.Mark] == "" {
+		if m.UserID <= 0 || !teamMarks[m.Mark] {
 			return fmt.Errorf("продажа %s: метка %q", s.TransactionRef, m.Mark)
 		}
 	}

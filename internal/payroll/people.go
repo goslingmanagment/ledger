@@ -326,6 +326,13 @@ func (r *Resolver) HubPerson(model string, user int64, username string) (string,
 	return "", err
 }
 
+func (r *Resolver) factPerson(model string, id int64, name, code string) (string, error) {
+	if code != "" {
+		return code, nil
+	}
+	return r.HubPerson(model, id, name)
+}
+
 var parenthetical = regexp.MustCompile(`\s*\([^()]*\)\s*$`)
 
 // Resolve maps (model, name) to a slug. A name matches a card by its title, the title without a trailing

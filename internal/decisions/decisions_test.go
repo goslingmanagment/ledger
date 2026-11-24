@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/goslingmanagment/ledger/internal/accruals" // POST /v1/accruals/claim
+	_ "github.com/goslingmanagment/ledger/internal/accruals" // rebuild report accruals after pot changes
 	_ "github.com/goslingmanagment/ledger/internal/agentsql" // POST /v1/sql
 	"github.com/goslingmanagment/ledger/internal/auth"
 	"github.com/goslingmanagment/ledger/internal/client"
@@ -317,7 +317,6 @@ func TestTheScopes(t *testing.T) {
 	for _, c := range []struct{ method, path string }{
 		{http.MethodGet, "/v1/payouts?from=2026-11-01&to=2026-11-10"},
 		{http.MethodGet, "/v1/payouts/prepare?person=anna"},
-		{http.MethodPost, "/v1/accruals/claim"},
 		{http.MethodPost, "/v1/sql"},
 	} {
 		if err := k.agent.Do(ctx, c.method, c.path, map[string]any{}, nil); status(err) != http.StatusForbidden {

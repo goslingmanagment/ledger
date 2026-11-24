@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/goslingmanagment/ledger/internal/hub"
 	"github.com/goslingmanagment/ledger/internal/ledger"
 	"github.com/goslingmanagment/ledger/internal/money"
-	"github.com/goslingmanagment/ledger/internal/split"
 	"github.com/goslingmanagment/ledger/internal/ts"
 )
 
@@ -69,7 +69,7 @@ func SetFactsFrom(ctx context.Context, q ledger.Querier, day string, now time.Ti
 		if err != nil || t.Format(ts.DateLayout) != day {
 			return fmt.Errorf("дата переключения: нужна ГГГГ-ММ-ДД, а не %q", day)
 		}
-		if rule := ts.Date(split.Default.Since); day < rule {
+		if rule := ts.Date(hub.FactsStart); day < rule {
 			return fmt.Errorf("дата переключения %s раньше начала правил дележа %s: фактов за те дни нет", day, rule)
 		}
 		from, err := AccrualFrom(ctx, q)
@@ -207,14 +207,7 @@ func planFacts(ctx context.Context, q ledger.Querier, from string, now time.Time
 		return nil, err
 	}
 	for _, t := range tabs {
-		found := false
-		for id, name := range users {
-			if got, err := res.HubPerson(t.model, id, name); err == nil && got == t.person {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !users.has(res, t.model, t.person) {
 			p.unmapped[t.model+"/"+t.name] = true
 		}
 	}
@@ -331,27 +324,44 @@ func planTabs(ctx context.Context, q ledger.Querier) ([]planTab, map[string]plan
 	return tabs, tabOf, nil
 }
 
-// factUsers are the Hub users of the proven windows from the split rule's week on.
-func factUsers(ctx context.Context, q ledger.Querier) (map[int64]string, error) {
-	rows, err := q.QueryContext(ctx, `SELECT DISTINCT s.window_from, w.user_id, w.username FROM hub_works w
-		JOIN hub_team_sync s ON s.window_from = w.window_from WHERE s.status = 'ok'`)
+type factUser struct {
+	id                int64
+	name, code, model string
+}
+
+type factLogins []factUser
+
+func (u factLogins) has(res *Resolver, model, person string) bool {
+	for _, login := range u {
+		if login.model != "" && ledger.Slug(login.model) != ledger.Slug(model) {
+			continue
+		}
+		code, err := res.factPerson(model, login.id, login.name, login.code)
+		if err == nil && code == person {
+			return true
+		}
+	}
+	return false
+}
+
+// Hub can credit a login that never worked the sale's page.
+func factUsers(ctx context.Context, q ledger.Querier) (factLogins, error) {
+	rows, err := q.QueryContext(ctx, `SELECT w.user_id, w.username, COALESCE(json_extract(w.payload,'$.personCode'),''), ''
+		FROM hub_works w JOIN hub_team_sync s ON s.window_from=w.window_from WHERE s.status='ok' AND s.window_from >= ?
+		UNION SELECT hub_user_id, COALESCE(username,''), person, model FROM fact_homes WHERE person IS NOT NULL AND hub_user_id IS NOT NULL`, ts.Format(ts.WeekStart(hub.FactsStart)))
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	ruleWeek := ts.WeekStart(split.Default.Since)
-	out := map[int64]string{}
+	var users factLogins
 	for rows.Next() {
-		var win, name string
-		var id int64
-		if err := rows.Scan(&win, &id, &name); err != nil {
+		var u factUser
+		if err := rows.Scan(&u.id, &u.name, &u.code, &u.model); err != nil {
 			return nil, err
 		}
-		if t, err := ts.Parse(win); err == nil && !t.Before(ruleWeek) {
-			out[id] = name
-		}
+		users = append(users, u)
 	}
-	return out, rows.Err()
+	return users, rows.Err()
 }
 
 // mark lists the days from the switch on that the facts did not accrue, as «не занесено» unknown: a tab a week whose

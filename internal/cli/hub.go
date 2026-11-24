@@ -21,6 +21,7 @@ func init() {
 	Command(Cmd{Name: "hub status", Summary: "что хаб доказал по каждой странице и датасету и по неделям фактов команды", Run: hubStatus})
 	Command(Cmd{Name: "hub team-sync", Summary: "прочитать факты смен и продаж хаба по неделям: [--from ГГГГ-ММ-ДД] [--to ГГГГ-ММ-ДД]", Run: hubTeamSync})
 	Command(Cmd{Name: "hub net", Summary: "оборот страниц месяца по зеркалу хаба: --month ГГГГ-ММ [--as-of]", Run: hubNet})
+	Command(Cmd{Name: "hub homes-sync", Summary: "прочитать дома продаж хаба и пересчитать факты (рядом с базой)", Run: hubHomesSync})
 	Command(Cmd{Name: "hub reports-sync", Summary: "прочитать отчёты смен, сданные в хабе, сейчас, как джоб hub-reports (рядом с базой)", Run: hubReportsSync})
 }
 
@@ -220,6 +221,32 @@ func hubTeamSync(ctx context.Context, args []string) error {
 	}
 	if n := rep.Unknown(); n > 0 {
 		return Exit{Code: 3, Msg: fmt.Sprintf("хаб не доказал %d окон из %d — «неизвестно», см. reasons", n, len(rep.Windows))}
+	}
+	return nil
+}
+
+func hubHomesSync(ctx context.Context, args []string) error {
+	if err := Flags("hub homes-sync").Parse(args); err != nil {
+		return err
+	}
+	cfg, err := hub.ConfigFromEnv()
+	if err != nil {
+		return err
+	}
+	store, err := OpenStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	st, err := hub.SyncSaleHomes(ctx, store, hub.NewClient(cfg, nil), time.Now())
+	if printErr := printJSON(st); printErr != nil {
+		return printErr
+	}
+	if err != nil {
+		return err
+	}
+	if st.Held > 0 {
+		return Exit{Code: 3, Msg: fmt.Sprintf("хаб придержал изменений домов: %d — ledger health", st.Held)}
 	}
 	return nil
 }

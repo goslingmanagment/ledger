@@ -12,16 +12,8 @@ import (
 	"github.com/goslingmanagment/ledger/internal/ts"
 )
 
-// One home for «чья продажа»: Hub writes the decisions, the questions and the owner's word on a nobody's sale (its agent
-// door `hub sale decide|decisions|ask|answer|questions`). From settings.sale_decisions_hub_from ledger writes none of
-// them — `ledger decision add|applied|cancel`, `ledger question add|answer|drop` and `ledger accruals claim|unclaim`,
-// beside the database and over HTTP, refuse with one line naming Hub's command — and keeps what it has as history:
-// `decision list` and `question list` read as before. Empty — ledger writes them as it always did.
-//
-// The same day parts the sales: a sale of that Moscow day or later goes by Hub's word — the facts rule reads Hub's
-// decision of it (internal/accruals), the pots follow Hub's decisions of kind pot (internal/pots), a report line's
-// agreement is Hub's decision (internal/reports) —, a sale before it by ledger's own rows, as it did. A writer has no
-// sale's day to go by, so it goes by today (HubOnly); what reads a sale goes by the sale's day (HubRules).
+// This switch governs the writers of decisions and questions, pot purchases and report-line agreements.
+// Payroll facts take computed sale homes directly from Hub on both sides of this date.
 
 // SettingHubFrom is the first Moscow day on which only Hub writes the decisions about whose a sale is; empty — ledger too.
 const SettingHubFrom = "sale_decisions_hub_from"
@@ -30,13 +22,11 @@ const SettingHubFrom = "sale_decisions_hub_from"
 const (
 	HubDecisions = "decisions"
 	HubQuestions = "questions"
-	HubClaims    = "claims"
 )
 
 var hubLines = map[string]string{
 	HubDecisions: "решения «чья продажа» с %s пишет только хаб: hub sale decide (что решено — hub sale decisions); ledger decision list — история до этого дня",
 	HubQuestions: "вопросы «чья продажа» с %s ведёт только хаб: hub sale ask, ответ — hub sale answer (открытые — hub sale questions); ledger question list — история до этого дня",
-	HubClaims:    "ничью продажу человеку с %s отдаёт только решение в хабе: hub sale decide; заявки ledger до этого дня — история (v_sale_claims)",
 }
 
 // HubFrom is the switch day, "" when ledger still writes the decisions.
@@ -71,15 +61,10 @@ func SetHubFrom(ctx context.Context, q ledger.Querier, day string, now time.Time
 	return err
 }
 
-const hubFromNote = "С какого дня (МСК) у «чья продажа» один дом — хаб. С этого дня решения, вопросы о ней и слово владельца о ничьей " +
-	"продаже пишет только хаб (hub sale decide|ask|answer): ledger decision add|applied|cancel, question add|answer|drop и accruals " +
-	"claim|unclaim отказывают, списки остаются историей. У продаж этого дня и позже: правило фактов читает решение хаба (никому, в общак, " +
-	"доли, ничья — человеку), покупки общаков ведёт джоб hub-decisions по решениям хаба вида pot (ledger pot add-sale такую продажу не " +
-	"берёт), договорённость у строки отчёта — решение хаба (hub_sale_decisions). У продаж раньше действуют записи ledger. Пусто — пишет " +
-	"и ledger, решения хаба ни на что не влияют. Ставит ledger decision hub-from"
+const hubFromNote = "С какого дня (МСК) решения и вопросы о продажах ведёт только хаб. У продаж этого дня и позже покупки общаков " +
+	"и договорённости строк отчётов читают решения хаба; у более ранних продаж — записи ledger. Факты всегда читают дома продаж хаба."
 
-// HubOnly says, from the switch day on, why ledger does not write this (what: HubDecisions, HubQuestions, HubClaims);
-// "" — ledger writes it.
+// HubOnly returns the writer refusal for decisions or questions from the switch day.
 func HubOnly(ctx context.Context, q ledger.Querier, now time.Time, what string) (string, error) {
 	day, err := HubFrom(ctx, q)
 	if err != nil || day == "" || ts.Date(now) < day {

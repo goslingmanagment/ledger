@@ -9,8 +9,8 @@ import (
 
 	"github.com/goslingmanagment/ledger/internal/checks"
 	"github.com/goslingmanagment/ledger/internal/db"
+	"github.com/goslingmanagment/ledger/internal/hub"
 	"github.com/goslingmanagment/ledger/internal/payroll"
-	"github.com/goslingmanagment/ledger/internal/split"
 )
 
 // The switch of the accruals to Hub's facts (L4), on the synthetic week of 9 November: from the 10th on the days come
@@ -27,7 +27,8 @@ func switchWeek(t *testing.T) (*db.Store, context.Context) {
 	t.Helper()
 	s, ctx := open(t)
 	week(t, s)
-	putSale(t, s, "2026-11-09", sale("6", split.SaleTip, "page-a", "2026-11-11 03:00", 50_000))
+	putSale(t, s, "2026-11-09", sale("6", "tip", "page-a", "2026-11-11 03:00", 50_000))
+	putHome(t, s, 6, "nobody", "no_holder", "")
 	sheets(t, s, ctx, map[string][][]payroll.Cell{
 		"Альфа": tab("2026-11-09", 0.25, 0, [7]any{80, nil, nil, nil, nil, nil, nil}),
 		"Браво": tab("2026-11-09", 0.2, 10, [7]any{nil, 0, nil, 50, nil, nil, nil}),
@@ -166,8 +167,7 @@ func TestTheSwitchAccruesFromTheFactsAndTheSheetKeepsTheDaysBefore(t *testing.T)
 	}
 
 	// The tip that waited for a decision is Альфа's by the owner's split: her 10th grows by its 25%.
-	exec(t, s, `UPDATE hub_sales SET payload = json_set(payload, '$.resolution', json('[{"userId": 101, "percent": 100}]'))
-		WHERE transaction_ref = '4'`)
+	putHome(t, s, 4, "shift", "owner_split", "", hub.SaleHomeShare{UserID: 101, PersonCode: "alfa", ReportDate: "2026-11-10", DaySource: "report", Percent: new(100), Mills: new(int64(20_000))})
 	if _, err := Rebuild(ctx, s, switchNow); err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +175,8 @@ func TestTheSwitchAccruesFromTheFactsAndTheSheetKeepsTheDaysBefore(t *testing.T)
 		t.Fatalf("Альфа's 10th after the owner's split: %d", n)
 	}
 	// The owner's claim of the nobody's tip is Браво's, on the sale's day.
-	if _, err := Claim(ctx, s, ClaimInput{Ref: "6", Person: "bravo", Note: "по слову владельца"}, "test", switchNow); err != nil {
+	putHome(t, s, 6, "shift", "owner_claim", "", hub.SaleHomeShare{UserID: 102, PersonCode: "bravo", ReportDate: "2026-11-11", DaySource: "sale_day", Percent: new(100), Mills: new(int64(50_000))})
+	if _, err := Rebuild(ctx, s, switchNow); err != nil {
 		t.Fatal(err)
 	}
 	if n := count(t, s, `SELECT amount FROM payable_days WHERE person = 'bravo' AND date = '2026-11-11' AND source = 'facts'`); n != 10_000_000 {
@@ -246,8 +247,7 @@ func TestAnUnprovenWeekOrAnUnmappedPersonIsUnknownNotZero(t *testing.T) {
 
 	exec(t, s, `UPDATE hub_team_sync SET status = 'unknown', reasons = '["хаб: 503"]' WHERE window_from = '2026-11-16T00:00:00+03:00'`)
 	// What the facts say meanwhile does not move the held days.
-	exec(t, s, `UPDATE hub_sales SET payload = json_set(payload, '$.resolution', json('[{"userId": 101, "percent": 100}]'))
-		WHERE transaction_ref = '4'`)
+	putHome(t, s, 4, "shift", "owner_split", "", hub.SaleHomeShare{UserID: 101, PersonCode: "alfa", ReportDate: "2026-11-10", DaySource: "report", Percent: new(100), Mills: new(int64(20_000))})
 	n0 := count(t, s, `SELECT count(*) FROM entries`)
 	if _, err := Rebuild(ctx, s, switchNow); err != nil {
 		t.Fatal(err)

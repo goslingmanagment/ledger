@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/goslingmanagment/ledger/internal/accruals"
 	"github.com/goslingmanagment/ledger/internal/decisions"
 )
 
@@ -39,11 +38,6 @@ func TestFromTheSwitchOnlyHubWritesWhoseASaleIs(t *testing.T) {
 		if status(err) != http.StatusUnprocessableEntity || !strings.Contains(message(err), c.hub) || !strings.Contains(message(err), "с 2026-11-01") {
 			t.Errorf("%s: %d %q", c.path, status(err), message(err))
 		}
-	}
-	// The owner's word on a nobody's sale, too.
-	err := k.owner.Do(ctx, http.MethodPost, "/v1/accruals/claim", accruals.ClaimInput{Ref: "tx-5", Person: "anna", Note: "слово владельца"}, nil)
-	if status(err) != http.StatusUnprocessableEntity || !strings.Contains(message(err), "hub sale decide") {
-		t.Errorf("claim: %d %q", status(err), message(err))
 	}
 	// Beside the database (the CLI with LEDGER_DB): the same refusal.
 	if _, err := decisions.Add(ctx, s, owner("tx-6"), "local", now); err == nil || !strings.Contains(err.Error(), "hub sale decide") {
