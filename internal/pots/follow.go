@@ -234,7 +234,6 @@ func PlanHub(ctx context.Context, q ledger.Querier, now time.Time) (HubPlan, err
 		}
 		day := sale.at[:10]
 		if st.From != "" && day >= st.From {
-			plan.Waiting = append(plan.Waiting, problem(workboardPots, st.From))
 			continue
 		}
 		if !decisions.HubRules(from, day) {

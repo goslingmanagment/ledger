@@ -876,8 +876,12 @@ func TestPostsSinceLowerBound(t *testing.T) {
 	// Switch on reports from 2026-11-10: Альфа has unpaid sheet 09.11 (ignored: before switch) and unpaid post 10.11;
 	// Браво has unpaid post 10.11 and held 12.11.
 	setReports(t, s, ctx, "2026-11-10")
-	if got, err := reports.PostsSince(ctx, s.RO, at("2026-11-24T12:00:00+03:00")); err != nil || got != "2026-11-10" {
+	if got, err := reports.PostsSince(ctx, s.RO, at("2026-11-24T12:00:00+03:00")); err != nil || got != "2026-11-09" {
 		t.Fatalf("unpaid post-basis day: got %q err %v", got, err)
+	}
+
+	if got, err := reports.PostsSince(ctx, s.RO, at("2027-02-01")); err != nil || got != "2026-12-18" {
+		t.Fatalf("45-day bound: %s %v", got, err)
 	}
 
 	// Put Альфа on the board from 2026-11-10 (grant on 09.11) and give Браво a Hub report on 2026-11-10, switch on hub-from:
@@ -887,7 +891,7 @@ func TestPostsSinceLowerBound(t *testing.T) {
 	r.read(t, s)
 	setHub(t, s, ctx, "2026-11-10")
 	handIn(t, s, hubVersion(1, 1, 1, "bravo", "2026-11-10", hubPage{"page-a", 50}))
-	if got, err := reports.PostsSince(ctx, s.RO, at("2026-11-24T12:00:00+03:00")); err != nil || got != "2026-11-12" {
+	if got, err := reports.PostsSince(ctx, s.RO, at("2026-11-24T12:00:00+03:00")); err != nil || got != "2026-11-11" {
 		t.Fatalf("board/hub days ignored: got %q err %v", got, err)
 	}
 
@@ -899,8 +903,8 @@ func TestPostsSinceLowerBound(t *testing.T) {
 	if got := dayOf(t, s, "bravo", "2026-11-12"); got != "20000000 20000000 0 sheet" {
 		t.Fatalf("Браво's 12th paid: %s", got)
 	}
-	// On 2026-11-27 (14 days after payout on 13.11): still within 14 days → 2026-11-12!
-	if got, err := reports.PostsSince(ctx, s.RO, at("2026-11-27T12:00:00+03:00")); err != nil || got != "2026-11-12" {
+	// On 2026-11-27 (14 days after payout on 13.11): still within 14 days, so the previous evening is included.
+	if got, err := reports.PostsSince(ctx, s.RO, at("2026-11-27T12:00:00+03:00")); err != nil || got != "2026-11-11" {
 		t.Fatalf("paid exactly 14 days ago: got %q err %v", got, err)
 	}
 	// On 2026-11-28 (15 days after payout on 13.11): paid >14 days ago → ignored!
@@ -919,7 +923,7 @@ func TestPostsSinceLowerBound(t *testing.T) {
 	}
 	// 12.11 was paid by doc #2 on 25.11 (3 days before 28.11), 11.11 by doc #1 on 13.11 (15 days before 28.11):
 	// so on 28.11 only 12.11 is within 14 days of its payout.
-	if got, err := reports.PostsSince(ctx, s.RO, at("2026-11-28T12:00:00+03:00")); err != nil || got != "2026-11-12" {
+	if got, err := reports.PostsSince(ctx, s.RO, at("2026-11-28T12:00:00+03:00")); err != nil || got != "2026-11-11" {
 		t.Fatalf("old day paid recently: got %q err %v", got, err)
 	}
 }
@@ -1001,5 +1005,72 @@ func TestFiveDayOldPostEditABAAndRetract(t *testing.T) {
 	}
 	if got := dayOf(t, s, "alfa", "2026-11-10"); got != "" {
 		t.Fatalf("applied retract did not reverse day: %s\n%s", got, books(t, s))
+	}
+}
+
+func TestMovedReportReconcilesBothDays(t *testing.T) {
+	for _, paid := range []bool{false, true} {
+		s, ctx := reportWeek(t)
+		setReports(t, s, ctx, cutDay)
+		if paid {
+			importPayouts(t, s, ctx, payoutRow(1, "2026-11-12", "Альфа", "Alpha", "55.00"))
+			if _, err := payroll.Rebuild(ctx, s, reportNow); err != nil {
+				t.Fatal(err)
+			}
+		}
+		const to = "2026-11-11"
+		postEdited(t, s, 1, "501", cutDay, "2026-11-15T18:00:00+03:00", postText(to, "", "A - $80"))
+		if got := dayOf(t, s, "alfa", to); got != "20000000 0 20000000 reports" {
+			t.Fatal("new day", got)
+		}
+		if paid {
+			open, err := payroll.OpenChanges(ctx, s.RO, "alfa")
+			if err != nil || len(open) != 1 || open[0].Date != cutDay || open[0].NewMicros != 0 || open[0].PostedMicros != 35000000 {
+				t.Fatal(open, err)
+			}
+		} else if got := dayOf(t, s, "alfa", cutDay); got != "" {
+			t.Fatal("old unpaid day", got)
+		}
+	}
+}
+
+func TestUnreadableEditHoldsPreviouslyBookedDay(t *testing.T) {
+	for _, edit := range []string{"Общий доход: $7", postText("2026-11-11", "$7", "A - $9"), postText("2026-11-14", "", "A - $7")} {
+		s, ctx := reportWeek(t)
+		setReports(t, s, ctx, cutDay)
+		want := dayOf(t, s, "alfa", cutDay)
+		postEdited(t, s, 1, "501", cutDay, "2026-11-15T17:00:00+03:00", edit)
+		if got := dayOf(t, s, "alfa", cutDay); got != want {
+			t.Fatal("unreadable edit released old day", got, want)
+		}
+		// Even a partial report from another message must not reduce a held booking.
+		post(t, s, 92, "501", cutDay, postText(cutDay, "", "A - $8"))
+		if got := dayOf(t, s, "alfa", cutDay); got != want {
+			t.Fatal("unreadable edit replaced with partial day", got, want)
+		}
+		postEdited(t, s, 1, "501", cutDay, "2026-11-15T18:00:00+03:00", postText("2026-11-11", "", "A - $4"))
+		if got := dayOf(t, s, "alfa", cutDay); got != "2000000 0 2000000 reports" {
+			t.Fatal("remaining post after corrected move", got)
+		}
+	}
+}
+
+func TestReportEditMovesPersonAndModelOnSameDate(t *testing.T) {
+	s, ctx := reportBook(t)
+	tables(t, s, ctx, map[string]map[string][][]payroll.Cell{
+		"Alpha": {"Браво": pageTab(cutDay, "Page A", 0.2, 0, [7]any{})},
+		"Beta":  {"Альфа": pageTab(cutDay, "Page C", 0.25, 0, [7]any{})},
+	})
+	setReports(t, s, ctx, cutDay)
+	post(t, s, 88, "502", cutDay, postText(cutDay, "", "A - $10"))
+	if got := dayOf(t, s, "bravo", cutDay); got != "2000000 0 2000000 reports" {
+		t.Fatal(got)
+	}
+	postEdited(t, s, 88, "501", cutDay, "2026-11-11T01:00:00+03:00", postText(cutDay, "", "C - $12"))
+	if got := dayOf(t, s, "bravo", cutDay); got != "" {
+		t.Fatal("previous tab still booked", got)
+	}
+	if got := dayOf(t, s, "alfa", cutDay); got != "3000000 0 3000000 reports" {
+		t.Fatal("replacement tab", got)
 	}
 }

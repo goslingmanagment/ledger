@@ -2,6 +2,7 @@ package payroll
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -367,8 +368,8 @@ func TestPrepareZeroBalanceStillShowsHubFlags(t *testing.T) {
 		t.Fatalf("expected zero balance for bravo, got %d %q", bb.AmountMicros, bb.Nothing)
 	}
 	dispB := flagsOfKind(bb, "disputed")
-	if len(dispB) != 1 || !strings.Contains(dispB[0].Text, "8304") {
-		t.Fatalf("expected disputed 8304 (>= payroll_reports_from 11-10) and not 8305 (< 11-10), got %+v", dispB)
+	if len(dispB) != 0 {
+		t.Fatalf("shadow reports before the Hub basis blocked payout: %+v", dispB)
 	}
 }
 
@@ -523,5 +524,52 @@ func TestPrepareFrozenLedgerDecisionsAndQuestionsProduceNoFlags(t *testing.T) {
 		if strings.Contains(fl.Text, "8601") || strings.Contains(fl.Text, "8602") {
 			t.Fatalf("frozen ledger rows leaked into flags: %+v", fl)
 		}
+	}
+}
+
+func TestDecisionsCompareCountedAmountsEvenAfterApplication(t *testing.T) {
+	s, _ := setupTwoPeopleTabs(t)
+	const at = "2026-11-18T11:00:00+03:00"
+	putHubReport(t, s, 501, 501, 1, "alfa", at[:10], 1, nil, map[string]int64{"page-1": m("60")})
+	for i, kind := range []string{"owner", "pot", "exclude", "owner"} {
+		ref := strconv.Itoa(701 + i)
+		net := int64(30000)
+		if i == 3 {
+			net = 0
+		}
+		putHubSale(t, s, ref, "", "page-1", at, net)
+		if i != 3 {
+			putHubLine(t, s, 501, i+1, ref, "page-1", net*1000, m("20"), 1, 0, 0, nil)
+		}
+		var applied *string
+		if i == 0 {
+			applied = strPtr("alfa")
+		}
+		shares := "[]"
+		if kind == "owner" {
+			shares = `[{"person":"alfa","percent":100}]`
+		}
+		putHubDecision(t, s, int64(i+1), strPtr(ref), "page-1", kind, shares, "active", at, applied, nil)
+	}
+	got := flagsOfKind(prepare(t, s, "alfa", at), "hub_decision")
+	if len(got) != 3 {
+		t.Fatalf("want wrong applied amount and both overcounts: %+v", got)
+	}
+	for i, f := range got {
+		if !strings.Contains(f.Text, "#"+strconv.Itoa(i+1)+" ") {
+			t.Fatal(got)
+		}
+	}
+}
+
+func TestShadowHubDisputeAndPendingAddDoNotBlock(t *testing.T) {
+	s, _ := setupTwoPeopleTabs(t)
+	putHubReport(t, s, 601, 601, 1, "alfa", "2026-11-18", 1, nil, map[string]int64{"page-1": 0})
+	putHubLine(t, s, 601, 1, "901", "page-1", m("12"), 0, 0, 0, 1, nil)
+	putHubAdd(t, s, 601, 1, 902, m("7"), "fixture", "pending", 0, nil)
+	execSQL(t, s, `UPDATE settings SET value='2026-11-19' WHERE key='payroll_basis_hub_from'`)
+	b := prepare(t, s, "alfa", "2026-11-19T12:00:00+03:00")
+	if len(flagsOfKind(b, "disputed"))+len(flagsOfKind(b, "pending_add")) != 0 {
+		t.Fatal(b.Flags)
 	}
 }

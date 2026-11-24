@@ -216,14 +216,16 @@ func Posts(ctx context.Context, q ledger.Querier, from, to string, flagged bool)
 // edit to a recently paid post arrives and opens payroll_pending_changes.
 const PostsSinceDays = 14
 
+// MaxCollectDays bounds automatic Telegram reads. Explicit backfills choose their own start.
+const MaxCollectDays = 45
+
 // PostsSinceAnswer is the reply of GET /v1/report-posts/since: narrow, read-only, no sums and no people.
 type PostsSinceAnswer struct {
 	Since string `json:"since"`
 }
 
-// PostsSince is the earliest post-basis day (same basis rule as v_report_pages / payroll.HubBasisDays, from
-// settings.payroll_reports_from onward) that either still has payable_days.unpaid > 0 or was paid within the last
-// PostsSinceDays days. Empty when reports do not accrue or no such day exists.
+// PostsSince returns the Telegram fetch date for the earliest unpaid or recently paid
+// post-basis day. Include the previous evening and cap the automatic lookback at 45 days.
 func PostsSince(ctx context.Context, q ledger.Querier, now time.Time) (string, error) {
 	reportsFrom, err := payroll.ReportsFrom(ctx, q)
 	if err != nil || reportsFrom == "" {
@@ -253,7 +255,12 @@ func PostsSince(ctx context.Context, q ledger.Querier, now time.Time) (string, e
 			continue
 		}
 		if unpaid > 0 || (paid > 0 && (day >= cutoff || paidAt >= cutoff)) {
-			return day, nil
+			d, err := time.Parse(ts.DateLayout, day)
+			if err != nil {
+				return "", err
+			}
+			// Telegram messages may precede their report date by one Moscow day.
+			return max(d.AddDate(0, 0, -1).Format(ts.DateLayout), ts.Date(now.In(ts.MSK).AddDate(0, 0, -MaxCollectDays))), nil
 		}
 	}
 	return "", rows.Err()

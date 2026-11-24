@@ -128,10 +128,26 @@ func PageLabeler(ctx context.Context, q ledger.Querier) (func(string) string, er
 	}, nil
 }
 
+func hubModelMap(ctx context.Context, q ledger.Querier) (map[string]string, error) {
+	raw, err := optionalMap(ctx, q, "hub_model_slugs")
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(raw))
+	for k, v := range raw {
+		slug := ledger.Slug(k)
+		if prev, ok := out[slug]; ok && prev != v {
+			return nil, fmt.Errorf("настройка hub_model_slugs: несколько моделей для %q", slug)
+		}
+		out[slug] = v
+	}
+	return out, nil
+}
+
 // HubPageModels is the ledger model of each page of the hub grant: settings.hub_model_slugs of its modelSlug, or the
 // slug itself.
 func HubPageModels(ctx context.Context, q ledger.Querier) (map[string]string, error) {
-	slugs, err := optionalMap(ctx, q, "hub_model_slugs")
+	slugs, err := hubModelMap(ctx, q)
 	if err != nil {
 		return nil, err
 	}
@@ -147,7 +163,7 @@ func HubPageModels(ctx context.Context, q ledger.Querier) (map[string]string, er
 			return nil, err
 		}
 		out[label] = slug
-		if m, ok := slugs[slug]; ok {
+		if m, ok := slugs[ledger.Slug(slug)]; ok {
 			out[label] = m
 		}
 	}

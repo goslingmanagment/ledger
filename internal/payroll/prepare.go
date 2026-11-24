@@ -182,11 +182,12 @@ type prepUnpaid struct {
 }
 
 type prepCells struct {
-	week     string
-	pages    []PayoutPage
-	pots     []PayoutPot
-	value    int64
-	hasShift bool
+	bookedTerms *dayTerms
+	week        string
+	pages       []PayoutPage
+	pots        []PayoutPot
+	value       int64
+	hasShift    bool
 }
 
 type prepTerms struct {
@@ -518,28 +519,7 @@ func prepareCells(ctx context.Context, q ledger.Querier, slug, from string, unpa
 			}
 			f := cells[slug+"\x00"+ledger.Slug(u.model)+"\x00"+u.date]
 			c := prepCells{week: weekOfDate(u.date), pages: f.pages, pots: f.pots, value: f.value, hasShift: f.hasShift}
-			if source == SourceReports && u.paid > 0 {
-				var pots string
-				var net int64
-				var rate *float64
-				err := q.QueryRowContext(ctx, `SELECT b.hub_pots,b.net_micros,b.rate FROM v_booked_report_days b
-    JOIN settings s ON s.key='pot_shares_hub_from' AND s.value<>'' AND b.day>=s.value
-    WHERE b.person=? AND b.tab=? AND b.day=?`, slug, tabKey(u.model, u.name), u.date).Scan(&pots, &net, &rate)
-				if err != nil && err != sql.ErrNoRows {
-					return nil, err
-				}
-				if err == nil {
-					var parts []hub.PotShare
-					if err := json.Unmarshal([]byte(pots), &parts); err != nil {
-						return nil, err
-					}
-					c.pots = nil
-					for _, part := range parts {
-						c.pots = append(c.pots, payoutPot(part, rate))
-					}
-					c.value = net
-				}
-			}
+
 			if sh, ok := out[tabKey(u.model, u.name)+":"+u.date]; ok {
 				c.week = sh.week
 			}
@@ -548,8 +528,55 @@ func prepareCells(ctx context.Context, q ledger.Querier, slug, from string, unpa
 			}
 			out[tabKey(u.model, u.name)+":"+u.date+suffixOf(source)] = c
 		}
+		if source == SourceReports {
+			if err := bookedReportCells(ctx, q, slug, from, to, out); err != nil {
+				return nil, err
+			}
+		}
 	}
 	return out, nil
+}
+
+// Use the basis that priced the booked amount, including for a wholly unpaid held day.
+func bookedReportCells(ctx context.Context, q ledger.Querier, person, from, to string, out map[string]prepCells) error {
+	rows, err := q.QueryContext(ctx, `SELECT b.tab,b.day,b.hub_pots,b.net_micros,b.rate,b.fix_micros,b.pages
+        FROM v_booked_report_days b JOIN settings s ON s.key='pot_shares_hub_from' AND s.value<>'' AND b.day>=s.value
+        WHERE b.person=? AND b.day BETWEEN ? AND ?`, person, from, to)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var tab, day, pots string
+		var pages *string
+		var net int64
+		var terms dayTerms
+		if err := rows.Scan(&tab, &day, &pots, &net, &terms.rate, &terms.fixMicros, &pages); err != nil {
+			return err
+		}
+		key := tab + ":" + day + suffixOf(SourceReports)
+		c, ok := out[key]
+		if !ok {
+			continue
+		}
+		var parts []hub.PotShare
+		if err := json.Unmarshal([]byte(pots), &parts); err != nil {
+			return err
+		}
+		c.pots = nil
+		for _, part := range parts {
+			c.pots = append(c.pots, payoutPot(part, terms.rate))
+		}
+		c.value, c.bookedTerms = net, &terms
+		if pages != nil {
+			c.pages, err = reportPages(*pages)
+			if err != nil {
+				return err
+			}
+		}
+		out[key] = c
+	}
+	return rows.Err()
 }
 
 func sheetCells(ctx context.Context, q ledger.Querier, slug, from string, out map[string]prepCells) error {
@@ -667,7 +694,11 @@ func prepareLines(unpaid []prepUnpaid, cells map[string]prepCells, pt prepTerms,
 				if source == SourceReports {
 					hasShift = len(day.Pages) > 0
 				}
-				g.days = append(g.days, weekDay{day: day, terms: pt.forDay(u.model, u.name, u.date, source), hasShift: hasShift})
+				terms := pt.forDay(u.model, u.name, u.date, source)
+				if c.bookedTerms != nil {
+					terms = *c.bookedTerms
+				}
+				g.days = append(g.days, weekDay{day: day, terms: terms, hasShift: hasShift})
 			}
 		default:
 			l := &PrepareLine{Kind: LineOther, From: u.date, To: u.date, PayMicros: u.unpaid}
@@ -791,7 +822,7 @@ func potText(days []PrepareDay) string {
 			}
 			if p.DistributionID != 0 && p.Rate != nil {
 				pay := money.FromFloat(float64(p.RevenueMicros) / money.Scale * *p.Rate)
-				parts = append(parts, fmt.Sprintf("общак %s, раздача %d: доля базы %s (%s) × %s%% = %s%s", p.Name, p.DistributionID, cellNum(p.RevenueMicros), p.Basis, strconv.FormatFloat(*p.Rate*100, 'f', -1, 64), cellNum(int64(pay)), when))
+				parts = append(parts, fmt.Sprintf("общак %s, раздача %d: доля базы %s (%s) × %s%% = %s%s", p.Name, p.DistributionID, cellNum(p.RevenueMicros), p.Basis, strconv.FormatFloat(money.RoundN(*p.Rate*100, 6), 'f', -1, 64), cellNum(int64(pay)), when))
 				continue
 			}
 			parts = append(parts, fmt.Sprintf("общак %s%s: база %s", p.Name, when, cellNum(p.RevenueMicros)))

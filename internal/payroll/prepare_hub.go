@@ -42,10 +42,10 @@ func hubFlags(ctx context.Context, q ledger.Querier, b *PayoutBrief, card Person
 	if err := hubDecisionFlags(ctx, q, b.Slug, card, hubFrom, isHubBasis, f); err != nil {
 		return err
 	}
-	if err := hubDisputedFlags(ctx, q, b.Slug, winFrom, winTo, f); err != nil {
+	if err := hubDisputedFlags(ctx, q, b.Slug, winFrom, winTo, isHubBasis, f); err != nil {
 		return err
 	}
-	if err := hubPendingAddFlags(ctx, q, b.Slug, winFrom, winTo, f); err != nil {
+	if err := hubPendingAddFlags(ctx, q, b.Slug, winFrom, winTo, isHubBasis, f); err != nil {
 		return err
 	}
 	if err := hubBoardPostFlags(ctx, q, b.Slug, winFrom, winTo, f); err != nil {
@@ -89,6 +89,7 @@ type hubDecisionRow struct {
 type hubSaleInfo struct {
 	day       string
 	netMicros int64
+	netKnown  bool
 	page      string
 	refs      hub.SaleRefs
 }
@@ -98,7 +99,7 @@ type countedSaleLine struct {
 	net    int64
 }
 
-// hubDecisionFlags flags active Hub decisions (owner | split) on or after settings.sale_decisions_hub_from where this
+// hubDecisionFlags checks active owner, split, exclude and pot decisions from the switch day where this
 // person's expected share is not counted (or where this person's current Hub report still counts a sale awarded to
 // somebody else). Searched by state, not restricted to the payout window, so late decisions on already-paid periods
 // still block.
@@ -113,8 +114,8 @@ func hubDecisionFlags(ctx context.Context, q ledger.Querier, slug string, card P
 	}
 	rows, err := q.QueryContext(ctx, `SELECT id, COALESCE(transaction_ref, ''), COALESCE(page_label, ''), kind, shares,
 		COALESCE(said_at, ''), COALESCE(decided_at, ''), COALESCE(applied_person, ''), COALESCE(applied_report_date, '')
-		FROM hub_sale_decisions WHERE state = ? AND kind IN (?, ?) ORDER BY id`,
-		hub.SaleDecisionActive, hub.SaleDecisionOwner, hub.SaleDecisionSplit)
+		FROM hub_sale_decisions WHERE state = ? AND kind IN (?, ?, ?, ?) ORDER BY id`,
+		hub.SaleDecisionActive, hub.SaleDecisionOwner, hub.SaleDecisionSplit, hub.SaleDecisionExclude, hub.SaleDecisionPot)
 	if err != nil {
 		return err
 	}
@@ -156,7 +157,7 @@ func hubDecisionFlags(ctx context.Context, q ledger.Querier, slug string, card P
 		}
 		myPercent := 0
 		for _, sh := range shares {
-			if sh.Percent <= 0 {
+			if d.kind == hub.SaleDecisionPot || d.kind == hub.SaleDecisionExclude || sh.Percent <= 0 {
 				continue
 			}
 			if sh.Person != nil && *sh.Person != "" {
@@ -210,7 +211,7 @@ func hubDecisionFlags(ctx context.Context, q ledger.Querier, slug string, card P
 		}
 
 		netMicros := info.netMicros
-		if netMicros == 0 {
+		if !info.netKnown {
 			netMicros = lineNet
 		}
 		page := d.pageLabel
@@ -225,31 +226,31 @@ func hubDecisionFlags(ctx context.Context, q ledger.Querier, slug string, card P
 			continue
 		}
 
-		countedOK := d.txRef != "" && shareCounted(countedMicros, netMicros, myPercent)
+		netKnown := info.netKnown || lineNet != 0
+		expectedMicros := netMicros/100*int64(myPercent) + (netMicros%100)*int64(myPercent)/100
+		countedOK := d.txRef != "" && shareCounted(countedMicros, expectedMicros, netKnown)
 		hubDay := hubDayOf(saleDay)
 		if hubDay {
 			// On a Hub-basis day, each participant's share is verified against their own active Hub report; an explicit
-			// applied_person mark for this person (e.g. a departed person with no next shift) is also accepted.
-			if countedOK || d.appliedPerson == slug {
+			// application can account for an absent line, but cannot correct a mismatched amount.
+			if countedOK || (countedMicros == 0 && d.appliedPerson == slug) {
 				continue
 			}
 		} else {
 			// On a post-basis day, Hub carries one applied mark per decision (the second participant of a post-day split
 			// is verified manually); a share already carried over into a later Hub-basis report also counts.
-			if d.appliedPerson != "" || d.appliedReportDate != "" || countedOK {
+			if countedOK || (countedMicros == 0 && (d.appliedPerson != "" || d.appliedReportDate != "")) {
 				continue
 			}
 		}
 
 		shareText := fmt.Sprintf("доля %d%%", myPercent)
-		var expectedMicros int64
-		if netMicros != 0 {
-			expectedMicros = (netMicros * int64(myPercent)) / 100
+		if netKnown {
 			shareText = fmt.Sprintf("доля %d%% (%s)", myPercent, money.Micros(expectedMicros).Cents())
 		}
 		var why string
 		switch {
-		case hubDay && countedMicros != 0:
+		case countedMicros != 0:
 			why = fmt.Sprintf("в действующем отчёте хаба учтено %s", money.Micros(countedMicros).Cents())
 		case hubDay:
 			why = "не учтена в действующем отчёте хаба"
@@ -263,7 +264,7 @@ func hubDecisionFlags(ctx context.Context, q ledger.Querier, slug string, card P
 
 // hubDisputedFlags flags every disputed line (disputed = 1, even with zero amount or NULL claimed_micros) in this
 // person's active non-problem Hub shift reports within the window.
-func hubDisputedFlags(ctx context.Context, q ledger.Querier, slug, winFrom, winTo string, f *flagger) error {
+func hubDisputedFlags(ctx context.Context, q ledger.Querier, slug, winFrom, winTo string, isHubBasis func(string, string) bool, f *flagger) error {
 	rows, err := q.QueryContext(ctx, `SELECT r.id, r.report_date, l.transaction_ref, l.page_label, l.net_micros, l.amount_micros, l.claimed_micros
 		FROM hub_shift_report_lines l JOIN hub_shift_reports r ON r.id = l.report_id
 		WHERE r.person = ? AND r.current = 1 AND r.problem IS NULL AND l.disputed = 1
@@ -280,6 +281,9 @@ func hubDisputedFlags(ctx context.Context, q ledger.Querier, slug, winFrom, winT
 		if err := rows.Scan(&reportID, &reportDate, &txRef, &pageLabel, &netMicros, &amountMicros, &claimed); err != nil {
 			return err
 		}
+		if !isHubBasis(slug, reportDate) {
+			continue
+		}
 		if claimed.Valid {
 			f.add("disputed", true, "спорная продажа %s за %s (%s, версия %d): заявлено %s, в отчёте хаба учтено %s — решить спор в хабе",
 				txRef, ddmm(reportDate), pageLabel, reportID, money.Micros(claimed.Int64).Cents(), money.Micros(amountMicros).Cents())
@@ -293,7 +297,7 @@ func hubDisputedFlags(ctx context.Context, q ledger.Querier, slug, winFrom, winT
 
 // hubPendingAddFlags flags pending off-platform adds (hub_shift_report_adds.state = 'pending') in this person's active
 // Hub shift reports without problem within the window.
-func hubPendingAddFlags(ctx context.Context, q ledger.Querier, slug, winFrom, winTo string, f *flagger) error {
+func hubPendingAddFlags(ctx context.Context, q ledger.Querier, slug, winFrom, winTo string, isHubBasis func(string, string) bool, f *flagger) error {
 	rows, err := q.QueryContext(ctx, `SELECT r.id, r.report_date, a.hub_id, a.amount_micros, a.what_for, COALESCE(a.page_label, '')
 		FROM hub_shift_report_adds a JOIN hub_shift_reports r ON r.id = a.report_id
 		WHERE r.person = ? AND r.current = 1 AND r.problem IS NULL AND a.state = 'pending'
@@ -308,6 +312,9 @@ func hubPendingAddFlags(ctx context.Context, q ledger.Querier, slug, winFrom, wi
 		var reportDate, whatFor, pageLabel string
 		if err := rows.Scan(&reportID, &reportDate, &hubID, &amountMicros, &whatFor, &pageLabel); err != nil {
 			return err
+		}
+		if !isHubBasis(slug, reportDate) {
+			continue
 		}
 		what := ""
 		if strings.TrimSpace(whatFor) != "" {
@@ -546,22 +553,22 @@ func lookupHubSale(ctx context.Context, q ledger.Querier, ref string) (hubSaleIn
 	out := hubSaleInfo{refs: refs}
 	refA, refB := refs.Either()
 	var at, page string
-	var netMills int64
+	var netMills sql.NullInt64
 	err = q.QueryRowContext(ctx, `SELECT occurred_at, net_mills, page_label FROM hub_sales
 		WHERE transaction_ref IN (?, ?) ORDER BY transaction_ref = ? DESC LIMIT 1`, refA, refB, refs.Hub()).
 		Scan(&at, &netMills, &page)
 	if err == nil {
-		out.day, out.netMicros, out.page = mskDayOf(at), netMills*1000, page
+		out.day, out.netMicros, out.page, out.netKnown = mskDayOf(at), netMills.Int64*1000, page, netMills.Valid
 		return out, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return hubSaleInfo{}, err
 	}
-	err = q.QueryRowContext(ctx, `SELECT occurred_at, COALESCE(net_mills, 0), page_label FROM hub_transactions
+	err = q.QueryRowContext(ctx, `SELECT occurred_at, net_mills, page_label FROM hub_transactions
 		WHERE key = ? OR ref = ? OR key = ? OR ref = ? ORDER BY key = ? DESC, updated_at DESC, page_label LIMIT 1`,
 		refA, refA, refB, refB, refs.Hub()).Scan(&at, &netMills, &page)
 	if err == nil {
-		out.day, out.netMicros, out.page = mskDayOf(at), netMills*1000, page
+		out.day, out.netMicros, out.page, out.netKnown = mskDayOf(at), netMills.Int64*1000, page, netMills.Valid
 		return out, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
@@ -571,15 +578,14 @@ func lookupHubSale(ctx context.Context, q ledger.Querier, ref string) (hubSaleIn
 }
 
 // shareCounted reports whether countedMicros matches the expected percent of netMicros (within half a cent to allow
-// mill/cent rounding on splits). When netMicros is unknown (0), any non-zero counted amount suffices.
-func shareCounted(countedMicros, netMicros int64, percent int) bool {
-	if countedMicros == 0 {
-		return false
+// mill/cent rounding on splits). A known zero net has a zero expected share.
+func shareCounted(countedMicros, expected int64, known bool) bool {
+	if !known {
+		return countedMicros != 0
 	}
-	if netMicros == 0 {
-		return true
+	if countedMicros == 0 || expected == 0 {
+		return countedMicros == expected
 	}
-	expected := (netMicros * int64(percent)) / 100
 	return abs(countedMicros-expected) <= 5_000
 }
 

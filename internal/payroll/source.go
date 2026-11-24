@@ -196,14 +196,14 @@ func sourceName(source string) string {
 
 // reportBasis is what a reports day was counted from: the posted revenue and the terms.
 type reportBasis struct {
-	hubReports, saleRefs, hubPots string
-	net, fix                      money.Micros
-	rate                          *float64
+	hubReports, saleRefs, hubPots, pages string
+	net, fix                             money.Micros
+	rate                                 *float64
 }
 
 // reportPlan is what the shift reports say about every tab's day from the switch on.
 type reportPlan struct {
-	potHoldFrom string
+	potHeldTabs map[string]bool
 	potFrom     string
 	from        string
 	want        map[string]factDay
@@ -225,13 +225,14 @@ func (p *reportPlan) marks() []unenteredRow      { return p.markers }
 func (p *reportPlan) lost() []Unaccrued          { return p.unaccrued }
 func (p *reportPlan) holds(model, name, date string) bool {
 	_, ok := p.held[model+"/"+name+":"+date]
-	return ok || (p.potHoldFrom != "" && date >= p.potHoldFrom)
+	return ok || (date >= p.potFrom && p.potHeldTabs[model+"/"+name])
 }
 
 // blockingFlags are the flags of a post that keep it out of the pay base (as v_report_pages and reports.Blocking).
 var blockingFlags = map[string]string{
 	"unknown_author": "автор не узнан",
 	"no_date":        "дату не прочитать",
+	"parse_error":    "правка сообщения не разобрана как отчёт",
 	"sum_mismatch":   "строки не сходятся с «Общим доходом»",
 	"date_mismatch":  "дата дальше суток от дня отправки",
 }
@@ -246,12 +247,19 @@ func planReports(ctx context.Context, q ledger.Querier, from string, now time.Ti
 		return nil, err
 	}
 	p.potFrom = potStatus.From
-	if potStatus.FeedProblem(now) != "" {
-		p.potHoldFrom = potStatus.From
+	potHolds, err := hub.PotTabHolds(ctx, q, potStatus, "", now)
+	if err != nil {
+		return nil, err
 	}
 	tabs, tabOf, err := planTabs(ctx, q)
 	if err != nil {
 		return nil, err
+	}
+	p.potHeldTabs = map[string]bool{}
+	for _, t := range tabs {
+		if len(potHolds[hub.PotTab{Person: t.person, Model: ledger.Slug(t.model)}]) > 0 {
+			p.potHeldTabs[t.model+"/"+t.name] = true
+		}
 	}
 	hold := func(key, why string) {
 		if _, ok := p.held[key]; !ok {
@@ -263,7 +271,7 @@ func planReports(ctx context.Context, q ledger.Querier, from string, now time.Ti
 		return nil, err
 	}
 	reported := map[string]bool{}
-	rows, err := q.QueryContext(ctx, `SELECT person, model, day, net_micros, rate, fix_micros, amount_micros, COALESCE(reason, ''),coalesce(hub_reports,'[]'),
+	rows, err := q.QueryContext(ctx, `SELECT person, model, day, pages, net_micros, rate, fix_micros, amount_micros, COALESCE(reason, ''),coalesce(hub_reports,'[]'),
  coalesce((SELECT json_group_array(json(j.value)) FROM json_each(a.pots) j WHERE j.value->>'distributionId' IS NOT NULL),'[]')
 		FROM report_accruals a WHERE day >= ? ORDER BY person, model, day`, from)
 	if err != nil {
@@ -272,11 +280,11 @@ func planReports(ctx context.Context, q ledger.Querier, from string, now time.Ti
 	type lostKey struct{ person, model string }
 	lost := map[lostKey]*Unaccrued{}
 	for rows.Next() {
-		var person, model, day, reason, hubReports, hubPots string
+		var person, model, day, pages, reason, hubReports, hubPots string
 		var net, fix int64
 		var rate sql.NullFloat64
 		var amount sql.NullInt64
-		if err := rows.Scan(&person, &model, &day, &net, &rate, &fix, &amount, &reason, &hubReports, &hubPots); err != nil {
+		if err := rows.Scan(&person, &model, &day, &pages, &net, &rate, &fix, &amount, &reason, &hubReports, &hubPots); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -296,16 +304,20 @@ func planReports(ctx context.Context, q ledger.Querier, from string, now time.Ti
 			continue
 		}
 		key := t.model + "/" + t.name + ":" + day
+		if reported[key] {
+			rows.Close()
+			return nil, fmt.Errorf("несколько начислений по отчётам для %s", key)
+		}
 		reported[key] = true
 		if !amount.Valid {
 			hold(key, fmt.Sprintf("нет ставки: %s — выручка по отчёту %s", reason, money.Micros(net).Cents()))
 			continue
 		}
-		saleRefs := refsByDay[[3]string{person, model, day}]
+		saleRefs := refsByDay[[3]string{person, ledger.Slug(model), day}]
 		if saleRefs == "" {
 			saleRefs = "[]"
 		}
-		b := &reportBasis{hubReports: hubReports, hubPots: hubPots, saleRefs: saleRefs, net: money.Micros(net), fix: money.Micros(fix)}
+		b := &reportBasis{pages: pages, hubReports: hubReports, hubPots: hubPots, saleRefs: saleRefs, net: money.Micros(net), fix: money.Micros(fix)}
 		if rate.Valid {
 			v := rate.Float64
 			b.rate = &v
@@ -523,49 +535,40 @@ func planReports(ctx context.Context, q ledger.Querier, from string, now time.Ti
 		return nil, err
 	}
 
-	// A post edited so it is no longer a shift report (current = 0 with no current version of that message) retracts its
-	// day: if no other post answers for the tab day, it is released (not held as posted or by the sheet), so an unpaid day
-	// reverses its accrual and a paid day opens payroll_pending_changes.
+	// Compare page identities across versions of the same message. A blocked edit cannot
+	// release the previously booked day, even if it appears to name another person or date.
 	retracted := map[string]bool{}
-	rows, err = q.QueryContext(ctx, `SELECT o.person, o.report_date, o.model,
-		COALESCE((SELECT json_group_array(COALESCE(pp.page_label, '')) FROM shift_report_post_pages pp
-		  WHERE pp.post_id = o.id AND pp.in_shift = 1), '[]')
-		FROM shift_report_posts o
-		WHERE o.current = 0 AND o.person IS NOT NULL AND o.report_date >= ?
-		  AND NOT EXISTS (SELECT 1 FROM shift_report_posts c
-		                   WHERE c.peer = o.peer AND c.topic = o.topic AND c.msg_id = o.msg_id AND c.current = 1)`, from)
+	rows, err = q.QueryContext(ctx, `SELECT DISTINCT o.person,o.report_date,o.model,op.page_label,
+       EXISTS(SELECT 1 FROM json_each(c.flags) f WHERE f.value IN ('parse_error','unknown_author','no_date','sum_mismatch','date_mismatch'))
+       FROM shift_report_posts o JOIN shift_report_post_pages op ON op.post_id=o.id AND op.in_shift=1
+       LEFT JOIN shift_report_posts c ON c.peer=o.peer AND c.topic=o.topic AND c.msg_id=o.msg_id AND c.current=1
+       WHERE o.current=0 AND o.person IS NOT NULL AND o.report_date>=? AND op.page_label IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM json_each(o.flags) f WHERE f.value IN ('parse_error','unknown_author','no_date','sum_mismatch','date_mismatch'))
+         AND NOT EXISTS (SELECT 1 FROM shift_report_post_pages cp
+           WHERE cp.post_id=c.id AND cp.in_shift=1 AND cp.page_label=op.page_label
+             AND c.person=o.person AND c.report_date=o.report_date AND c.model=o.model COLLATE NOCASE)`, from)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
-		var person, date, topicModel, pagesText string
-		if err := rows.Scan(&person, &date, &topicModel, &pagesText); err != nil {
+		var person, date, model, label string
+		var blocked bool
+		if err := rows.Scan(&person, &date, &model, &label, &blocked); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		if hubDays[person+"\x00"+date] || (hubFrom != "" && date >= hubFrom && onBoard(spans, person, date)) {
 			continue
 		}
-		var labels []string
-		_ = json.Unmarshal([]byte(pagesText), &labels)
-		pageModels := map[string]bool{}
-		for _, label := range labels {
-			m := topicModel
-			if label != "" {
-				if hm, ok := models[label]; ok {
-					m = hm
-				}
-			}
-			if m != "" {
-				pageModels[m] = true
-			}
+		if mapped := models[label]; mapped != "" {
+			model = mapped
 		}
-		if len(pageModels) == 0 && topicModel != "" {
-			pageModels[topicModel] = true
-		}
-		for m := range pageModels {
-			if t, ok := tabOf[person+"\x00"+ledger.Slug(m)]; ok {
-				retracted[t.model+"/"+t.name+":"+date] = true
+		if t, ok := tabOf[person+"\x00"+ledger.Slug(model)]; ok {
+			key := t.model + "/" + t.name + ":" + date
+			if blocked {
+				hold(key, "правка отчёта не разобрана: день ждёт исправления")
+			} else {
+				retracted[key] = true
 			}
 		}
 	}
@@ -576,17 +579,24 @@ func planReports(ctx context.Context, q ledger.Querier, from string, now time.Ti
 
 	// A pot-only day can disappear when a distribution is reversed or held. Its booked basis identifies
 	// that withdrawal even when the current mirror no longer contains a payable line.
-	rows, err = q.QueryContext(ctx, `SELECT tab||':'||day FROM v_booked_report_days WHERE hub_pots<>'[]' AND day>=?`, from)
+	rows, err = q.QueryContext(ctx, `SELECT tab||':'||day, coalesce(json_array_length(pages)=0,0)
+        FROM v_booked_report_days WHERE day>=? AND hub_pots<>'[]'`, from)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var key string
-		if err := rows.Scan(&key); err != nil {
+		var potOnly bool
+		if err := rows.Scan(&key, &potOnly); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		retracted[key] = true
+		if potOnly {
+			retracted[key] = true
+		} else if w, ok := p.want[key]; ok && w.basis.pages == "[]" {
+			// An extant pot does not replace a missing shift report.
+			delete(reported, key)
+		}
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
@@ -643,24 +653,35 @@ func planReports(ctx context.Context, q ledger.Querier, from string, now time.Ti
 
 // Snapshot only sales on this model's pages. A version may cover several models.
 func reportSaleRefs(ctx context.Context, q ledger.Querier, from string) (map[[3]string]string, error) {
-	rows, err := q.QueryContext(ctx, `SELECT person,model,day,json_group_array(ref) FROM (
- SELECT DISTINCT l.person,p.model,l.report_date AS day,l.transaction_ref AS ref
+	rows, err := q.QueryContext(ctx, `SELECT DISTINCT l.person,p.model,l.report_date,l.transaction_ref
  FROM v_report_lines l JOIN v_report_pages p
  ON p.person=l.person AND p.report_date=l.report_date AND p.page=l.page_label AND p.accrue_micros IS NOT NULL
- WHERE l.counted=1 AND l.report_date>=? AND ((l.source='hub' AND p.basis='hub') OR (l.source='agent' AND p.basis<>'hub'))
- ORDER BY l.person,p.model,day,ref) GROUP BY person,model,day`, from)
+ WHERE l.counted=1 AND l.report_date>=? AND ((l.source='hub' AND p.basis='hub') OR (l.source='agent' AND p.basis='post' AND p.report_id=l.report_id))
+ ORDER BY l.transaction_ref`, from)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[[3]string]string{}
+	grouped := map[[3]string][]string{}
 	for rows.Next() {
 		var k [3]string
-		var refs string
-		if err := rows.Scan(&k[0], &k[1], &k[2], &refs); err != nil {
+		var ref string
+		if err := rows.Scan(&k[0], &k[1], &k[2], &ref); err != nil {
 			return nil, err
 		}
-		out[k] = refs
+		k[1] = ledger.Slug(k[1])
+		list := grouped[k]
+		if len(list) == 0 || list[len(list)-1] != ref {
+			grouped[k] = append(list, ref)
+		}
+	}
+	out := map[[3]string]string{}
+	for k, list := range grouped {
+		raw, err := json.Marshal(list)
+		if err != nil {
+			return nil, err
+		}
+		out[k] = string(raw)
 	}
 	return out, rows.Err()
 }

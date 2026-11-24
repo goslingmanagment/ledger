@@ -190,11 +190,36 @@ func TestPotPagesAreAtomicAndReversalsSurviveReplay(t *testing.T) {
 	if _, err = readPots(t, s, page); err != nil {
 		t.Fatal(err)
 	}
-	exec(t, s, `UPDATE hub_pot_distributions SET model_slug='unknown-demo'`)
-	if _, err = readPots(t, s, potPage{since: "4", next: "4"}); err != nil {
+	if got := cols(t, s, `SELECT state,seq FROM hub_pot_distributions`); got != "reversed 2" {
+		t.Fatal("higher-sequence post resurrected distribution", got)
+	}
+	fresh := distribution(5, "posted", cutDay, "alfa", 903)
+	fresh["distribution"].(map[string]any)["id"] = 74
+	fresh["distribution"].(map[string]any)["pot"].(map[string]any)["modelSlug"] = "unknown-demo"
+	if _, err = readPots(t, s, potPage{since: "4", next: "5", changes: []map[string]any{fresh}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = readPots(t, s, potPage{since: "5", next: "5"}); err != nil {
 		t.Fatal(err)
 	}
 	if err = hub.SetPotSharesFrom(ctx, s, cutDay, true, reportNow); err == nil || !strings.Contains(err.Error(), "модели") {
+		t.Fatal(err)
+	}
+}
+
+func savePotDraft(t *testing.T, s *db.Store, ctx context.Context, ref string) {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{"hub_username": "alfa", "report_date": cutDay, "source": "agent", "total_mills": 80000,
+		"window_from": cutDay + "T04:00:00+03:00", "window_to": cutDay + "T23:00:00+03:00", "cut_at": cutDay + "T22:50:00+03:00",
+		"pages": []any{map[string]any{"page": "page-a", "amount_mills": 80000}},
+		"lines": []any{map[string]any{"n": 1, "transaction_ref": ref, "page": "page-a", "net_mills": 80000, "counted": true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reports.Save(ctx, s, raw, "test", reportNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := reports.Changed(ctx, s, reportNow); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -210,30 +235,16 @@ func TestMultiSalePotHeldInBothOrders(t *testing.T) {
 			exec(t, s, `INSERT INTO events(source,source_id,kind,occurred_at,received_at,payload) VALUES('hub','demo-7000','transactions',?,?, '{}')`, cutDay, cutDay)
 			exec(t, s, `INSERT INTO hub_transactions(page_label,key,occurred_at,net_mills,currency,type,ref,fields,hash,event_id,first_seen_at,updated_at)
  VALUES('page-a','7000',?,12000,'USD','tip','demo-platform-sale','{}','h',(SELECT id FROM events WHERE source_id='demo-7000'),?,?)`, cutDay, cutDay, cutDay)
-			report := func() {
-				raw, err := json.Marshal(map[string]any{"hub_username": "alfa", "report_date": cutDay, "source": "agent", "total_mills": 80000,
-					"window_from": cutDay + "T04:00:00+03:00", "window_to": cutDay + "T23:00:00+03:00", "cut_at": cutDay + "T22:50:00+03:00",
-					"pages": []any{map[string]any{"page": "page-a", "amount_mills": 80000}},
-					"lines": []any{map[string]any{"n": 1, "transaction_ref": "demo-platform-sale", "page": "page-a", "net_mills": 80000, "counted": true}}})
-				if err != nil {
-					t.Fatal(err)
-				}
-				if _, err := reports.Save(ctx, s, raw, "test", reportNow); err != nil {
-					t.Fatal(err)
-				}
-				if err := reports.Changed(ctx, s, reportNow); err != nil {
-					t.Fatal(err)
-				}
-			}
+
 			pot := func() { deliverPot(t, s, 1, "posted", cutDay, "bravo", 7001, 7000) }
 			if potFirst {
 				pot()
 				if got := cols(t, s, `SELECT pot_micros FROM report_accruals WHERE person='bravo' AND day=?`, cutDay); got != "24000000" {
 					t.Fatal(got)
 				}
-				report()
+				savePotDraft(t, s, ctx, "demo-platform-sale")
 			} else {
-				report()
+				savePotDraft(t, s, ctx, "demo-platform-sale")
 				pot()
 			}
 			if !potFlag(t, s, "bravo", "7000", reportNow) || potFlag(t, s, "alfa", "7000", reportNow) || checks.HubPots(ctx, checks.Env{Q: s.RO, Now: reportNow}).OK {
@@ -425,5 +436,217 @@ func TestPersonalRecipientWaitsForPaidPotRemoval(t *testing.T) {
 	}
 	if potFlag(t, s, "alfa", "остаётся в проведённой раздаче", reportNow) {
 		t.Fatal("reversed entry still blocks person")
+	}
+}
+
+func TestDistributionMustBalanceBeforePageCommits(t *testing.T) {
+	s, _ := reportWeek(t)
+	for _, field := range []string{"lines", "inflows"} {
+		bad := distribution(2, "posted", cutDay, "alfa", 81)
+		d := bad["distribution"].(map[string]any)
+		d[field].([]map[string]any)[0]["baseMills"] = 11000
+		st, err := readPots(t, s, potPage{next: "2", changes: []map[string]any{distribution(1, "posted", cutDay, "bravo", 80), bad}})
+		if err == nil || st.Cursor != "" || st.State != "error" || count(t, s, `SELECT count(*) FROM hub_pot_distributions`) != 0 {
+			t.Fatalf("unbalanced %s: %+v, %v", field, st, err)
+		}
+	}
+}
+
+func TestPotProblemsFollowMoscowCutoverAndActiveModels(t *testing.T) {
+	s, ctx := reportBook(t)
+	tables(t, s, ctx, map[string]map[string][][]payroll.Cell{
+		"Alpha": {"Браво": pageTab(cutDay, "Page A", 0.25, 0, [7]any{})},
+		"Beta":  {"Альфа": pageTab(cutDay, "Page C", 0.2, 0, [7]any{})},
+	})
+	setReports(t, s, ctx, cutDay)
+	exec(t, s, `UPDATE settings SET value='2026-12-01' WHERE key='pot_shares_hub_from'`)
+	before := at("2026-11-30T20:59:59Z")
+	after := before.Add(time.Second)
+	for _, state := range []string{"error", "stale", "dirty"} {
+		exec(t, s, `UPDATE hub_pot_sync SET state='ok',error='',dirty=0,last_ok=?`, after.Format(time.RFC3339))
+		switch state {
+		case "error":
+			exec(t, s, `UPDATE hub_pot_sync SET state='error',error='fixture outage'`)
+		case "stale":
+			exec(t, s, `UPDATE hub_pot_sync SET last_ok='2026-11-22'`)
+		case "dirty":
+			exec(t, s, `UPDATE hub_pot_sync SET dirty=1`)
+		}
+		for _, person := range []string{"alfa", "bravo"} {
+			if potFlag(t, s, person, "", before) || !potFlag(t, s, person, "", after) {
+				t.Fatalf("%s, %s: first pot share must block only from the cutover", state, person)
+			}
+		}
+	}
+	exec(t, s, `UPDATE hub_pot_sync SET dirty=0`)
+	exec(t, s, `INSERT INTO hub_pot_distribution_held VALUES(1,21,'["page-a"]','page_outside_key')`)
+	if potFlag(t, s, "alfa", "", after) || !potFlag(t, s, "bravo", "page_outside_key", after) {
+		t.Fatal("held page must block only its model")
+	}
+}
+
+func TestPrepareKeepsUnpaidHeldShiftAndPotBreakdown(t *testing.T) {
+	s, ctx := reportWeek(t)
+	setReports(t, s, ctx, cutDay)
+	enablePots(t, s)
+	deliverPot(t, s, 1, "posted", cutDay, "alfa", 83)
+	brief, err := payroll.PreparePayout(ctx, s.RO, "alfa", reportNow)
+	if err != nil || !strings.Contains(brief.Message, "раздача 73") {
+		t.Fatal(brief.Message, err)
+	}
+	st, err := readPots(t, s, potPage{since: "1", next: "2", held: []map[string]any{{"seq": 2, "distributionId": 73, "reason": "page_outside_key", "pageLabels": []string{"page-a"}}}})
+	if err != nil || st.Held != 1 {
+		t.Fatal(st, err)
+	}
+	if got := cols(t, s, `SELECT pot_micros FROM report_accruals WHERE person='alfa' AND day=?`, cutDay); got != "0" {
+		t.Fatal(got)
+	}
+	held, err := payroll.PreparePayout(ctx, s.RO, "alfa", reportNow)
+	if err != nil || held.Message != brief.Message || held.AmountMicros != brief.AmountMicros {
+		t.Fatal(brief.Message, held.Message, err)
+	}
+}
+
+func TestMissingShiftDoesNotRetractMixedPotBooking(t *testing.T) {
+	s, ctx := reportWeek(t)
+	setReports(t, s, ctx, cutDay)
+	enablePots(t, s)
+	deliverPot(t, s, 1, "posted", cutDay, "alfa", 84)
+	want := dayOf(t, s, "alfa", cutDay)
+	// Simulate missing report pages without an authoritative message edit.
+	exec(t, s, `DELETE FROM shift_report_post_pages WHERE post_id IN (SELECT id FROM shift_report_posts WHERE person='alfa')`)
+	if _, err := payroll.Rebuild(ctx, s, reportNow); err != nil {
+		t.Fatal(err)
+	}
+	if got := dayOf(t, s, "alfa", cutDay); got != want {
+		t.Fatalf("remaining pot replaced missing shift: %s -> %s", want, got)
+	}
+	deliverPot(t, s, 2, "reversed", cutDay, "alfa", 84)
+	if got := dayOf(t, s, "alfa", cutDay); got != want {
+		t.Fatalf("missing shift+pot released: %s -> %s", want, got)
+	}
+}
+
+func TestShadowPotChecksAndCleanRollback(t *testing.T) {
+	s, ctx := reportWeek(t)
+	check := func() bool { return checks.HubPots(ctx, checks.Env{Q: s.RO, Now: reportNow}).OK }
+	if _, err := readPots(t, s, potPage{status: 500}); err == nil || check() {
+		t.Fatal("shadow server error passed")
+	}
+	if _, err := readPots(t, s, potPage{next: "0"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readPots(t, s, potPage{since: "0", status: 404}); err == nil || check() {
+		t.Fatal("shadow 404 after first read passed")
+	}
+	if _, err := readPots(t, s, potPage{since: "0", next: "0"}); err != nil {
+		t.Fatal(err)
+	}
+	declare(t, s, ctx, "demo-removed", "Тест", "Alpha", []string{"page-a"}, "alfa")
+	potSale(t, s, ctx, "demo-removed", "demo-ref", "page-a", cutDay+"T12:00:00+03:00", 7)
+	exec(t, s, `UPDATE pot_sales SET removed_at=?`, cutDay)
+	if err := hub.SetPotSharesFrom(ctx, s, cutDay, false, reportNow); err != nil {
+		t.Fatal(err)
+	}
+	for _, change := range []string{"dirty=1", "last_ok=NULL", "last_ok='2001-01-01'", "state='error',error='fixture'"} {
+		exec(t, s, `UPDATE hub_pot_sync SET `+change)
+		if err := hub.SetPotSharesFrom(ctx, s, "", false, reportNow); err == nil {
+			t.Fatalf("disabled with %s", change)
+		}
+		exec(t, s, `UPDATE hub_pot_sync SET dirty=0,state='ok',error='',last_ok=?`, reportNow.Format(time.RFC3339))
+	}
+}
+
+func TestMixedCaseModelCombinesReportVersionsRefsAndPot(t *testing.T) {
+	for _, mapping := range []string{"", `{"aLpHa":"Alpha"}`} {
+		s, ctx := reportWeek(t)
+		exec(t, s, `UPDATE settings SET value=? WHERE key='hub_model_slugs'`, mapping)
+		exec(t, s, `UPDATE hub_pages SET model_slug=CASE page_label WHEN 'page-a' THEN 'aLPhA' ELSE 'ALPHA' END WHERE page_label IN ('page-a','page-b')`)
+		setReports(t, s, ctx, cutDay)
+		setHub(t, s, ctx, cutDay)
+		enablePots(t, s)
+		handIn(t, s, hubVersion(41, 11, 1, "alfa", cutDay, hubPage{"page-a", 4}), hubVersion(42, 12, 1, "alfa", cutDay, hubPage{"page-b", 8}))
+		c := distribution(1, "posted", cutDay, "alfa", 121)
+		d := c["distribution"].(map[string]any)
+		d["pot"].(map[string]any)["modelSlug"] = "AlPhA"
+		d["formula"].(map[string]any)["kind"] = "fixture-future"
+		if _, err := readPots(t, s, potPage{since: "0", next: "1", changes: []map[string]any{c}}); err != nil {
+			t.Fatal(err)
+		}
+		if got := cols(t, s, `SELECT net_micros,hub_reports,sale_refs,json_array_length(pages),json_extract(hub_pots,'$[0].basis') FROM v_booked_report_days WHERE person='alfa' AND day=?`, cutDay); got != `24000000 [41,42] ["4100","4200"] 2 fixture-future` {
+			t.Fatal(mapping, got)
+		}
+		if potFlag(t, s, "alfa", "", reportNow) {
+			t.Fatal("canonical distribution incorrectly held")
+		}
+	}
+}
+
+func TestInactiveDraftLinesDoNotReservePotSales(t *testing.T) {
+	for _, mode := range []string{"hub basis", "superseded"} {
+		t.Run(mode, func(t *testing.T) {
+			s, ctx := reportWeek(t)
+			setReports(t, s, ctx, cutDay)
+			setHub(t, s, ctx, cutDay)
+			enablePots(t, s)
+			if mode == "hub basis" {
+				handIn(t, s, hubVersion(52, 10, 1, "alfa", cutDay, hubPage{"page-a", 8}))
+			}
+			savePotDraft(t, s, ctx, "demo-shadow-ref")
+			if mode == "superseded" {
+				exec(t, s, `UPDATE shift_reports SET status='superseded' WHERE source='agent'`)
+				if err := reports.Changed(ctx, s, reportNow); err != nil {
+					t.Fatal(err)
+				}
+			}
+			deliverPot(t, s, 1, "posted", cutDay, "bravo", 91)
+			// An unresolved reference on this page must not hold the pot.
+			if got := cols(t, s, `SELECT pot_micros FROM report_accruals WHERE person='bravo' AND day=?`, cutDay); got != "12000000" {
+				t.Fatal(got)
+			}
+			exec(t, s, `INSERT INTO events(source,source_id,kind,occurred_at,received_at,payload) VALUES('hub','fixture-inflow','transactions',?,?, '{}')`, cutDay, cutDay)
+			exec(t, s, `INSERT INTO hub_transactions(page_label,key,occurred_at,net_mills,currency,type,ref,fields,hash,event_id,first_seen_at,updated_at)
+ VALUES('page-a','91',?,12000,'USD','tip','demo-shadow-ref','{}','h',(SELECT id FROM events WHERE source_id='fixture-inflow'),?,?)`, cutDay, cutDay, cutDay)
+			if potFlag(t, s, "alfa", "", reportNow) || potFlag(t, s, "bravo", "", reportNow) {
+				t.Fatal("inactive draft claimed a booked pot")
+			}
+		})
+	}
+}
+
+func TestRebuildScopesHeldAndUnavailablePotFeed(t *testing.T) {
+	s, ctx := reportBook(t)
+	tables(t, s, ctx, map[string]map[string][][]payroll.Cell{
+		"Beta":  {"Альфа": pageTab(cutDay, "Page C", 0.25, 0, [7]any{})},
+		"Alpha": {"Браво": pageTab(cutDay, "Page A", 0.2, 0, [7]any{})},
+	})
+	setReports(t, s, ctx, cutDay)
+	post(t, s, 51, "501", cutDay, postText(cutDay, "", "C - $8"))
+	post(t, s, 52, "502", cutDay, postText(cutDay, "", "A - $10"))
+	enablePots(t, s)
+	if _, err := readPots(t, s, potPage{since: "0", next: "2", held: []map[string]any{{"seq": 2, "distributionId": 73, "pageLabels": []string{"page-c"}, "reason": "page_outside_key"}}}); err != nil {
+		t.Fatal(err)
+	}
+	post(t, s, 51, "501", cutDay, postText(cutDay, "", "C - $12"))
+	post(t, s, 52, "502", cutDay, postText(cutDay, "", "A - $15"))
+	if got := dayOf(t, s, "alfa", cutDay); got != "2000000 0 2000000 reports" {
+		t.Fatal("held model changed", got)
+	}
+	if got := dayOf(t, s, "bravo", cutDay); got != "3000000 0 3000000 reports" {
+		t.Fatal("unrelated model held", got)
+	}
+	if _, err := readPots(t, s, potPage{since: "2", status: 404}); err == nil {
+		t.Fatal("missing feed passed")
+	}
+	post(t, s, 52, "502", cutDay, postText(cutDay, "", "A - $20"))
+	if got := dayOf(t, s, "bravo", cutDay); got != "3000000 0 3000000 reports" {
+		t.Fatal("unknown first pot did not hold tab", got)
+	}
+	// Simulate a report for tomorrow posted on the evening before the switch.
+	if _, err := payroll.Rebuild(ctx, s, at("2026-11-09T23:59:59+03:00")); err != nil {
+		t.Fatal(err)
+	}
+	if got := dayOf(t, s, "bravo", cutDay); got != "4000000 0 4000000 reports" {
+		t.Fatal("future cutover held the rebuild", got)
 	}
 }

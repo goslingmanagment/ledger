@@ -164,13 +164,18 @@ func (s HomesStatus) Problem(now time.Time) string {
 
 func init() {
 	server.Every("hub-homes", 5*time.Minute, func(ctx context.Context, s *server.Server) error {
-		cfg, err := ConfigFromEnv()
-		if err != nil {
-			return err
-		}
-		_, err = SyncSaleHomes(ctx, s.Store, NewClient(cfg, nil), time.Now())
+		_, err := SyncConfiguredHomes(ctx, s.Store, time.Now())
 		return err
 	})
+}
+
+func SyncConfiguredHomes(ctx context.Context, store *db.Store, now time.Time) (HomesStatus, error) {
+	cfg, err := ConfigFromEnv()
+	if err != nil {
+		_, saveErr := store.RW.ExecContext(ctx, `UPDATE hub_sale_homes_sync SET state='error',error=?,generation=generation+1 WHERE singleton=1`, err.Error())
+		return HomesStatus{}, errors.Join(err, saveErr)
+	}
+	return SyncSaleHomes(ctx, store, NewClient(cfg, nil), now)
 }
 
 // SyncSaleHomes publishes each page, its held snapshot and its cursor together. Only the final page
@@ -219,7 +224,10 @@ func syncHomes(ctx context.Context, store *db.Store, c *Client, now time.Time) (
 			return saveHomesPage(ctx, tx, page, now)
 		})
 		if err != nil {
-			return st, err
+			recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			_, saveErr := store.RW.ExecContext(recordCtx, `UPDATE hub_sale_homes_sync SET state='error',error=?,generation=generation+1 WHERE singleton=1 AND generation=?`, err.Error(), st.generation)
+			cancel()
+			return st, errors.Join(err, saveErr)
 		}
 		if state != "reading" || readErr != nil {
 			st, err = ReadHomesStatus(ctx, store.RO)
