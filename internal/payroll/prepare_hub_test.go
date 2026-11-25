@@ -222,6 +222,19 @@ func TestPrepareHubDecisionSplitPerPersonAndDepartedApplied(t *testing.T) {
 	if got := flagsOfKind(prepare(t, s, "bravo", "2026-11-19T10:30:00+03:00"), "hub_decision"); len(got) != 0 {
 		t.Fatalf("post-day split with applied mark should clear bravo (v3), got %+v", got)
 	}
+
+	// Per-recipient applied_deliveries clears only the acknowledged recipient while keeping the other blocked.
+	putHubSale(t, s, "8003", "pf-8003", "page-1", "2026-11-18T15:00:00+03:00", 60_000)
+	putHubDecision(t, s, 12, strPtr("8003"), "page-1", "split",
+		`[{"person":"alfa","userId":1,"percent":50},{"person":"bravo","userId":2,"percent":50}]`,
+		"active", "2026-11-18T16:00:00+03:00", nil, nil)
+	execSQL(t, s, `UPDATE hub_sale_decisions SET applied_deliveries = '[{"person":"alfa","reportDate":"2026-11-18"}]' WHERE id = 12`)
+	if got := flagsOfKind(prepare(t, s, "alfa", "2026-11-19T10:30:00+03:00"), "hub_decision"); len(got) != 0 {
+		t.Fatalf("alfa acknowledged in applied_deliveries should have no blocker, got %+v", got)
+	}
+	if got := flagsOfKind(prepare(t, s, "bravo", "2026-11-19T10:30:00+03:00"), "hub_decision"); len(got) != 1 || !got[0].Blocker {
+		t.Fatalf("bravo not in applied_deliveries must remain blocked, got %+v", got)
+	}
 }
 
 // Disputed line with zero amount and NULL claimed_micros still surfaces as a blocker;

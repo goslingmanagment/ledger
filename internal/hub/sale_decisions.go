@@ -68,9 +68,10 @@ type SaleDecision struct {
 	SaidBy           *string              `json:"saidBy"`
 	SaidAt           *string              `json:"saidAt"`
 	DecidedAt        string               `json:"decidedAt"`
-	Note             *string              `json:"note"`
-	Applied          *SaleDecisionApplied `json:"applied"`
-	LedgerDecisionID *int64               `json:"ledgerDecisionId"`
+	Note              *string               `json:"note"`
+	Applied           *SaleDecisionApplied  `json:"applied"`
+	AppliedDeliveries []SaleDecisionApplied `json:"appliedDeliveries,omitempty"`
+	LedgerDecisionID  *int64                `json:"ledgerDecisionId"`
 }
 
 // SaleDecisionChange is one change in the feed.

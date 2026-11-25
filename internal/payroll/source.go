@@ -569,10 +569,8 @@ func planReports(ctx context.Context, q ledger.Querier, from string, now time.Ti
 		}
 		if t, ok := tabOf[person+"\x00"+ledger.Slug(model)]; ok {
 			key := t.model + "/" + t.name + ":" + date
-			if blocked {
-				if latestPrior {
-					hold(key, "правка отчёта не разобрана: день ждёт исправления")
-				}
+			if blocked && latestPrior {
+				hold(key, "правка отчёта не разобрана: день ждёт исправления")
 			} else {
 				retracted[key] = true
 			}
