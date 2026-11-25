@@ -78,15 +78,16 @@ func hubFlagWindow(ctx context.Context, q ledger.Querier, b *PayoutBrief, today 
 }
 
 type hubDecisionRow struct {
-	id                int64
-	txRef             string
-	pageLabel         string
-	kind              string
-	sharesRaw         string
-	saidAt            string
-	decidedAt         string
-	appliedPerson     string
-	appliedReportDate string
+	id                   int64
+	txRef                string
+	pageLabel            string
+	kind                 string
+	sharesRaw            string
+	saidAt               string
+	decidedAt            string
+	appliedPerson        string
+	appliedReportDate    string
+	appliedDeliveriesRaw string
 }
 
 type hubSaleInfo struct {
@@ -116,7 +117,8 @@ func hubDecisionFlags(ctx context.Context, q ledger.Querier, slug string, card P
 		return err
 	}
 	rows, err := q.QueryContext(ctx, `SELECT id, COALESCE(transaction_ref, ''), COALESCE(page_label, ''), kind, shares,
-		COALESCE(said_at, ''), COALESCE(decided_at, ''), COALESCE(applied_person, ''), COALESCE(applied_report_date, '')
+		COALESCE(said_at, ''), COALESCE(decided_at, ''), COALESCE(applied_person, ''), COALESCE(applied_report_date, ''),
+		COALESCE(applied_deliveries, '[]')
 		FROM hub_sale_decisions WHERE state = ? AND kind IN (?, ?, ?, ?) ORDER BY id`,
 		hub.SaleDecisionActive, hub.SaleDecisionOwner, hub.SaleDecisionSplit, hub.SaleDecisionExclude, hub.SaleDecisionPot)
 	if err != nil {
@@ -126,7 +128,7 @@ func hubDecisionFlags(ctx context.Context, q ledger.Querier, slug string, card P
 	for rows.Next() {
 		var d hubDecisionRow
 		if err := rows.Scan(&d.id, &d.txRef, &d.pageLabel, &d.kind, &d.sharesRaw, &d.saidAt, &d.decidedAt,
-			&d.appliedPerson, &d.appliedReportDate); err != nil {
+			&d.appliedPerson, &d.appliedReportDate, &d.appliedDeliveriesRaw); err != nil {
 			rows.Close()
 			return err
 		}
@@ -229,20 +231,37 @@ func hubDecisionFlags(ctx context.Context, q ledger.Querier, slug string, card P
 			continue
 		}
 
+		var appliedDeliveries []hub.SaleDecisionApplied
+		if d.appliedDeliveriesRaw != "" && d.appliedDeliveriesRaw != "[]" {
+			if err := json.Unmarshal([]byte(d.appliedDeliveriesRaw), &appliedDeliveries); err != nil {
+				return fmt.Errorf("hub_sale_decisions %d: applied_deliveries: %w", d.id, err)
+			}
+		}
+		appliedForMe := d.appliedPerson == slug
+		if !appliedForMe {
+			for _, del := range appliedDeliveries {
+				if del.Person != nil && *del.Person == slug {
+					appliedForMe = true
+					break
+				}
+			}
+		}
+
 		netKnown := info.netKnown || lineNet != 0
 		expectedMicros := netMicros/100*int64(myPercent) + (netMicros%100)*int64(myPercent)/100
 		countedOK := d.txRef != "" && shareCounted(countedMicros, expectedMicros, netKnown)
 		hubDay := hubDayOf(saleDay)
 		if hubDay {
 			// On a Hub-basis day, each participant's share is verified against their own active Hub report; an explicit
-			// application can account for an absent line, but cannot correct a mismatched amount.
-			if countedOK || (countedMicros == 0 && d.appliedPerson == slug) {
+			// per-recipient application can account for an absent line, but cannot correct a mismatched amount.
+			if countedOK || (countedMicros == 0 && appliedForMe) {
 				continue
 			}
 		} else {
-			// On a post-basis day, Hub carries one applied mark per decision (the second participant of a post-day split
-			// is verified manually); a share already carried over into a later Hub-basis report also counts.
-			if countedOK || (countedMicros == 0 && (d.appliedPerson != "" || d.appliedReportDate != "")) {
+			// On a post-basis day, per-recipient appliedDeliveries clear only the confirmed recipient when present;
+			// legacy single-receipt decisions without appliedDeliveries fall back to applied_person / applied_report_date.
+			legacyApplied := len(appliedDeliveries) == 0 && (d.appliedPerson != "" || d.appliedReportDate != "")
+			if countedOK || (countedMicros == 0 && (appliedForMe || legacyApplied)) {
 				continue
 			}
 		}

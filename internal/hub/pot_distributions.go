@@ -177,6 +177,45 @@ func SyncConfiguredPots(ctx context.Context, store *db.Store, now time.Time) (Po
 	return SyncPotDistributions(ctx, store, NewClient(cfg, nil), now)
 }
 
+// ProbeConfiguredPotsForOff checks Hub's live pot-distributions feed read-only (for --off --dry-run)
+// without writing cursor state, distributions, error rows, or triggering accrual recalculations.
+func ProbeConfiguredPotsForOff(ctx context.Context, q ledger.Querier, now time.Time) error {
+	st, err := ReadPotStatus(ctx, q)
+	if err != nil || st.From == "" {
+		return err
+	}
+	cfg, err := ConfigFromEnv()
+	if err != nil {
+		return err
+	}
+	return ProbePotDistributionsForOff(ctx, q, NewClient(cfg, nil), st, now)
+}
+
+func ProbePotDistributionsForOff(ctx context.Context, _ ledger.Querier, c *Client, st PotStatus, _ time.Time) error {
+	if st.From == "" {
+		return nil
+	}
+	cursor := st.Cursor
+	for {
+		p, err := c.potPage(ctx, cursor)
+		if err != nil {
+			return err
+		}
+		if len(p.Held) > 0 {
+			return fmt.Errorf("Workboard придержал раздачи: %d", len(p.Held))
+		}
+		for _, ch := range p.Changes {
+			if ch.Distribution.Day >= st.From {
+				return fmt.Errorf("с %s в Workboard уже есть раздачи (живая проверка): остановите раздачи Workboard, сверьте начисления и оформите компенсации", st.From)
+			}
+		}
+		cursor = p.Next
+		if !*p.More {
+			return nil
+		}
+	}
+}
+
 var errPotReader = errors.New("раздачи уже прочитаны другим процессом")
 
 func SyncPotDistributions(ctx context.Context, store *db.Store, c *Client, now time.Time) (PotStatus, error) {

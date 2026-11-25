@@ -1103,4 +1103,43 @@ func TestBlockedEditDoesNotReholdOlderSupersededDate(t *testing.T) {
 	if len(heldDays) != 1 || heldDays[0] != day2 {
 		t.Fatalf("expected only %s held after blocked edit, got %v", day2, heldDays)
 	}
+
+	// Same scenario when day1 was the SOLE posted report and moved to day2 then broke BEFORE recalculation
+	// (two edits delivered in one events.Accept batch): day1 must be marked retracted (not held as missing report)
+	// while day2 is held as unparsed edit.
+	const soloD1, soloD2 = "2026-11-12", "2026-11-13"
+	post(t, s, 71, "502", soloD1, postText(soloD1, "", "A - $15"))
+	if got := dayOf(t, s, "bravo", soloD1); got == "" {
+		t.Fatal("expected soloD1 booked before edits")
+	}
+	eValid := reports.PostEvent{Peer: reportPeer, Topic: 4, MsgID: 71, Date: soloD1 + "T23:30:00+03:00",
+		EditedAt: "2026-11-15T19:00:00+03:00", Sender: "tg user", SenderID: "502", Text: postText(soloD2, "", "A - $15")}
+	eBroken := reports.PostEvent{Peer: reportPeer, Topic: 4, MsgID: 71, Date: soloD1 + "T23:30:00+03:00",
+		EditedAt: "2026-11-15T19:05:00+03:00", Sender: "tg user", SenderID: "502", Text: "Общий доход: $15"}
+	pValid, _ := json.Marshal(eValid)
+	pBroken, _ := json.Marshal(eBroken)
+	if ans, err := events.Accept(ctx, s, []events.Event{
+		{Source: reports.PostSource, SourceID: reports.PostSourceID(reportPeer, 4, 71, eValid.Text, eValid.EditedAt),
+			Kind: reports.PostKindPost, OccurredAt: eValid.Date, Payload: pValid},
+		{Source: reports.PostSource, SourceID: reports.PostSourceID(reportPeer, 4, 71, eBroken.Text, eBroken.EditedAt),
+			Kind: reports.PostKindPost, OccurredAt: eBroken.Date, Payload: pBroken},
+	}, reportNow); err != nil || len(ans.Settle) > 0 {
+		t.Fatalf("accept batch edits: %v %v", err, ans.Settle)
+	}
+	var bravoHeld []string
+	rows2, err := s.RO.QueryContext(ctx, `SELECT date FROM payroll_unentered WHERE person='bravo' AND status='unknown' AND reason LIKE 'по отчёту не начислено%' AND date IN (?,?) ORDER BY date`, soloD1, soloD2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows2.Close()
+	for rows2.Next() {
+		var d string
+		if err := rows2.Scan(&d); err != nil {
+			t.Fatal(err)
+		}
+		bravoHeld = append(bravoHeld, d)
+	}
+	if len(bravoHeld) != 1 || bravoHeld[0] != soloD2 {
+		t.Fatalf("expected only %s held for bravo after D1->D2->broken edit, got %v", soloD2, bravoHeld)
+	}
 }

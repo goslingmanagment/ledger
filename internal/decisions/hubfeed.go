@@ -229,6 +229,11 @@ func keepDecision(ctx context.Context, tx *sql.Tx, ch hub.SaleDecisionChange, no
 		shares = []hub.SaleDecisionShare{}
 	}
 	sh, _ := json.Marshal(shares)
+	appliedDeliveries := d.AppliedDeliveries
+	if appliedDeliveries == nil {
+		appliedDeliveries = []hub.SaleDecisionApplied{}
+	}
+	ad, _ := json.Marshal(appliedDeliveries)
 	var ref, appliedPerson, appliedDate any
 	if d.TransactionID != nil {
 		ref = strconv.FormatInt(*d.TransactionID, 10)
@@ -237,12 +242,13 @@ func keepDecision(ctx context.Context, tx *sql.Tx, ch hub.SaleDecisionChange, no
 		appliedPerson, appliedDate = d.Applied.Person, d.Applied.ReportDate
 	}
 	res, err := tx.ExecContext(ctx, `INSERT INTO hub_sale_decisions(id, transaction_ref, page_label, kind, shares, pot, outcome, rule_home,
-		state, source, said_by, said_at, decided_at, note, applied_person, applied_report_date, ledger_decision_id, seq, change,
-		changed_at, read_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		state, source, said_by, said_at, decided_at, note, applied_person, applied_report_date, applied_deliveries, ledger_decision_id, seq, change,
+		changed_at, read_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET transaction_ref = excluded.transaction_ref, page_label = excluded.page_label, kind = excluded.kind,
 		  shares = excluded.shares, pot = excluded.pot, outcome = excluded.outcome, rule_home = excluded.rule_home, state = excluded.state,
 		  source = excluded.source, said_by = excluded.said_by, said_at = excluded.said_at, decided_at = excluded.decided_at,
 		  note = excluded.note, applied_person = excluded.applied_person, applied_report_date = excluded.applied_report_date,
+		  applied_deliveries = excluded.applied_deliveries,
 		  ledger_decision_id = excluded.ledger_decision_id,
 		  seq = max(hub_sale_decisions.seq, excluded.seq),
 		  change = CASE WHEN excluded.seq >= hub_sale_decisions.seq THEN excluded.change ELSE hub_sale_decisions.change END,
@@ -257,9 +263,10 @@ func keepDecision(ctx context.Context, tx *sql.Tx, ch hub.SaleDecisionChange, no
 		   OR hub_sale_decisions.said_at IS NOT excluded.said_at OR hub_sale_decisions.decided_at IS NOT excluded.decided_at
 		   OR hub_sale_decisions.note IS NOT excluded.note OR hub_sale_decisions.applied_person IS NOT excluded.applied_person
 		   OR hub_sale_decisions.applied_report_date IS NOT excluded.applied_report_date
+		   OR hub_sale_decisions.applied_deliveries IS NOT excluded.applied_deliveries
 		   OR hub_sale_decisions.ledger_decision_id IS NOT excluded.ledger_decision_id`,
 		d.ID, ref, d.PageLabel, d.Kind, string(sh), d.Pot, d.Outcome, d.RuleHome, d.State, d.Source, d.SaidBy, mskTimePtr(d.SaidAt),
-		mskTime(d.DecidedAt), d.Note, appliedPerson, appliedDate, d.LedgerDecisionID, ch.Seq, ch.Change, mskTime(ch.At), ts.Format(now))
+		mskTime(d.DecidedAt), d.Note, appliedPerson, appliedDate, string(ad), d.LedgerDecisionID, ch.Seq, ch.Change, mskTime(ch.At), ts.Format(now))
 	if err != nil {
 		return 0, err
 	}
