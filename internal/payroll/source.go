@@ -477,7 +477,7 @@ func planReports(ctx context.Context, q ledger.Querier, from string, now time.Ti
 			rows.Close()
 			return nil, err
 		}
-		if hubDays[person+"\x00"+date] {
+		if hubDays[person+"\x00"+date] || (hubFrom != "" && date >= hubFrom && onBoard(spans, person, date)) {
 			continue
 		}
 		var flags []string
@@ -536,10 +536,14 @@ func planReports(ctx context.Context, q ledger.Querier, from string, now time.Ti
 	}
 
 	// Compare page identities across versions of the same message. A blocked edit cannot
-	// release the previously booked day, even if it appears to name another person or date.
+	// release the day previously held by the latest unblocked version, without re-holding
+	// older historical dates that an earlier valid edit already moved away from.
 	retracted := map[string]bool{}
 	rows, err = q.QueryContext(ctx, `SELECT DISTINCT o.person,o.report_date,o.model,op.page_label,
-       EXISTS(SELECT 1 FROM json_each(c.flags) f WHERE f.value IN ('parse_error','unknown_author','no_date','sum_mismatch','date_mismatch'))
+       EXISTS(SELECT 1 FROM json_each(c.flags) f WHERE f.value IN ('parse_error','unknown_author','no_date','sum_mismatch','date_mismatch')),
+       o.id = (SELECT MAX(p2.id) FROM shift_report_posts p2
+               WHERE p2.peer=o.peer AND p2.topic=o.topic AND p2.msg_id=o.msg_id AND p2.current=0
+                 AND NOT EXISTS (SELECT 1 FROM json_each(p2.flags) f WHERE f.value IN ('parse_error','unknown_author','no_date','sum_mismatch','date_mismatch')))
        FROM shift_report_posts o JOIN shift_report_post_pages op ON op.post_id=o.id AND op.in_shift=1
        LEFT JOIN shift_report_posts c ON c.peer=o.peer AND c.topic=o.topic AND c.msg_id=o.msg_id AND c.current=1
        WHERE o.current=0 AND o.person IS NOT NULL AND o.report_date>=? AND op.page_label IS NOT NULL
@@ -552,8 +556,8 @@ func planReports(ctx context.Context, q ledger.Querier, from string, now time.Ti
 	}
 	for rows.Next() {
 		var person, date, model, label string
-		var blocked bool
-		if err := rows.Scan(&person, &date, &model, &label, &blocked); err != nil {
+		var blocked, latestPrior bool
+		if err := rows.Scan(&person, &date, &model, &label, &blocked, &latestPrior); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -566,7 +570,9 @@ func planReports(ctx context.Context, q ledger.Querier, from string, now time.Ti
 		if t, ok := tabOf[person+"\x00"+ledger.Slug(model)]; ok {
 			key := t.model + "/" + t.name + ":" + date
 			if blocked {
-				hold(key, "правка отчёта не разобрана: день ждёт исправления")
+				if latestPrior {
+					hold(key, "правка отчёта не разобрана: день ждёт исправления")
+				}
 			} else {
 				retracted[key] = true
 			}

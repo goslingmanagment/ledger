@@ -456,7 +456,7 @@ func salesOf(p *PersonDiff, day string, homes []homeRow, names map[string]string
 				if h.day == day {
 					var amount *int64
 					if r := p.terms[key{h.user, h.model, h.page, h.day}]; r.v != nil {
-						v := int64(money.FromFloat(float64(float64(h.share)/money.Scale) * *r.v))
+						v := money.ShareRate(h.share, *r.v)
 						amount = &v
 					}
 					out = append(out, line("+", h, amount, ""))
@@ -492,7 +492,7 @@ func claimedOf(p *PersonDiff, week, until string, homes []homeRow) []SaleLine {
 		}
 		var amount *int64
 		if r := p.terms[key{h.user, h.model, h.page, h.day}]; r.v != nil {
-			v := int64(money.FromFloat(float64(float64(h.share)/money.Scale) * *r.v))
+			v := money.ShareRate(h.share, *r.v)
 			amount = &v
 		}
 		l := line("+", h, amount, "")

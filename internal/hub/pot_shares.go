@@ -164,56 +164,77 @@ func PotTabHolds(ctx context.Context, q ledger.Querier, st PotStatus, person str
 	return out, rows.Err()
 }
 
-// PotProblems is shared by health (all people) and payout prepare (one person).
+// PotProblems is shared by health (all people) and callers needing every pot problem as a blocker.
 func PotProblems(ctx context.Context, q ledger.Querier, person string, now time.Time) ([]string, error) {
+	blockers, _, err := PotPayoutProblems(ctx, q, person, "", now)
+	return blockers, err
+}
+
+// PotPayoutProblems separates blocking pot problems from non-blocking notes for one person's payout prepare.
+// When periodTo is non-empty and strictly before pot_shares_hub_from (all unpaid days of the person are pre-cutover),
+// a general K2 feed outage/stale/dirty state is returned as a non-blocking note rather than a payout blocker;
+// model-specific held distributions, distribution conflicts, and personal-sale overlaps remain blockers.
+func PotPayoutProblems(ctx context.Context, q ledger.Querier, person, periodTo string, now time.Time) (blockers, notes []string, err error) {
 	st, err := ReadPotStatus(ctx, q)
 	if err != nil || st.From == "" || (person != "" && ts.Date(now) < st.From) {
-		return nil, err
+		return nil, nil, err
 	}
+	allBeforeCutover := person != "" && periodTo != "" && periodTo < st.From
+	const dirtyMsg = "раздачи Workboard ожидают пересчёта начислений"
+	generalWhy := st.FeedProblem(now)
 	var out []string
 	if person != "" {
 		tabs, err := PotTabHolds(ctx, q, st, person, now)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		seen := map[string]bool{}
+		seenBlock := map[string]bool{}
+		seenNote := map[string]bool{}
 		for _, reasons := range tabs {
 			for _, why := range reasons {
-				if !seen[why] {
+				if allBeforeCutover && (why == generalWhy || why == dirtyMsg) {
+					if !seenNote[why] {
+						notes = append(notes, why)
+						seenNote[why] = true
+					}
+					continue
+				}
+				if !seenBlock[why] {
 					out = append(out, why)
-					seen[why] = true
+					seenBlock[why] = true
 				}
 			}
 		}
 		sort.Strings(out)
+		sort.Strings(notes)
 	} else {
-		if why := st.FeedProblem(now); why != "" {
-			out = append(out, why)
+		if generalWhy != "" {
+			out = append(out, generalWhy)
 		}
 		if st.Dirty {
-			out = append(out, "раздачи Workboard ожидают пересчёта начислений")
+			out = append(out, dirtyMsg)
 		}
 		rows, err := q.QueryContext(ctx, `SELECT distribution_id,page_labels_json,reason FROM hub_pot_distribution_held ORDER BY seq`)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		for rows.Next() {
 			var id int64
 			var pages, why string
 			if err := rows.Scan(&id, &pages, &why); err != nil {
 				rows.Close()
-				return nil, err
+				return nil, nil, err
 			}
 			out = append(out, fmt.Sprintf("раздача %d, %s: %s", id, pages, why))
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	lines, err := PotLines(ctx, q, st.From)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for _, l := range lines {
 		// Held distributions are already attributed to the tabs of the affected models.
@@ -224,7 +245,7 @@ func PotProblems(ctx context.Context, q ledger.Querier, person string, now time.
 			if err := q.QueryRowContext(ctx, `SELECT coalesce((SELECT coalesce(a.reason,'') FROM report_accruals a,json_each(a.pots) j
  WHERE a.person=? AND a.model=? COLLATE NOCASE AND a.day=? AND j.value->>'distributionId'=? AND j.value->>'micros'=?),
  'раздача ожидает пересчёта начисления')`, l.Person, l.Model, l.Day, l.DistributionID, l.Micros).Scan(&l.Problem); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 		if l.Problem != "" {
@@ -237,18 +258,18 @@ func PotProblems(ctx context.Context, q ledger.Querier, person string, now time.
  JOIN (`+activePersonalLines+`) r ON `+SameSaleSQL("r.transaction_ref", "CAST(i.transaction_id AS TEXT)")+`
  WHERE (?='' OR r.person=?) ORDER BY r.who,i.transaction_id,i.distribution_id`, person, person)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var who string
 		var sale, id int64
 		if err := rows.Scan(&who, &sale, &id); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		out = append(out, fmt.Sprintf("%s: продажа %d из отчёта остаётся в проведённой раздаче %d", who, sale, id))
 	}
-	return out, rows.Err()
+	return out, notes, rows.Err()
 }
 
 func SetPotSharesFrom(ctx context.Context, store *db.Store, day string, dry bool, now time.Time) error {

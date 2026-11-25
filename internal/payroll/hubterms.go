@@ -101,7 +101,9 @@ func (h HubTerm) Rate() float64 { return float64(h.ShareBP) / 10_000 }
 // Terms are the term on a tab of the person: the tab says where the day is posted, the registry what it is paid.
 func (h HubTerm) Terms(tab Terms) Terms {
 	r := h.Rate()
-	return Terms{Model: tab.Model, Name: tab.Name, Person: tab.Person, Rate: &r, ShiftFix: float64(h.FixMicros) / money.Scale}
+	bp := h.ShareBP
+	fix := h.FixMicros
+	return Terms{Model: tab.Model, Name: tab.Name, Person: tab.Person, Rate: &r, ShareBP: &bp, ShiftFix: float64(h.FixMicros) / money.Scale, FixMicros: &fix}
 }
 
 // HubTerms are the registry's terms ledger keeps.

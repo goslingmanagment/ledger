@@ -14,6 +14,7 @@ import (
 	"github.com/goslingmanagment/ledger/internal/db"
 	"github.com/goslingmanagment/ledger/internal/hub"
 	"github.com/goslingmanagment/ledger/internal/ledger"
+	"github.com/goslingmanagment/ledger/internal/money"
 	"github.com/goslingmanagment/ledger/internal/ts"
 )
 
@@ -445,7 +446,7 @@ func computeUnentered(ctx context.Context, q ledger.Querier, now time.Time) ([]u
 				}
 				row.status, row.net, row.reason = "ok", &net, reasonSlot
 				if t.rate != nil {
-					share := float64(float64(net)/1000) * *t.rate
+					share := money.Micros(money.ShareRate(net*1000, *t.rate)).Float()
 					row.share = &share
 				} else {
 					row.reason += "; " + reasonRate
@@ -725,7 +726,7 @@ func (f *teamFacts) rows(t unenteredTab, date string) []unenteredRow {
 			row.from, row.to = w.from, w.to
 		}
 		if t.rate != nil {
-			share := float64(float64(net)/1000) * *t.rate
+			share := money.Micros(money.ShareRate(net*1000, *t.rate)).Float()
 			row.share = &share
 		} else {
 			row.reason += "; " + reasonRate

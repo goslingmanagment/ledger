@@ -464,6 +464,31 @@ func TestPrepareHubInfoFlagsBoardPostAndPostDayAdd(t *testing.T) {
 	}
 }
 
+func TestPrepareHubBlockedPostDiffAndNotes(t *testing.T) {
+	s, _ := setupTwoPeopleTabs(t)
+
+	// Hub report on 2026-11-18 with a report comment and a line note.
+	putHubReport(t, s, 601, 6001, 1, "alfa", "2026-11-18", 1, nil, map[string]int64{"page-1": m("100")})
+	execSQL(t, s, `UPDATE hub_shift_reports SET comment = 'передала ночной хвост' WHERE id = 601`)
+	putHubLine(t, s, 601, 1, "9101", "page-1", m("100"), m("100"), 1, 0, 0, nil)
+	execSQL(t, s, `UPDATE hub_shift_report_lines SET note = 'сверить с кастомом' WHERE report_id = 601 AND seq = 1`)
+
+	// Blocked current post on the same Hub day whose parsed page sum differs ($120 vs $100).
+	putPost(t, s, 610, "alfa", "alpha", "2026-11-18", "2026-11-18T23:00:00+03:00", map[string]int64{"page-1": m("120")})
+	execSQL(t, s, `UPDATE shift_report_posts SET flags = '["sum_mismatch"]' WHERE id = 610`)
+
+	b := prepare(t, s, "alfa", "2026-11-20T12:00:00+03:00")
+	bp := flagsOfKind(b, "board_post")
+	if len(bp) != 1 || bp[0].Blocker || !strings.Contains(bp[0].Text, "заблокированный пост #610") || !strings.Contains(bp[0].Text, "120.00") {
+		t.Fatalf("expected non-blocking board_post for differing blocked post #610, got %+v", bp)
+	}
+	notes := flagsOfKind(b, "hub_note")
+	if len(notes) != 2 || notes[0].Blocker || notes[1].Blocker ||
+		!strings.Contains(notes[0].Text, "передала ночной хвост") || !strings.Contains(notes[1].Text, "сверить с кастомом") {
+		t.Fatalf("expected 2 non-blocking hub_note flags, got %+v", notes)
+	}
+}
+
 // Wrong share amount (e.g. 100% counted when split gives 50%), person matched by hub_people login when share.person
 // is null, and a sale awarded to somebody else still counted in this person's Hub report all produce hub_decision blockers.
 func TestPrepareHubDecisionMismatchAndLoginMatch(t *testing.T) {

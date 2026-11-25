@@ -199,7 +199,18 @@ type prepTerms struct {
 
 type dayTerms struct {
 	rate      *float64
+	shareBP   *int64
 	fixMicros int64
+}
+
+func (dt dayTerms) share(net int64) int64 {
+	if dt.shareBP != nil {
+		return money.ShareBP(net, *dt.shareBP)
+	}
+	if dt.rate == nil {
+		return 0
+	}
+	return money.ShareRate(net, *dt.rate)
 }
 
 // forDay returns the rate and shift fix that price one day of a tab. For a day accrued after the sheets
@@ -210,7 +221,8 @@ func (pt prepTerms) forDay(model, tabName, date, source string) dayTerms {
 	if source != "" && pt.termsFrom != "" && date >= pt.termsFrom {
 		if h := pt.hub.On(pt.slug, model, date); h != nil {
 			r := h.Rate()
-			return dayTerms{rate: &r, fixMicros: h.FixMicros}
+			bp := h.ShareBP
+			return dayTerms{rate: &r, shareBP: &bp, fixMicros: h.FixMicros}
 		}
 	}
 	if t := pt.tabs[tabKey(model, tabName)]; t != nil {
@@ -338,12 +350,19 @@ func PreparePayout(ctx context.Context, db *sql.DB, slug string, now time.Time) 
 	if err := hubFlags(ctx, tx, &b, card, today, f); err != nil {
 		return b, err
 	}
-	potProblems, err := hub.PotProblems(ctx, tx, slug, now)
+	periodTo := ""
+	if b.Period != nil {
+		periodTo = b.Period.To
+	}
+	potBlockers, potNotes, err := hub.PotPayoutProblems(ctx, tx, slug, periodTo, now)
 	if err != nil {
 		return b, err
 	}
-	for _, problem := range potProblems {
+	for _, problem := range potBlockers {
 		f.add("hub_pots", true, "%s", problem)
+	}
+	for _, note := range potNotes {
+		f.add("hub_pots", false, "%s (не блокирует: все неоплаченные дни до даты переключения общаков)", note)
 	}
 	if err := unresolvedFlags(ctx, tx, b.AccrualFrom, res, card, f); err != nil {
 		return b, err
@@ -821,8 +840,8 @@ func potText(days []PrepareDay) string {
 				when = " " + ddmm(d.Date)
 			}
 			if p.DistributionID != 0 && p.Rate != nil {
-				pay := money.FromFloat(float64(p.RevenueMicros) / money.Scale * *p.Rate)
-				parts = append(parts, fmt.Sprintf("общак %s, раздача %d: доля базы %s (%s) × %s%% = %s%s", p.Name, p.DistributionID, cellNum(p.RevenueMicros), p.Basis, strconv.FormatFloat(money.RoundN(*p.Rate*100, 6), 'f', -1, 64), cellNum(int64(pay)), when))
+				pay := money.ShareRate(p.RevenueMicros, *p.Rate)
+				parts = append(parts, fmt.Sprintf("общак %s, раздача %d: доля базы %s (%s) × %s%% = %s%s", p.Name, p.DistributionID, cellNum(p.RevenueMicros), p.Basis, strconv.FormatFloat(money.RoundN(*p.Rate*100, 6), 'f', -1, 64), cellNum(pay), when))
 				continue
 			}
 			parts = append(parts, fmt.Sprintf("общак %s%s: база %s", p.Name, when, cellNum(p.RevenueMicros)))
@@ -861,7 +880,12 @@ func weekText(l *PrepareLine, tab *prepTab, terms dayTerms, shiftDays int, f *fl
 		}
 		return
 	}
-	rawPct := money.FromFloat(float64(base) / money.Scale * *l.Rate)
+	var rawPct money.Micros
+	if terms.shareBP != nil {
+		rawPct = money.Micros(money.ShareBP(base, *terms.shareBP))
+	} else {
+		rawPct = money.Micros(money.ShareRate(base, *l.Rate))
+	}
 	pct := int64(money.RoundCents(rawPct))
 	rate := strconv.FormatFloat(money.RoundN(*l.Rate*100, 6), 'f', -1, 64) + "%"
 	l.ExtraMicros = l.ShownMicros - pct

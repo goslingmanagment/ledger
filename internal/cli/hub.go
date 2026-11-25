@@ -272,7 +272,13 @@ func payrollPotsHubFrom(ctx context.Context, args []string) error {
 		return err
 	}
 	defer store.Close()
-	if err := hub.SetPotSharesFrom(ctx, store, day, *dry, time.Now()); err != nil {
+	now := time.Now()
+	if *off {
+		if _, err := hub.SyncConfiguredPots(ctx, store, now); err != nil {
+			return fmt.Errorf("живая проверка раздач Workboard перед --off: %w", err)
+		}
+	}
+	if err := hub.SetPotSharesFrom(ctx, store, day, *dry, now); err != nil {
 		return err
 	}
 	return printJSON(map[string]any{"ok": true, "potSharesHubFrom": day, "dryRun": *dry})

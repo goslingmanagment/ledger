@@ -77,6 +77,44 @@ func FromFloat(x float64) Micros {
 	return v
 }
 
+// ShareBP multiplies net micros by a share in basis points (10 000 = 100%) using exact integer arithmetic,
+// rounding half to even without float64 drift.
+func ShareBP(net, bp int64) int64 {
+	if net == 0 || bp == 0 {
+		return 0
+	}
+	neg := (net < 0) != (bp < 0)
+	an := uint64(net)
+	if net < 0 {
+		an = uint64(-net)
+	}
+	ab := uint64(bp)
+	if bp < 0 {
+		ab = uint64(-bp)
+	}
+	q, r := an/10_000, an%10_000
+	prod := r * ab
+	q2, r2 := prod/10_000, prod%10_000
+	whole := q*ab + q2
+	if r2 > 5_000 || (r2 == 5_000 && whole%2 != 0) {
+		whole++
+	}
+	if neg {
+		return -int64(whole)
+	}
+	return int64(whole)
+}
+
+// ShareRate multiplies net micros by a rate (0.25 = 25%). When the rate is an exact number of basis points
+// (within 1e-6 bp), it uses exact integer ShareBP; otherwise it falls back to float64 rounding.
+func ShareRate(net int64, rate float64) int64 {
+	bp := math.Round(rate * 10_000)
+	if math.Abs(rate*10_000-bp) < 1e-6 && math.Abs(bp) <= 1_000_000 {
+		return ShareBP(net, int64(bp))
+	}
+	return int64(FromFloat(float64(net) / Scale * rate))
+}
+
 // Float is the amount in dollars.
 func (m Micros) Float() float64 { return float64(m) / Scale }
 

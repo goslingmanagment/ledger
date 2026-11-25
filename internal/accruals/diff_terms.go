@@ -99,7 +99,7 @@ func addTerms(ctx context.Context, q ledger.Querier, d *Diff) error {
 			x.Differences = append(x.Differences, "в реестре нет условия")
 		} else {
 			id, bp, hf := h.ID, h.ShareBP, h.FixMicros
-			v := dayAmount(net, h.Rate(), fix(hf))
+			v := money.ShareBP(net, bp) + fix(hf)
 			x.HubTerm, x.HubShareBP, x.HubFixMicros, x.HubAmountMicros = &id, &bp, &hf, &v
 			if on {
 				x.Basis = "hub"

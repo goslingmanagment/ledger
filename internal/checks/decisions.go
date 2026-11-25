@@ -42,6 +42,10 @@ func HubDecisions(ctx context.Context, e Env) Result {
 	if err != nil {
 		return fail(name, "warn", err.Error(), nil)
 	}
+	var danglingAnswered int
+	if err := e.Q.QueryRowContext(ctx, `SELECT count(*) FROM sale_questions WHERE status = 'answered' AND decision_id IS NULL AND COALESCE(trim(answer), '') = ''`).Scan(&danglingAnswered); err != nil {
+		return fail(name, "warn", err.Error(), nil)
+	}
 	// The read of the feed: what is wrong with it ("" — nothing), and how it stands.
 	readProblem, read := "", ""
 	switch {
@@ -102,6 +106,10 @@ func HubDecisions(ctx context.Context, e Env) Result {
 		}
 		failures = append(failures, fmt.Sprintf("%d решений хаба «в общак» не стали покупками общака: %s", len(plan.Problems), strings.Join(parts, " | ")))
 		details["problems"] = plan.Problems
+	}
+	if danglingAnswered > 0 {
+		failures = append(failures, fmt.Sprintf("%d вопросов sale_questions в статусе answered без решения (decision_id) и без ответа словами", danglingAnswered))
+		details["danglingAnsweredQuestions"] = danglingAnswered
 	}
 	if len(failures) > 0 {
 		return fail(name, "warn", fmt.Sprintf("решения хаба читаются с %s, но: %s", from, strings.Join(failures, " || ")), details)

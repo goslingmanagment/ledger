@@ -656,6 +656,44 @@ func TestAPostToTheCentEqualsADraftInMills(t *testing.T) {
 	}
 }
 
+func TestReportPagesHubEqualToleranceSymmetric(t *testing.T) {
+	s := postBook(t)
+	ctx := context.Background()
+	send(t, s, 20, "501", "2026-11-08T20:30:00Z", report("08.11.2026", "#Anna", "$200,00", "• Page-A - $100,00", "• VIP - $100,00"))
+	for _, tc := range []struct {
+		name      string
+		hubMicros int64
+		wantState string
+		wantDiff  int64
+	}{
+		{"plus_5000_equal", 100_005_000, "hub_equal", 0},
+		{"minus_5000_equal", 99_995_000, "hub_equal", 0},
+		{"plus_5001_changed", 100_005_001, "hub_changed", -5001},
+		{"minus_5001_changed", 99_994_999, "hub_changed", 5001},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := s.RW.ExecContext(ctx, `DELETE FROM hub_shift_report_pages; DELETE FROM hub_shift_reports`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.RW.ExecContext(ctx, `INSERT INTO hub_shift_reports(id, shift_id, version, person, report_date, submitted_at, total_micros, current, payload, received_at, stored_at)
+				VALUES (1, 100, 1, 'anna', '2026-11-08', '2026-11-08T21:00:00+03:00', ?, 1, '{}', '2026-11-08T21:00:00+03:00', '2026-11-08T21:00:00+03:00')`, tc.hubMicros); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.RW.ExecContext(ctx, `INSERT INTO hub_shift_report_pages(report_id, seq, page_label, amount_micros) VALUES (1, 1, 'page-a', ?)`, tc.hubMicros); err != nil {
+				t.Fatal(err)
+			}
+			var state string
+			var diff int64
+			if err := s.RO.QueryRowContext(ctx, `SELECT hub_state, hub_diff_micros FROM v_report_pages WHERE person='anna' AND report_date='2026-11-08' AND page='page-a'`).Scan(&state, &diff); err != nil {
+				t.Fatal(err)
+			}
+			if state != tc.wantState || diff != tc.wantDiff {
+				t.Fatalf("hub=%d: got (%s, %d), want (%s, %d)", tc.hubMicros, state, diff, tc.wantState, tc.wantDiff)
+			}
+		})
+	}
+}
+
 // Two posts pasted into one message: the post carries second_report, and the pay base is the first report's, exactly as
 // if the first had been sent alone (the flag blocks nothing and moves no money).
 func TestSecondReportMovesNoMoney(t *testing.T) {
