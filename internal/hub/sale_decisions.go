@@ -55,19 +55,19 @@ type SaleDecisionApplied struct {
 
 // SaleDecision is a decision as it is now.
 type SaleDecision struct {
-	ID               int64                `json:"id"`
-	TransactionID    *int64               `json:"transactionId"` // Hub's sale id; null — no sale, or not tied yet
-	PageLabel        *string              `json:"pageLabel"`
-	Kind             string               `json:"kind"`
-	Shares           []SaleDecisionShare  `json:"shares"`
-	Pot              *string              `json:"pot"` // kind pot: the pot's name is the ledger's pot slug
-	Outcome          string               `json:"outcome"`
-	RuleHome         *string              `json:"ruleHome"`
-	State            string               `json:"state"`
-	Source           string               `json:"source"`
-	SaidBy           *string              `json:"saidBy"`
-	SaidAt           *string              `json:"saidAt"`
-	DecidedAt        string               `json:"decidedAt"`
+	ID                int64                 `json:"id"`
+	TransactionID     *int64                `json:"transactionId"` // Hub's sale id; null — no sale, or not tied yet
+	PageLabel         *string               `json:"pageLabel"`
+	Kind              string                `json:"kind"`
+	Shares            []SaleDecisionShare   `json:"shares"`
+	Pot               *string               `json:"pot"` // kind pot: the pot's name is the ledger's pot slug
+	Outcome           string                `json:"outcome"`
+	RuleHome          *string               `json:"ruleHome"`
+	State             string                `json:"state"`
+	Source            string                `json:"source"`
+	SaidBy            *string               `json:"saidBy"`
+	SaidAt            *string               `json:"saidAt"`
+	DecidedAt         string                `json:"decidedAt"`
 	Note              *string               `json:"note"`
 	Applied           *SaleDecisionApplied  `json:"applied"`
 	AppliedDeliveries []SaleDecisionApplied `json:"appliedDeliveries,omitempty"`
