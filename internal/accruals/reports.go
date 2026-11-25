@@ -271,7 +271,7 @@ func price(d *reportDay, who *people) {
 	d.tabModel, d.tabName = &t.Model, &t.Name
 	// The fix is the shift's: a day with only a pot share (the person did not work it) gets none.
 	if len(d.pages) > 0 {
-		d.fix = int64(money.FromFloat(t.ShiftFix))
+		d.fix = t.Fix()
 	}
 	if t.Rate == nil {
 		d.reason = "в шапке вкладки " + t.Model + "/" + t.Name + " нет «Ставка %»"
@@ -279,13 +279,13 @@ func price(d *reportDay, who *people) {
 	}
 	r := *t.Rate
 	d.rate = &r
-	v := dayAmount(d.net, r, d.fix)
+	v := t.Share(d.net) + d.fix
 	d.amount = &v
 }
 
-// dayAmount is a reports day as the sheet counts it: dollars of the day's revenue × rate, to micros, then the fix of the shift.
+// dayAmount is a reports day as the sheet counts it: net revenue × rate in exact integer basis points, then the fix of the shift.
 func dayAmount(net int64, rate float64, fix int64) int64 {
-	return int64(money.FromFloat(float64(float64(net)/money.Scale)*rate)) + fix
+	return money.ShareRate(net, rate) + fix
 }
 
 func rebuildReportsTx(ctx context.Context, tx *sql.Tx, now time.Time) (ReportsReport, error) {

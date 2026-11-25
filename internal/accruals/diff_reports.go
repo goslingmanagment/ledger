@@ -207,7 +207,7 @@ func addReports(ctx context.Context, q ledger.Querier, d *Diff, factsKnown bool)
 						continue
 					}
 					if r := rates[x.Day][pg.Page]; r != nil {
-						x.RoundingMicros += int64(money.FromFloat(float64(float64(*pg.ReportMicros-*pg.SheetMicros)/money.Scale) * *r))
+						x.RoundingMicros += money.ShareRate(*pg.ReportMicros-*pg.SheetMicros, *r)
 					}
 				}
 			}

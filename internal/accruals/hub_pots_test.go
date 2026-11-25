@@ -486,6 +486,53 @@ func TestPotProblemsFollowMoscowCutoverAndActiveModels(t *testing.T) {
 	}
 }
 
+func TestGeneralK2OutageDoesNotBlockPersonWithOnlyPreCutoverUnpaidDays(t *testing.T) {
+	s, ctx := reportBook(t)
+	// cutDay = 2026-11-10 (Tuesday of 2026-11-09 week): alfa has only Monday 2026-11-09 (< cutDay),
+	// while bravo has Tuesday 2026-11-10 (>= cutDay).
+	tables(t, s, ctx, map[string]map[string][][]payroll.Cell{
+		"Alpha": {"Альфа": pageTab("2026-11-09", "Page A", 0.25, 0, [7]any{100})},
+		"Beta":  {"Браво": pageTab("2026-11-09", "Page C", 0.25, 0, [7]any{0, 100})},
+	})
+	exec(t, s, `UPDATE settings SET value=? WHERE key='pot_shares_hub_from'`, cutDay)
+	after := reportNow
+	for _, state := range []string{"error", "stale", "dirty"} {
+		exec(t, s, `UPDATE hub_pot_sync SET state='ok',error='',dirty=0,last_ok=?`, after.Format(time.RFC3339))
+		switch state {
+		case "error":
+			exec(t, s, `UPDATE hub_pot_sync SET state='error',error='fixture outage'`)
+		case "stale":
+			exec(t, s, `UPDATE hub_pot_sync SET last_ok='2026-11-01'`)
+		case "dirty":
+			exec(t, s, `UPDATE hub_pot_sync SET dirty=1`)
+		}
+		// alfa's unpaid period is strictly before cutDay -> general K2 state must be non-blocking.
+		ba, err := payroll.PreparePayout(ctx, s.RO, "alfa", after)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ba.Period == nil || ba.Period.To >= cutDay {
+			t.Fatalf("%s: expected pre-cutover period for alfa, got %+v", state, ba.Period)
+		}
+		sawNote := false
+		for _, fl := range ba.Flags {
+			if fl.Kind == "hub_pots" && fl.Blocker {
+				t.Fatalf("%s: general K2 issue must not block pre-cutover unpaid period, got %+v", state, fl)
+			}
+			if fl.Kind == "hub_pots" && !fl.Blocker {
+				sawNote = true
+			}
+		}
+		if !sawNote {
+			t.Fatalf("%s: expected non-blocking hub_pots info note for alfa, got %+v", state, ba.Flags)
+		}
+		// bravo has an unpaid day on cutDay -> must still block.
+		if !potFlag(t, s, "bravo", "", after) {
+			t.Fatalf("%s: expected hub_pots blocker for bravo with post-cutover unpaid day", state)
+		}
+	}
+}
+
 func TestHeldPotOutsideGrantUsesFeedModel(t *testing.T) {
 	for _, tc := range []struct{ name, slug string }{
 		{"direct", "alpha"}, {"mapped", "ALPHA-HUB"}, {"empty", ""},

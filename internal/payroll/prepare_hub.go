@@ -48,7 +48,10 @@ func hubFlags(ctx context.Context, q ledger.Querier, b *PayoutBrief, card Person
 	if err := hubPendingAddFlags(ctx, q, b.Slug, winFrom, winTo, isHubBasis, f); err != nil {
 		return err
 	}
-	if err := hubBoardPostFlags(ctx, q, b.Slug, winFrom, winTo, f); err != nil {
+	if err := hubBoardPostFlags(ctx, q, b.Slug, hubFrom, winFrom, winTo, f); err != nil {
+		return err
+	}
+	if err := hubNoteFlags(ctx, q, b.Slug, winFrom, winTo, isHubBasis, f); err != nil {
 		return err
 	}
 	if err := hubPostDayAddFlags(ctx, q, b.Slug, b.ReportsFrom, hubFrom, winFrom, winTo, f); err != nil {
@@ -331,8 +334,9 @@ func hubPendingAddFlags(ctx context.Context, q ledger.Querier, slug, winFrom, wi
 }
 
 // hubBoardPostFlags adds informational (non-blocking) flags when a Telegram post on a Hub/board-basis day differs from
-// the counted Hub shift report. A board day with no post at all is normal and produces no flag.
-func hubBoardPostFlags(ctx context.Context, q ledger.Querier, slug, winFrom, winTo string, f *flagger) error {
+// the counted Hub shift report — including blocked posts excluded from v_report_pages whose parsed amounts differ from
+// hub_micros (or cannot be parsed). A board day with no post at all is normal and produces no flag.
+func hubBoardPostFlags(ctx context.Context, q ledger.Querier, slug, hubFrom, winFrom, winTo string, f *flagger) error {
 	rows, err := q.QueryContext(ctx, `SELECT report_date, model, page, posted_micros, hub_micros, hub_state
 		FROM v_report_pages
 		WHERE person = ? AND basis = 'hub' AND hub_state IS NOT NULL
@@ -347,6 +351,8 @@ func hubBoardPostFlags(ctx context.Context, q ledger.Querier, slug, winFrom, win
 	}
 	var list []pageRow
 	hasPost := map[[2]string]bool{}
+	hubByDayPage := map[[2]string]int64{}
+	hubDays := map[string]bool{}
 	for rows.Next() {
 		var r pageRow
 		if err := rows.Scan(&r.date, &r.model, &r.page, &r.posted, &r.hubAmt, &r.hubState); err != nil {
@@ -355,6 +361,10 @@ func hubBoardPostFlags(ctx context.Context, q ledger.Querier, slug, winFrom, win
 		}
 		if r.posted.Valid {
 			hasPost[[2]string{r.date, ledger.Slug(r.model)}] = true
+		}
+		if r.hubAmt.Valid {
+			hubByDayPage[[2]string{r.date, r.page}] = r.hubAmt.Int64
+			hubDays[r.date] = true
 		}
 		list = append(list, r)
 	}
@@ -388,7 +398,133 @@ func hubBoardPostFlags(ctx context.Context, q ledger.Querier, slug, winFrom, win
 	for _, date := range dates {
 		f.add("board_post", false, "пост за %s расходится с отчётом хаба (начислено по отчёту хаба): %s", ddmm(date), strings.Join(diffs[date], "; "))
 	}
-	return nil
+
+	// Blocked current posts are excluded from v_report_pages, so inspect them directly against hub_micros on Hub days.
+	if hubFrom == "" || len(hubDays) == 0 {
+		return nil
+	}
+	bRows, err := q.QueryContext(ctx, `SELECT p.id, p.report_date, p.flags,
+		COALESCE((SELECT json_group_array(json_array(COALESCE(pp.page_label, ''), pp.amount_micros))
+		  FROM shift_report_post_pages pp WHERE pp.post_id = p.id AND pp.in_shift = 1), '[]')
+		FROM shift_report_posts p
+		WHERE p.current = 1 AND p.person = ? AND p.report_date >= ? AND p.report_date >= ? AND p.report_date <= ?
+		  AND EXISTS (SELECT 1 FROM json_each(p.flags) f
+		    WHERE f.value IN ('unknown_author','no_date','sum_mismatch','date_mismatch','parse_error'))
+		ORDER BY p.report_date, p.id`, slug, hubFrom, winFrom, winTo)
+	if err != nil {
+		return err
+	}
+	defer bRows.Close()
+	for bRows.Next() {
+		var postID int64
+		var date, flagsRaw, pagesRaw string
+		if err := bRows.Scan(&postID, &date, &flagsRaw, &pagesRaw); err != nil {
+			return err
+		}
+		if !hubDays[date] {
+			continue
+		}
+		var pages [][]any
+		_ = json.Unmarshal([]byte(pagesRaw), &pages)
+		postSums := map[string]int64{}
+		var pageOrder []string
+		for _, pg := range pages {
+			if len(pg) != 2 {
+				continue
+			}
+			label, _ := pg[0].(string)
+			amtFloat, _ := pg[1].(float64)
+			if label == "" {
+				continue
+			}
+			if _, seen := postSums[label]; !seen {
+				pageOrder = append(pageOrder, label)
+			}
+			postSums[label] += int64(amtFloat)
+		}
+		if len(pageOrder) == 0 {
+			f.add("board_post", false, "пост #%d за %s с блокирующей пометкой (не разобран; начислено по отчёту хаба)", postID, ddmm(date))
+			continue
+		}
+		var bDiffs []string
+		for _, label := range pageOrder {
+			pAmt := postSums[label]
+			hAmt, hasHub := hubByDayPage[[2]string{date, label}]
+			if !hasHub {
+				if pAmt != 0 {
+					bDiffs = append(bDiffs, fmt.Sprintf("%s: пост %s, в хабе нет", label, money.Micros(pAmt).Cents()))
+				}
+			} else if abs(pAmt-hAmt) > 5_000 {
+				bDiffs = append(bDiffs, fmt.Sprintf("%s: пост %s, хаб %s", label, money.Micros(pAmt).Cents(), money.Micros(hAmt).Cents()))
+			}
+		}
+		if len(bDiffs) > 0 {
+			f.add("board_post", false, "заблокированный пост #%d за %s расходится с отчётом хаба (начислено по отчёту хаба): %s",
+				postID, ddmm(date), strings.Join(bDiffs, "; "))
+		}
+	}
+	return bRows.Err()
+}
+
+// hubNoteFlags adds informational (non-blocking) flags for non-empty report comments and line notes in active
+// Hub-basis shift reports within the payout window.
+func hubNoteFlags(ctx context.Context, q ledger.Querier, slug, winFrom, winTo string, isHubBasis func(string, string) bool, f *flagger) error {
+	rows, err := q.QueryContext(ctx, `SELECT id, report_date, comment
+		FROM hub_shift_reports
+		WHERE person = ? AND current = 1 AND problem IS NULL AND trim(comment) <> ''
+		  AND report_date >= ? AND report_date <= ?
+		ORDER BY report_date, id`, slug, winFrom, winTo)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var reportID int64
+		var date, comment string
+		if err := rows.Scan(&reportID, &date, &comment); err != nil {
+			rows.Close()
+			return err
+		}
+		if !isHubBasis(slug, date) {
+			continue
+		}
+		f.add("hub_note", false, "комментарий в отчёте хаба за %s (версия %d): %s", ddmm(date), reportID, clipNote(comment))
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	lRows, err := q.QueryContext(ctx, `SELECT r.id, r.report_date, l.transaction_ref, l.page_label, l.note
+		FROM hub_shift_report_lines l JOIN hub_shift_reports r ON r.id = l.report_id
+		WHERE r.person = ? AND r.current = 1 AND r.problem IS NULL
+		  AND l.note IS NOT NULL AND trim(l.note) <> ''
+		  AND r.report_date >= ? AND r.report_date <= ?
+		ORDER BY r.report_date, r.id, l.seq`, slug, winFrom, winTo)
+	if err != nil {
+		return err
+	}
+	defer lRows.Close()
+	for lRows.Next() {
+		var reportID int64
+		var date, txRef, pageLabel, note string
+		if err := lRows.Scan(&reportID, &date, &txRef, &pageLabel, &note); err != nil {
+			return err
+		}
+		if !isHubBasis(slug, date) {
+			continue
+		}
+		f.add("hub_note", false, "заметка к продаже %s за %s (%s, версия %d): %s", txRef, ddmm(date), pageLabel, reportID, clipNote(note))
+	}
+	return lRows.Err()
+}
+
+func clipNote(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	runes := []rune(s)
+	if len(runes) > 160 {
+		return string(runes[:159]) + "…"
+	}
+	return s
 }
 
 // hubPostDayAddFlags adds informational (non-blocking) flags when a Hub shift report's added sale line («долёт»,

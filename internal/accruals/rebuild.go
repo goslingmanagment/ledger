@@ -16,7 +16,6 @@ import (
 	"github.com/goslingmanagment/ledger/internal/db"
 	"github.com/goslingmanagment/ledger/internal/hub"
 	"github.com/goslingmanagment/ledger/internal/ledger"
-	"github.com/goslingmanagment/ledger/internal/money"
 	"github.com/goslingmanagment/ledger/internal/payroll"
 	"github.com/goslingmanagment/ledger/internal/ts"
 )
@@ -225,17 +224,16 @@ func rebuildTx(ctx context.Context, tx *sql.Tx, now time.Time) (Report, error) {
 		case reason != "":
 			a.reason = reason
 		case a.kind == "fix":
-			if t.ShiftFix == 0 {
+			v := t.Fix()
+			if v == 0 {
 				delete(acc, k) // no fix on the tab
 				continue
 			}
-			v := int64(money.FromFloat(t.ShiftFix))
 			a.amount = &v
 		case t.Rate == nil:
 			a.reason = "в шапке вкладки " + t.Model + "/" + t.Name + " нет «Ставка %»"
 		default:
-			// As the sheet and «не занесено» count a share of revenue: dollars × rate, then to micros.
-			v := int64(money.FromFloat(float64(float64(a.net)/money.Scale) * *t.Rate))
+			v := t.Share(a.net)
 			a.rate, a.amount = t.Rate, &v
 		}
 		if a.kind == "fix" && a.reason != "" {

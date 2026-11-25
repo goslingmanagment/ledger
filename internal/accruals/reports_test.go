@@ -1074,3 +1074,33 @@ func TestReportEditMovesPersonAndModelOnSameDate(t *testing.T) {
 		t.Fatal("replacement tab", got)
 	}
 }
+
+func TestBlockedEditDoesNotReholdOlderSupersededDate(t *testing.T) {
+	s, ctx := reportWeek(t)
+	setReports(t, s, ctx, cutDay)
+	// Message 70 starts on cutDay (2026-11-10), then a valid edit moves it to 2026-11-11, then a third edit breaks parsing.
+	const day1, day2 = cutDay, "2026-11-11"
+	post(t, s, 70, "501", day1, postText(day1, "", "A - $20"))
+	postEdited(t, s, 70, "501", day1, "2026-11-15T17:00:00+03:00", postText(day2, "", "A - $20"))
+	if got := dayOf(t, s, "alfa", day1); got != "35000000 0 35000000 reports" {
+		t.Fatalf("day1 after valid move: %s", got)
+	}
+	postEdited(t, s, 70, "501", day1, "2026-11-15T18:00:00+03:00", "Общий доход: $20")
+	// day2 (the latest unblocked version) must stay held, while day1 (already superseded by the valid edit) must NOT be held.
+	var heldDays []string
+	rows, err := s.RO.QueryContext(ctx, `SELECT date FROM payroll_unentered WHERE person='alfa' AND status='unknown' AND reason LIKE 'по отчёту не начислено%' ORDER BY date`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var d string
+		if err := rows.Scan(&d); err != nil {
+			t.Fatal(err)
+		}
+		heldDays = append(heldDays, d)
+	}
+	if len(heldDays) != 1 || heldDays[0] != day2 {
+		t.Fatalf("expected only %s held after blocked edit, got %v", day2, heldDays)
+	}
+}
