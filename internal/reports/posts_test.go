@@ -354,6 +354,8 @@ func TestReportDaysFilterAndScopes(t *testing.T) {
 		t.Errorf("payouts on report-posts: %v %+v", err, bare)
 	} else if _, has := bare.Posts[0]["text"]; has {
 		t.Errorf("payouts got the text of a post: %+v", bare.Posts[0])
+	} else if bare.Posts[0]["accrues"] != true {
+		t.Errorf("payouts: the post's accrues: %+v", bare.Posts[0])
 	}
 	var posts PostsAnswer
 	if err := reader.Do(ctx, http.MethodGet, "/v1/report-posts?from=2026-11-01&to=2026-11-10", nil, &posts); err != nil || len(posts.Posts) != 1 ||

@@ -743,9 +743,24 @@ func reportSettings(t *testing.T, s *db.Store) {
 	setting(t, s, "report_authors", `{"tg:501": "anna", "tg:502": "boris", "tg:503": "vera"}`)
 }
 
+// accruesOf reads GET /v1/report-posts' accrues of the flagged posts of the window, by message: what Hub's matters follow.
+func accruesOf(t *testing.T, s *db.Store, ctx context.Context) map[int64]bool {
+	t.Helper()
+	list, err := reports.Posts(ctx, s.RO, "2026-11-01", "2026-11-10", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[int64]bool{}
+	for _, p := range list {
+		out[p.MsgID] = p.Accrues
+	}
+	return out
+}
+
 // From payroll_basis_hub_from a day of a person on the board «Отчёт», or one with a counted Hub report, accrues from Hub's
 // report: its posts accrue nothing, and neither post check goes red on them (the bug: two such posts kept «отчёты
-// разобраны» red). A post without a person is asked about all the same.
+// разобраны» red). A post without a person is asked about all the same. Hub reads the same rule as each post's accrues
+// (the bug: Hub kept «Поправьте пост» and «пост не разобран» open on such days).
 func TestPostChecksSkipDaysPaidByHub(t *testing.T) {
 	s, ctx := openDB(t)
 	now := at("2026-11-10T12:00:00+03:00")
@@ -762,6 +777,9 @@ func TestPostChecksSkipDaysPaidByHub(t *testing.T) {
 	r := ReportPosts(ctx, e)
 	if r.OK || !strings.Contains(r.Summary, "boris, 2026-11-08") || !strings.Contains(r.Summary, "vera, 2026-11-09") {
 		t.Fatalf("days of the posts: %+v", r)
+	}
+	if got := accruesOf(t, s, ctx); !got[30] || !got[31] || !got[40] {
+		t.Fatalf("days of the posts accrue: %v", got)
 	}
 	if r := SecondReports(ctx, e); r.OK || !strings.Contains(r.Summary, "boris, 2026-11-09") {
 		t.Fatalf("days of the posts: %+v", r)
@@ -786,6 +804,17 @@ func TestPostChecksSkipDaysPaidByHub(t *testing.T) {
 	reportPost(t, s, ctx, "999", 50, "2026-11-09T22:00:00+03:00", reportText("nobody", "09.11.2026", "Page-1", "$40,00", "$40,00"))
 	if r := ReportPosts(ctx, e); r.OK || !strings.Contains(r.Summary, "#nobody, 2026-11-09") || strings.Contains(r.Summary, "boris") {
 		t.Fatalf("a post without a person: %+v", r)
+	}
+	if got := accruesOf(t, s, ctx); got[30] || got[40] || !got[50] {
+		t.Fatalf("Hub's days accrue nothing, a post without a person does: %v", got)
+	}
+	// A day before the switch to the reports was paid by the sheets: its post accrues nothing either.
+	exec(t, s, `DELETE FROM hub_person_rights`)
+	exec(t, s, `DELETE FROM hub_shift_report_pages`)
+	exec(t, s, `DELETE FROM hub_shift_reports`)
+	setting(t, s, "payroll_reports_from", "2026-11-09")
+	if got := accruesOf(t, s, ctx); got[30] || !got[40] || !got[50] {
+		t.Fatalf("a day before the switch: %v", got)
 	}
 }
 

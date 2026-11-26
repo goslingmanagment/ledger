@@ -138,6 +138,7 @@ type Post struct {
 	Flags       []string      `json:"flags"`
 	FlagTexts   []string      `json:"flag_texts"`
 	Blocked     bool          `json:"blocked"` // a flag keeps the whole post out of the pay base
+	Accrues     bool          `json:"accrues"` // the day accrues from the post (postAccrues); false — its flags are information
 	Versions    int           `json:"versions"`
 	Text        string        `json:"text,omitempty"` // only to a key with read: Hub's payouts key gets the list without it
 	Pages       []PostPageOut `json:"pages"`
@@ -187,8 +188,13 @@ func Posts(ctx context.Context, q ledger.Querier, from, to string, flagged bool)
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	accrues, err := postAccrues(ctx, q, from)
+	if err != nil {
+		return nil, err
+	}
 	for i := range out {
 		p := &out[i]
+		p.Accrues = accrues(*p)
 		rows, err := q.QueryContext(ctx, `SELECT name, page_label, in_shift, amount_micros FROM shift_report_post_pages
 			WHERE post_id = ? ORDER BY seq`, p.ID)
 		if err != nil {
@@ -210,6 +216,27 @@ func Posts(ctx context.Context, q ledger.Querier, from, to string, flagged bool)
 		}
 	}
 	return out, nil
+}
+
+// postAccrues says whether a post's day accrues from the post: not a day before payroll_reports_from (the sheets paid
+// for it), not one Hub's handed-in report pays for (payroll.HubBasisDays, read from the day `from` on). A post without
+// a person or a date accrues: it is asked about always. A post that does not accrue moves no money, its flags are
+// information: neither the check «отчёты разобраны» nor Hub asks about it.
+func postAccrues(ctx context.Context, q ledger.Querier, from string) (func(Post) bool, error) {
+	on, err := payroll.ReportsFrom(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	hubDay, err := payroll.HubBasisDays(ctx, q, from)
+	if err != nil {
+		return nil, err
+	}
+	return func(p Post) bool {
+		if on != "" && p.ReportDate != nil && *p.ReportDate < on {
+			return false
+		}
+		return p.Person == nil || p.ReportDate == nil || !hubDay(*p.Person, *p.ReportDate)
+	}, nil
 }
 
 // PostsSinceDays is how many days after a post-basis day was paid the collector still re-reads its posts, so a late

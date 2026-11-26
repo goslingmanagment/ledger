@@ -808,8 +808,9 @@ func reportsOn(ctx context.Context, e Env) (string, error) {
 // ReportPosts: the chatters' posts of the last 14 days that the pay base cannot use — an author or a page name not in
 // the settings, a total that does not add up, a date that does not read or lies far from the day of posting — and the
 // days a post probably overwrote (crossDayDuplicates). A warning once the reports accrue (reportsOn); before that,
-// information. A day that accrues from Hub's handed-in report (payroll.HubBasisDays) is not asked about: its post
-// accrues nothing, it is information. A post without a person is asked about always.
+// information. A post that does not accrue (reports.Post.Accrues: a day before the switch, or one that accrues from
+// Hub's handed-in report, payroll.HubBasisDays) is not asked about: it is information. A post without a person is asked
+// about always.
 func ReportPosts(ctx context.Context, e Env) Result {
 	const name = "отчёты разобраны"
 	on, err := reportsOn(ctx, e)
@@ -821,21 +822,10 @@ func ReportPosts(ctx context.Context, e Env) Result {
 	if err != nil {
 		return fail(name, "warn", err.Error(), nil)
 	}
-	hubDay, err := payroll.HubBasisDays(ctx, e.Q, from)
-	if err != nil {
-		return fail(name, "warn", err.Error(), nil)
-	}
-	// postDay says the post's day accrues from the post: not a day the sheets paid for, not one Hub's report pays for.
-	postDay := func(p reports.Post) bool {
-		if on != "" && p.ReportDate != nil && *p.ReportDate < on {
-			return false
-		}
-		return p.Person == nil || p.ReportDate == nil || !hubDay(*p.Person, *p.ReportDate)
-	}
 	var bad []string
 	var kept []reports.Post
 	for _, p := range list {
-		if !postDay(p) {
+		if !p.Accrues {
 			continue
 		}
 		kept = append(kept, p)
