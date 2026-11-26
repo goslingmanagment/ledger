@@ -270,7 +270,10 @@ func planReports(ctx context.Context, q ledger.Querier, from string, now time.Ti
 	if err != nil {
 		return nil, err
 	}
-	reported := map[string]bool{}
+	// reported are the days report_accruals has a row for; potOnly those of them whose row holds only pot shares (no
+	// page of a shift): a share is revenue beside the day's report, not its report, so it does not release what waits
+	// for or holds a day without one.
+	reported, potOnly := map[string]bool{}, map[string]bool{}
 	rows, err := q.QueryContext(ctx, `SELECT person, model, day, pages, net_micros, rate, fix_micros, amount_micros, COALESCE(reason, ''),coalesce(hub_reports,'[]'),
  coalesce((SELECT json_group_array(json(j.value)) FROM json_each(a.pots) j WHERE j.value->>'distributionId' IS NOT NULL),'[]')
 		FROM report_accruals a WHERE day >= ? ORDER BY person, model, day`, from)
@@ -309,6 +312,7 @@ func planReports(ctx context.Context, q ledger.Querier, from string, now time.Ti
 			return nil, fmt.Errorf("несколько начислений по отчётам для %s", key)
 		}
 		reported[key] = true
+		potOnly[key] = pages == "[]"
 		if !amount.Valid {
 			hold(key, fmt.Sprintf("нет ставки: %s — выручка по отчёту %s", reason, money.Micros(net).Cents()))
 			continue
@@ -435,7 +439,7 @@ func planReports(ctx context.Context, q ledger.Querier, from string, now time.Ti
 		}
 		return true
 	}
-	// The board's days with a post (or a draft) and no Hub report.
+	// The board's days with a post (or a draft) and no Hub report; a pot share of the day does not stand in for it.
 	rows, err = q.QueryContext(ctx, `SELECT DISTINCT person, report_date, model FROM v_report_pages
 		WHERE board = 1 AND basis = 'hub' AND hub_state IS NULL AND report_date >= ?`, from)
 	if err != nil {
@@ -448,7 +452,7 @@ func planReports(ctx context.Context, q ledger.Querier, from string, now time.Ti
 			return nil, err
 		}
 		if t, ok := tabOf[person+"\x00"+ledger.Slug(model)]; ok && model != "" {
-			if key := t.model + "/" + t.name + ":" + date; !reported[key] {
+			if key := t.model + "/" + t.name + ":" + date; !reported[key] || potOnly[key] {
 				hubOnly(key, person, date)
 			}
 		}
@@ -608,7 +612,8 @@ func planReports(ctx context.Context, q ledger.Querier, from string, now time.Ti
 	}
 
 	// Money of a day with no posted report: in the sheet, or posted already. A day that answers only to Hub's report or
-	// whose post was retracted is not held by them.
+	// whose post was retracted is not held by them. A pot share alone is no report: a sheet day keeps its money, and a
+	// posted day too unless what is posted is itself a share alone (else every share-only day would hold itself).
 	rows, err = q.QueryContext(ctx, `SELECT model, name, person, date FROM payroll_days WHERE person IS NOT NULL AND amount <> 0 AND date >= ?`, from)
 	if err != nil {
 		return nil, err
@@ -619,7 +624,7 @@ func planReports(ctx context.Context, q ledger.Querier, from string, now time.Ti
 			rows.Close()
 			return nil, err
 		}
-		if key := model + "/" + name + ":" + date; !reported[key] && !hubOnly(key, person, date) && !retracted[key] {
+		if key := model + "/" + name + ":" + date; (!reported[key] || potOnly[key]) && !hubOnly(key, person, date) && !retracted[key] {
 			hold(key, "отчёта нет: в таблице день есть, опубликованного отчёта за него нет")
 		}
 	}
@@ -631,12 +636,31 @@ func planReports(ctx context.Context, q ledger.Querier, from string, now time.Ti
 	if err != nil {
 		return nil, err
 	}
+	// The days posted from the reports with a shift's pages (a snapshot of none — the pages were not recorded yet — is
+	// not taken for one).
+	shiftBooked := map[string]bool{}
+	rows, err = q.QueryContext(ctx, `SELECT tab||':'||day FROM v_booked_report_days WHERE day>=? AND pages<>'[]'`, from)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		shiftBooked[key] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	personOf := map[string]string{}
 	for _, t := range tabs {
 		personOf[t.model+"/"+t.name] = t.person
 	}
-	for key := range posted {
-		if reported[key] {
+	for key, source := range posted {
+		if reported[key] && !(potOnly[key] && (source != SourceReports || shiftBooked[key])) {
 			continue
 		}
 		if model, name, date, ok := splitDayKey(key); ok && hubOnly(key, personOf[model+"/"+name], date) {
