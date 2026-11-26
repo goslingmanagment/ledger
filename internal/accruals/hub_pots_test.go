@@ -762,3 +762,125 @@ func TestRebuildScopesHeldAndUnavailablePotFeed(t *testing.T) {
 		t.Fatal("future cutover held the rebuild", got)
 	}
 }
+
+// A Workboard pot share is no report of its day: it is revenue beside the shift's pages. A day that has only a share
+// neither releases a board day waiting for its Hub report nor replaces what a sheet day holds as posted; a day with
+// nothing but the share (the person did not work it) books it and blocks nothing.
+func TestAPotShareIsNoReportOfItsDay(t *testing.T) {
+	blockers := func(t *testing.T, s *db.Store, person string) []string {
+		t.Helper()
+		b, err := payroll.PreparePayout(context.Background(), s.RO, person, reportNow)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, f := range b.Flags {
+			if f.Blocker {
+				out = append(out, f.Kind+" "+f.Text)
+			}
+		}
+		return out
+	}
+	has := func(list []string, part string) bool {
+		return slices.ContainsFunc(list, func(f string) bool { return strings.Contains(f, part) })
+	}
+	board := func(t *testing.T, s *db.Store, ctx context.Context) {
+		t.Helper()
+		r := loadRegistry(t)
+		grant(r, "alfa", "2026-11-09T09:00:00.000Z") // Альфа's days from the 10th on are the board's
+		r.read(t, s)
+		setHub(t, s, ctx, cutDay)
+	}
+	waits := func(t *testing.T, s *db.Store, person, date string) bool {
+		t.Helper()
+		return count(t, s, `SELECT count(*) FROM payroll_unentered WHERE person = ? AND date = ? AND status = 'unknown'
+			AND reason LIKE 'по отчёту не начислено: сдаёт смену доской%'`, person, date) == 1
+	}
+
+	t.Run("a board day with a post and a share waits for its Hub report", func(t *testing.T) {
+		s, ctx := reportWeek(t)
+		setReports(t, s, ctx, cutDay)
+		board(t, s, ctx)
+		enablePots(t, s)
+		// Альфа's 10th: her post, no Hub report yet; the share of 12 comes while she has not confirmed the day.
+		deliverPot(t, s, 1, "posted", cutDay, "alfa", 83)
+		if !waits(t, s, "alfa", cutDay) {
+			t.Fatalf("the share released the board day:\n%s", rows(t, s, `SELECT * FROM payroll_unentered`))
+		}
+		// The share itself is booked (12 at 25%, no fix); the day's shift is not, and the payout waits for it.
+		if got := dayOf(t, s, "alfa", cutDay); got != "3000000 0 3000000 reports" {
+			t.Fatalf("the waiting day: %s\n%s", got, books(t, s))
+		}
+		if b := blockers(t, s, "alfa"); !has(b, "reports_pending") || !has(b, "сдаёт смену доской") {
+			t.Fatalf("the payout does not wait for the board day: %q", b)
+		}
+		// She confirms the day: it accrues from her Hub report and the share together, 150 + 12 at 25%, and waits no more.
+		handIn(t, s, hubVersion(1, 1, 1, "alfa", cutDay, hubPage{"page-a", 110}, hubPage{"page-b", 40}))
+		if got := dayOf(t, s, "alfa", cutDay); got != "40500000 0 40500000 reports" {
+			t.Fatalf("the confirmed day: %s\n%s", got, books(t, s))
+		}
+		if waits(t, s, "alfa", cutDay) || has(blockers(t, s, "alfa"), "reports_pending") {
+			t.Fatalf("the confirmed day still waits:\n%s", rows(t, s, `SELECT * FROM payroll_unentered`))
+		}
+	})
+
+	t.Run("a share alone books and blocks nothing", func(t *testing.T) {
+		s, ctx := reportWeek(t)
+		setReports(t, s, ctx, cutDay)
+		board(t, s, ctx)
+		enablePots(t, s)
+		// Альфа did not work the 12th: no post, no sheet, no shift — only the share, 12 at 25%, no fix.
+		deliverPot(t, s, 1, "posted", "2026-11-12", "alfa", 85)
+		if got := dayOf(t, s, "alfa", "2026-11-12"); got != "3000000 0 3000000 reports" {
+			t.Fatalf("the share-only day: %s\n%s", got, books(t, s))
+		}
+		if n := count(t, s, `SELECT count(*) FROM payroll_unentered WHERE person = 'alfa' AND date = '2026-11-12'`); n != 0 {
+			t.Fatalf("the share-only day in «не занесено»:\n%s", rows(t, s, `SELECT * FROM payroll_unentered`))
+		}
+		if b := blockers(t, s, "alfa"); has(b, "12.11") {
+			t.Fatalf("the share-only day blocks the payout: %q", b)
+		}
+		// The next rebuild finds the day booked from the share alone and leaves it as it is.
+		n0 := count(t, s, `SELECT count(*) FROM entries`)
+		if _, err := payroll.Rebuild(ctx, s, reportNow); err != nil {
+			t.Fatal(err)
+		}
+		if got := dayOf(t, s, "alfa", "2026-11-12"); got != "3000000 0 3000000 reports" || count(t, s, `SELECT count(*) FROM entries`) != n0 {
+			t.Fatalf("the booked share-only day moved: %s\n%s", got, books(t, s))
+		}
+		if b := blockers(t, s, "alfa"); has(b, "12.11") {
+			t.Fatalf("the booked share-only day blocks the payout: %q", b)
+		}
+	})
+
+	t.Run("a sheet day keeps its booking", func(t *testing.T) {
+		s, ctx := reportWeek(t)
+		setReports(t, s, ctx, cutDay)
+		enablePots(t, s)
+		// Браво's 12th is in the sheet only (50 × 20% + 10), held as posted until a report comes.
+		if got := dayOf(t, s, "bravo", "2026-11-12"); got != "20000000 0 20000000 sheet" {
+			t.Fatalf("Браво's 12th before the share: %s", got)
+		}
+		deliverPot(t, s, 1, "posted", "2026-11-12", "bravo", 86)
+		if got := dayOf(t, s, "bravo", "2026-11-12"); got != "20000000 0 20000000 sheet" {
+			t.Fatalf("the share replaced the sheet day: %s\n%s", got, books(t, s))
+		}
+		if b := blockers(t, s, "bravo"); !has(b, "reports_pending") || !has(b, "отчёта нет") {
+			t.Fatalf("the sheet day with a share does not hold the payout: %q", b)
+		}
+		// Gone from the sheet, the day still stands as posted: the share does not stand in for its report either.
+		tables(t, s, ctx, map[string]map[string][][]payroll.Cell{
+			"Alpha": {"Альфа": pageTab("2026-11-09", "Page A", 0.25, 0, [7]any{80, 100, nil, nil, nil, nil, nil}),
+				"Браво": pageTab("2026-11-09", "Page A", 0.2, 10, [7]any{nil, 50, nil, nil, nil, nil, nil})},
+		})
+		if _, err := payroll.Rebuild(ctx, s, reportNow); err != nil {
+			t.Fatal(err)
+		}
+		if got := dayOf(t, s, "bravo", "2026-11-12"); got != "20000000 0 20000000 sheet" {
+			t.Fatalf("the cleared sheet day: %s\n%s", got, books(t, s))
+		}
+		if b := blockers(t, s, "bravo"); !has(b, "reports_pending") || !has(b, "день проведён") {
+			t.Fatalf("the posted day with a share does not hold the payout: %q", b)
+		}
+	})
+}
